@@ -1,0 +1,91 @@
+x-atlas-api-image: &atlas-api-image
+  image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/api:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+  platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+services:
+  artifact-storage-init:
+    <<: *atlas-api-image
+
+  celery-dispatch:
+    <<: *atlas-api-image
+
+  celery-maintenance:
+    <<: *atlas-api-image
+
+  celery-beat:
+    <<: *atlas-api-image
+
+  plugin-runner:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/plugin-runner:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  office-renderer:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/office-renderer:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  web:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/web:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  postgres:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/postgres:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  redis:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/redis:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  qdrant:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/qdrant:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
+  embedding-model-init:
+    <<: *atlas-api-image
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ATLAS_FASTEMBED_CACHE: /var/lib/atlas-fastembed
+      ATLAS_EMBEDDING_OFFLINE: "true"
+      HF_HOME: /var/lib/atlas-fastembed/huggingface
+      HF_HUB_CACHE: /var/lib/atlas-fastembed/huggingface/hub
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_XET: "1"
+      TIKTOKEN_CACHE_DIR: /var/lib/atlas-tiktoken
+    volumes:
+      - atlas-production-fastembed:/var/lib/atlas-fastembed
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.async_runtime.offline_runtime_assets
+
+  api:
+    <<: *atlas-api-image
+    environment:
+      ATLAS_EMBEDDING_OFFLINE: "true"
+      HF_HUB_OFFLINE: "1"
+      TIKTOKEN_CACHE_DIR: /var/lib/atlas-tiktoken
+    depends_on:
+      embedding-model-init:
+        condition: service_completed_successfully
+
+  celery-processing:
+    <<: *atlas-api-image
+    environment:
+      ATLAS_EMBEDDING_OFFLINE: "true"
+      HF_HUB_OFFLINE: "1"
+      TIKTOKEN_CACHE_DIR: /var/lib/atlas-tiktoken
+    depends_on:
+      embedding-model-init:
+        condition: service_completed_successfully
+
+  celery-indexing:
+    <<: *atlas-api-image
+    environment:
+      ATLAS_EMBEDDING_OFFLINE: "true"
+      HF_HUB_OFFLINE: "1"
+      TIKTOKEN_CACHE_DIR: /var/lib/atlas-tiktoken
+    depends_on:
+      embedding-model-init:
+        condition: service_completed_successfully

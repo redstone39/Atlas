@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Run the explicit PostgreSQL suite against one dedicated disposable database."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+API_ROOT = Path(__file__).resolve().parents[1]
+VENV_PYTHON = API_ROOT / ".venv/bin/python"
+
+
+def _use_project_python() -> None:
+    if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+        os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve())])
+
+
+def _validated_url() -> tuple[str, str]:
+    from sqlalchemy.engine import make_url
+
+    database_url = os.environ.get("ATLAS_TEST_POSTGRES_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("ATLAS_TEST_POSTGRES_URL is required")
+    try:
+        parsed = make_url(database_url)
+    except Exception as exc:
+        raise RuntimeError("ATLAS_TEST_POSTGRES_URL must be a valid PostgreSQL URL") from exc
+    if not parsed.drivername.startswith("postgresql"):
+        raise RuntimeError("ATLAS_TEST_POSTGRES_URL must use PostgreSQL")
+    database_name = parsed.database or ""
+    if database_name == "atlas_production" or not database_name.startswith(
+        "atlas_baseline_test_"
+    ):
+        raise RuntimeError(
+            "PostgreSQL checks require a dedicated atlas_baseline_test_* database"
+        )
+    plain_url = parsed.set(drivername="postgresql").render_as_string(
+        hide_password=False
+    )
+    return plain_url, database_name
+
+
+def _reset_verified_database(plain_url: str, expected_name: str) -> None:
+    import psycopg
+
+    try:
+        with psycopg.connect(plain_url, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT current_database()")
+                actual_name = cursor.fetchone()[0]
+                if actual_name != expected_name or not actual_name.startswith(
+                    "atlas_baseline_test_"
+                ):
+                    raise RuntimeError(
+                        "Connected database does not match the validated dedicated test database"
+                    )
+                cursor.execute("DROP SCHEMA public CASCADE")
+                cursor.execute("CREATE SCHEMA public")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("Unable to connect to the dedicated PostgreSQL test database") from exc
+
+
+def _apply_baseline(database_url: str) -> None:
+    sys.path.insert(0, str(API_ROOT / "src"))
+    from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+
+    runtime = PostgresRuntime.from_url(database_url)
+    try:
+        runtime.bootstrap_schema()
+    finally:
+        runtime.engine.dispose()
+
+
+def _pytest(*args: str, environment: dict[str, str]) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args],
+        cwd=API_ROOT,
+        env=environment,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pytest failed with exit status {result.returncode}")
+
+
+def _collect_test_nodes(target: str, *, environment: dict[str, str]) -> tuple[str, ...]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--collect-only",
+            "-q",
+            target,
+        ],
+        cwd=API_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        raise RuntimeError(f"pytest collection failed with exit status {result.returncode}")
+    nodes = tuple(
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    )
+    if not nodes:
+        raise RuntimeError("PostgreSQL integration collection returned no test nodes")
+    print(f"check-postgres: collected {len(nodes)} isolated test nodes")
+    return nodes
+
+
+def main() -> int:
+    _use_project_python()
+    database_url = ""
+    plain_url = ""
+    database_name = ""
+    try:
+        plain_url, database_name = _validated_url()
+        _reset_verified_database(plain_url, database_name)
+        database_url = os.environ["ATLAS_TEST_POSTGRES_URL"].strip()
+        _apply_baseline(database_url)
+        environment = os.environ.copy()
+        environment.pop("ATLAS_PRODUCTION_DATABASE_URL", None)
+        environment["ATLAS_TEST_POSTGRES_URL"] = database_url
+        environment["PYTHONPATH"] = "src"
+        target = "tests/postgres_integration"
+        test_nodes = _collect_test_nodes(target, environment=environment)
+        for test_node in test_nodes:
+            _reset_verified_database(plain_url, database_name)
+            _apply_baseline(database_url)
+            _pytest("-q", test_node, environment=environment)
+    except RuntimeError as exc:
+        print(f"check-postgres: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if plain_url and database_name and database_url:
+            try:
+                _reset_verified_database(plain_url, database_name)
+                _apply_baseline(database_url)
+            except RuntimeError as exc:
+                print(
+                    f"check-postgres: failed to restore baseline head: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

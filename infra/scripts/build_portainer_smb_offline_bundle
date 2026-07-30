@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from collections.abc import Mapping
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+BASE = REPOSITORY / "infra" / "docker-compose.p1.yml"
+SMB_OVERRIDE = REPOSITORY / "infra" / "docker-compose.portainer-smb.override.yml"
+IMAGE_OVERRIDE = (
+    REPOSITORY / "infra" / "docker-compose.portainer-smb.offline-images.yml"
+)
+IMAGE_LOCK = REPOSITORY / "infra" / "portainer-offline-image-lock.json"
+OFFLINE_RUNBOOK = REPOSITORY / "docs" / "deployment" / "portainer-smb-offline.md"
+SMB_RUNBOOK = REPOSITORY / "docs" / "deployment" / "portainer-smb.md"
+PRODUCTION_NOTICES = REPOSITORY / "THIRD_PARTY_NOTICES.md"
+RENDERER_NOTICES = REPOSITORY / "office-renderer" / "THIRD_PARTY_NOTICES.md"
+COMPOSE_FILES = (BASE, SMB_OVERRIDE, IMAGE_OVERRIDE)
+BUILD_SERVICES = ("api", "plugin-runner", "office-renderer", "web")
+VARIABLE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+IMAGE_PREFIX_RE = re.compile(r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*$")
+SUPPORTED_PLATFORMS = {"linux/amd64", "linux/arm64"}
+INFRASTRUCTURE_SERVICES = {"postgres", "qdrant", "redis"}
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+STANDARD_PROXY_VARIABLES = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+}
+
+
+class BundleError(RuntimeError):
+    pass
+
+
+def compose_interpolations(value: str) -> list[str]:
+    expressions: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        start = value.find("${", cursor)
+        if start < 0:
+            break
+        depth = 1
+        end = start + 2
+        while end < len(value) and depth:
+            if value.startswith("${", end):
+                depth += 1
+                end += 2
+                continue
+            if value[end] == "}":
+                depth -= 1
+            end += 1
+        if depth:
+            raise BundleError("unterminated Compose interpolation")
+        expressions.append(value[start:end])
+        cursor = end
+    return expressions
+
+
+def run(command: list[str], *, environment: dict[str, str]) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=REPOSITORY,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip().splitlines()
+        safe_detail = detail[-1] if detail else "command failed"
+        raise BundleError(f"{Path(command[0]).name}: {safe_detail}")
+    return completed.stdout
+
+
+def interpolation_contract() -> dict[str, str]:
+    expressions: dict[str, set[str]] = {}
+    for path in COMPOSE_FILES:
+        for expression in compose_interpolations(path.read_text(encoding="utf-8")):
+            match = VARIABLE_RE.match(expression)
+            if match is None:
+                raise BundleError(f"unsupported Compose interpolation in {path.name}")
+            expressions.setdefault(match.group(1), set()).add(expression)
+    ambiguous = {name: values for name, values in expressions.items() if len(values) != 1}
+    if ambiguous:
+        raise BundleError(f"ambiguous Compose interpolation: {sorted(ambiguous)}")
+    return {name: next(iter(values)) for name, values in expressions.items()}
+
+
+def compose_environment(
+    *, version: str, image_prefix: str, platform: str
+) -> tuple[dict[str, str], dict[str, str]]:
+    environment = dict(os.environ)
+    replacements: dict[str, str] = {}
+    contract = interpolation_contract()
+    numeric_variables = {
+        "ATLAS_PRODUCTION_API_PORT",
+        "ATLAS_PRODUCTION_POSTGRES_PORT",
+        "ATLAS_PRODUCTION_WEB_PORT",
+    }
+    for index, (name, expression) in enumerate(sorted(contract.items()), start=1):
+        if name == "ATLAS_OFFLINE_VERSION":
+            environment[name] = version
+            continue
+        if name == "ATLAS_OFFLINE_IMAGE_PREFIX":
+            environment[name] = image_prefix
+            continue
+        if name == "ATLAS_OFFLINE_PLATFORM":
+            environment[name] = platform
+            continue
+        if name == "ATLAS_OFFLINE_PLATFORM_TAG":
+            environment[name] = platform.replace("/", "-")
+            continue
+        placeholder = (
+            str(49000 + index)
+            if name in numeric_variables
+            else f"atlasplaceholder{index:03d}"
+        )
+        environment[name] = placeholder
+        replacements[placeholder] = expression
+    return environment, replacements
+
+
+def docker_command_environment(
+    compose_environment: dict[str, str],
+    *,
+    host_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    environment = dict(compose_environment)
+    source = host_environment if host_environment is not None else os.environ
+    for name in STANDARD_PROXY_VARIABLES:
+        if name in source:
+            environment[name] = source[name]
+        else:
+            environment.pop(name, None)
+    return environment
+
+
+def compose_command(*arguments: str) -> list[str]:
+    command = ["docker", "compose"]
+    for path in COMPOSE_FILES:
+        command.extend(("-f", str(path)))
+    command.extend(arguments)
+    return command
+
+
+def resolved_model(environment: dict[str, str]) -> dict[str, object]:
+    output = run(
+        compose_command("config", "--format", "json"),
+        environment=environment,
+    )
+    model = json.loads(output)
+    services = model.get("services", {})
+    if not isinstance(services, dict):
+        raise BundleError("resolved Compose has no services")
+    for name, service in services.items():
+        if not isinstance(service, dict) or not service.get("image"):
+            raise BundleError(f"service {name} has no offline image")
+        service.pop("build", None)
+        service["pull_policy"] = "never"
+    model.pop("include", None)
+    for key in tuple(model):
+        if key.startswith("x-"):
+            model.pop(key)
+    return model
+
+
+def render_compose_yaml(
+    model: dict[str, object],
+    *,
+    environment: dict[str, str],
+    replacements: dict[str, str],
+) -> str:
+    with tempfile.TemporaryDirectory(prefix="atlas-offline-compose-") as directory:
+        intermediate = Path(directory) / "compose.json"
+        intermediate.write_text(
+            json.dumps(model, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        rendered = run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(intermediate),
+                "config",
+                "--format",
+                "yaml",
+            ],
+            environment=environment,
+        )
+    for placeholder, expression in replacements.items():
+        rendered = rendered.replace(placeholder, expression)
+    if "build:" in rendered or "include:" in rendered:
+        raise BundleError("offline Compose retained a build/include directive")
+    return rendered
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare_output(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if any(path.iterdir()):
+        raise BundleError("output directory must be empty")
+
+
+def build_images(environment: dict[str, str]) -> None:
+    run(
+        compose_command("build", *BUILD_SERVICES),
+        environment=environment,
+    )
+
+
+def image_lock() -> dict[str, object]:
+    value = json.loads(IMAGE_LOCK.read_text(encoding="utf-8"))
+    if value.get("schema_version") != "atlas-portainer-offline-image-lock-v1":
+        raise BundleError("offline infrastructure image lock is invalid")
+    images = value.get("images")
+    if not isinstance(images, dict) or set(images) != INFRASTRUCTURE_SERVICES:
+        raise BundleError("offline infrastructure image lock service set is invalid")
+    for service_name in sorted(INFRASTRUCTURE_SERVICES):
+        entry = images[service_name]
+        if not isinstance(entry, dict):
+            raise BundleError(f"offline image lock entry is invalid for {service_name}")
+        if not isinstance(entry.get("repository"), str) or not entry["repository"]:
+            raise BundleError(f"offline image repository is invalid for {service_name}")
+        if not isinstance(entry.get("source_tag"), str) or not entry["source_tag"]:
+            raise BundleError(f"offline image source tag is invalid for {service_name}")
+        platform_digests = entry.get("platform_digests")
+        if (
+            not isinstance(platform_digests, dict)
+            or set(platform_digests) != SUPPORTED_PLATFORMS
+            or any(
+                not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest)
+                for digest in platform_digests.values()
+            )
+        ):
+            raise BundleError(
+                f"offline image platform digest set is invalid for {service_name}"
+            )
+    return value
+
+
+def load_infrastructure_images(
+    model: dict[str, object],
+    *,
+    environment: dict[str, str],
+    platform: str,
+) -> dict[str, dict[str, str]]:
+    lock = image_lock()
+    source_records: dict[str, dict[str, str]] = {}
+    for service_name in sorted(INFRASTRUCTURE_SERVICES):
+        entry = lock["images"][service_name]
+        digest = entry["platform_digests"].get(platform)
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            raise BundleError(f"no locked {platform} image for {service_name}")
+        source = f"{entry['repository']}@{digest}"
+        target = model["services"][service_name]["image"]
+        run(
+            ["docker", "pull", "--platform", platform, source],
+            environment=environment,
+        )
+        run(["docker", "image", "tag", source, target], environment=environment)
+        source_records[target] = {
+            "source_tag": entry["source_tag"],
+            "source_digest": digest,
+        }
+    return source_records
+
+
+def save_images(
+    model: dict[str, object],
+    *,
+    environment: dict[str, str],
+    platform: str,
+    destination: Path,
+) -> tuple[list[str], list[dict[str, object]]]:
+    source_records = load_infrastructure_images(
+        model,
+        environment=environment,
+        platform=platform,
+    )
+    images = sorted({service["image"] for service in model["services"].values()})
+    expected_os, expected_architecture = platform.split("/", 1)
+    records: list[dict[str, object]] = []
+    for image in images:
+        inspected = json.loads(
+            run(["docker", "image", "inspect", image], environment=environment)
+        )[0]
+        observed = f"{inspected['Os']}/{inspected['Architecture']}"
+        if (
+            inspected["Os"] != expected_os
+            or inspected["Architecture"] != expected_architecture
+        ):
+            raise BundleError(
+                f"image platform mismatch for {image}: expected {platform}, got {observed}"
+            )
+        records.append(
+            {
+                "reference": image,
+                "image_id": inspected["Id"],
+                "platform": platform,
+                **source_records.get(image, {}),
+            }
+        )
+    run(
+        ["docker", "image", "save", "--output", str(destination), *images],
+        environment=environment,
+    )
+    return images, records
+
+
+def write_bundle(
+    *,
+    output: Path,
+    version: str,
+    image_prefix: str,
+    platform: str,
+    compose_only: bool,
+) -> None:
+    prepare_output(output)
+    image_lock()
+    environment, replacements = compose_environment(
+        version=version,
+        image_prefix=image_prefix,
+        platform=platform,
+    )
+    docker_environment = docker_command_environment(environment)
+    model = resolved_model(environment)
+    compose_path = output / "docker-compose.yml"
+    compose_path.write_text(
+        render_compose_yaml(
+            model,
+            environment=environment,
+            replacements=replacements,
+        ),
+        encoding="utf-8",
+    )
+    shutil.copyfile(OFFLINE_RUNBOOK, output / "README.md")
+    shutil.copyfile(SMB_RUNBOOK, output / "SMB-RUNBOOK.md")
+    shutil.copyfile(PRODUCTION_NOTICES, output / "THIRD_PARTY_NOTICES.md")
+    shutil.copyfile(
+        RENDERER_NOTICES,
+        output / "OFFICE_RENDERER_THIRD_PARTY_NOTICES.md",
+    )
+    shutil.copyfile(IMAGE_LOCK, output / "IMAGE-LOCK.json")
+    platform_tag = platform.replace("/", "-")
+    archive_name = f"atlas-portainer-images-{version}-{platform_tag}.tar"
+    images = sorted({service["image"] for service in model["services"].values()})
+    image_records = [
+        {
+            "reference": image,
+            "image_id": None,
+            "platform": platform,
+        }
+        for image in images
+    ]
+    if not compose_only:
+        build_images(docker_environment)
+        images, image_records = save_images(
+            model,
+            environment=docker_environment,
+            platform=platform,
+            destination=output / archive_name,
+        )
+    manifest = {
+        "bundle_format": "atlas-portainer-smb-offline-v1",
+        "version": version,
+        "platform": platform,
+        "compose_file": "docker-compose.yml",
+        "image_archive": None if compose_only else archive_name,
+        "images": images,
+        "image_records": image_records,
+        "documentation": [
+            "README.md",
+            "SMB-RUNBOOK.md",
+            "THIRD_PARTY_NOTICES.md",
+            "OFFICE_RENDERER_THIRD_PARTY_NOTICES.md",
+            "IMAGE-LOCK.json",
+        ],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    manifest_path = output / "bundle-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    checksum_files = sorted(
+        path for path in output.iterdir() if path.name != "SHA256SUMS"
+    )
+    (output / "SHA256SUMS").write_text(
+        "".join(f"{sha256(path)}  {path.name}\n" for path in checksum_files),
+        encoding="utf-8",
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build an offline Atlas Portainer SMB deployment bundle."
+    )
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--image-prefix", default="atlas-offline")
+    parser.add_argument("--platform", required=True, choices=sorted(SUPPORTED_PLATFORMS))
+    parser.add_argument(
+        "--compose-only",
+        action="store_true",
+        help="Generate and validate metadata without building/saving images.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if not VERSION_RE.fullmatch(args.version):
+        print("offline bundle build failed: invalid version", file=sys.stderr)
+        return 2
+    if not IMAGE_PREFIX_RE.fullmatch(args.image_prefix):
+        print("offline bundle build failed: invalid image prefix", file=sys.stderr)
+        return 2
+    try:
+        write_bundle(
+            output=args.output_dir.resolve(),
+            version=args.version,
+            image_prefix=args.image_prefix,
+            platform=args.platform,
+            compose_only=args.compose_only,
+        )
+    except BundleError as exc:
+        print(f"offline bundle build failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"offline Portainer bundle written to {args.output_dir.resolve()}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

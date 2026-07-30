@@ -1,0 +1,304 @@
+x-atlas-worker: &atlas-worker
+  build:
+    context: ..
+    dockerfile: api/Dockerfile
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=512m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: atlas_production
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: atlas
+    ports:
+      - "127.0.0.1:${ATLAS_PRODUCTION_POSTGRES_PORT:-15435}:5432"
+    volumes:
+      - atlas-production-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas_production"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:8.8.0-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - atlas-production-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.1-unprivileged
+    volumes:
+      - atlas-production-qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "sh", "-c", "grep -q ':18BD ' /proc/net/tcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  artifact-storage-init:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_BOOTSTRAP_ADMIN_EMAIL: ${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-}
+      ATLAS_BOOTSTRAP_ADMIN_PASSWORD: ${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-}
+      ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
+      ATLAS_ARTIFACT_ALLOWED_PARENTS: /srv/atlas-artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - atlas-production-artifacts:/srv/atlas-artifacts
+      - atlas-production-artifact-config:/run/atlas/artifact-storage
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.infrastructure.local_pilot_init
+
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
+      ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
+      ATLAS_PLUGIN_RUNNER_URL: http://plugin-runner:8013
+      ATLAS_OFFICE_RENDERER_URL: http://office-renderer:8014
+      ATLAS_REDIS_URL: redis://redis:6379/0
+      ATLAS_QDRANT_URL: http://qdrant:6333
+      ATLAS_PROCESSING_PLUGIN_ARTIFACT_ROOT: /var/lib/atlas/plugins
+      ATLAS_PLUGIN_TRUSTED_KEYS_JSON: ${ATLAS_PLUGIN_TRUSTED_KEYS_JSON:-}
+      ATLAS_ALLOW_UNSIGNED_PLUGINS: "false"
+      ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
+      ATLAS_ARTIFACT_ALLOWED_PARENTS: /srv/atlas-artifacts
+      ATLAS_UPLOAD_MAX_BYTES: ${ATLAS_UPLOAD_MAX_BYTES:-262144000}
+      ATLAS_PDF_MAX_PAGES: ${ATLAS_PDF_MAX_PAGES:-3000}
+      ATLAS_FASTEMBED_CACHE: /var/lib/atlas-fastembed
+      HF_HOME: /var/lib/atlas-fastembed/huggingface
+      HF_HUB_CACHE: /var/lib/atlas-fastembed/huggingface/hub
+      HF_XET_CACHE: /var/lib/atlas-fastembed/huggingface/xet
+      XDG_CACHE_HOME: /var/lib/atlas-fastembed/xdg
+      HF_HUB_DISABLE_XET: "1"
+    ports:
+      - "127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}:8002"
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+    volumes:
+      - atlas-production-plugin-packages:/var/lib/atlas/plugins
+      - atlas-production-artifacts:/srv/atlas-artifacts
+      - atlas-production-artifact-config:/run/atlas/artifact-storage:ro
+      - atlas-production-fastembed:/var/lib/atlas-fastembed
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/api/v1/ops/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  plugin-runner:
+    build:
+      context: ..
+      dockerfile: plugin-runner/Dockerfile
+    environment:
+      ATLAS_PLUGIN_TRUSTED_KEYS_JSON: ${ATLAS_PLUGIN_TRUSTED_KEYS_JSON:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8013/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  office-renderer:
+    build:
+      context: ..
+      dockerfile: office-renderer/Dockerfile
+    environment:
+      ATLAS_PDF_MAX_PAGES: ${ATLAS_PDF_MAX_PAGES:-3000}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8014/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+
+  celery-dispatch:
+    <<: *atlas-worker
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.dispatch", "--loglevel=INFO", "--concurrency=1"]
+    mem_limit: 256m
+
+  celery-processing:
+    <<: *atlas-worker
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
+      ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
+      ATLAS_REDIS_URL: redis://redis:6379/0
+      ATLAS_PDF_MAX_PAGES: ${ATLAS_PDF_MAX_PAGES:-3000}
+      ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS: ${ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS-60}
+      ATLAS_PLUGIN_RUNNER_URL: http://plugin-runner:8013
+      ATLAS_OFFICE_RENDERER_URL: http://office-renderer:8014
+      ATLAS_PROCESSING_PLUGIN_ARTIFACT_ROOT: /var/lib/atlas/plugins
+      ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
+      ATLAS_ARTIFACT_ALLOWED_PARENTS: /srv/atlas-artifacts
+      ATLAS_FASTEMBED_CACHE: /var/lib/atlas-fastembed
+      HF_HOME: /var/lib/atlas-fastembed/huggingface
+      HF_HUB_CACHE: /var/lib/atlas-fastembed/huggingface/hub
+      HF_XET_CACHE: /var/lib/atlas-fastembed/huggingface/xet
+      XDG_CACHE_HOME: /var/lib/atlas-fastembed/xdg
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - atlas-production-plugin-packages:/var/lib/atlas/plugins
+      - atlas-production-artifacts:/srv/atlas-artifacts
+      - atlas-production-artifact-config:/run/atlas/artifact-storage:ro
+      - atlas-production-fastembed:/var/lib/atlas-fastembed
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      plugin-runner:
+        condition: service_healthy
+      office-renderer:
+        condition: service_healthy
+    command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.processing", "--loglevel=INFO", "--concurrency=1"]
+    mem_limit: 1g
+
+  celery-indexing:
+    <<: *atlas-worker
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_REDIS_URL: redis://redis:6379/0
+      ATLAS_QDRANT_URL: http://qdrant:6333
+      ATLAS_FASTEMBED_CACHE: /var/lib/atlas-fastembed
+      HF_HOME: /var/lib/atlas-fastembed/huggingface
+      HF_HUB_CACHE: /var/lib/atlas-fastembed/huggingface/hub
+      HF_XET_CACHE: /var/lib/atlas-fastembed/huggingface/xet
+      XDG_CACHE_HOME: /var/lib/atlas-fastembed/xdg
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - atlas-production-fastembed:/var/lib/atlas-fastembed
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.indexing", "--loglevel=INFO", "--concurrency=1"]
+    mem_limit: 2g
+
+  celery-maintenance:
+    <<: *atlas-worker
+    environment:
+      ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
+      ATLAS_REDIS_URL: redis://redis:6379/0
+      ATLAS_QDRANT_URL: http://qdrant:6333
+      ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
+      ATLAS_ARTIFACT_ALLOWED_PARENTS: /srv/atlas-artifacts
+    volumes:
+      - atlas-production-artifacts:/srv/atlas-artifacts
+      - atlas-production-artifact-config:/run/atlas/artifact-storage:ro
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.maintenance", "--loglevel=INFO", "--concurrency=1"]
+    mem_limit: 512m
+
+  celery-beat:
+    <<: *atlas-worker
+    environment:
+      ATLAS_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    mem_limit: 256m
+
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    environment:
+      ATLAS_PRODUCTION_API_PROXY_TARGET: http://api:8002
+    ports:
+      - "127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}:5174"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5174/login').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  atlas-production-postgres-data:
+  atlas-production-redis-data:
+  atlas-production-qdrant-data:
+  atlas-production-fastembed:
+  atlas-production-plugin-packages:
+  atlas-production-artifacts:
+  atlas-production-artifact-config:

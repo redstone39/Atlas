@@ -1,0 +1,6 @@
+name: atlas-production-p1
+
+include:
+  - path:
+      - ./docker-compose.p1.yml
+      - ./docker-compose.portainer-smb.override.yml

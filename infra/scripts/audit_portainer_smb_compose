@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[2]
+COMPOSE = ROOT / "infra" / "docker-compose.portainer-smb.yml"
+REQUIRED = {
+    "ATLAS_SMB_HOST": "smb.example.internal",
+    "ATLAS_SMB_SHARE": "atlas",
+    "ATLAS_SMB_SUBDIR": "artifacts",
+    "ATLAS_SMB_USERNAME": "atlas-operator",
+    "ATLAS_SMB_PASSWORD": "audit-dummy-password",
+    "ATLAS_SMB_GENERATION": "7",
+    "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
+    "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
+}
+PROXY_INPUTS = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+}
+STANDARD_PROXY_ENVIRONMENT = PROXY_INPUTS
+AZURE_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
+
+
+def resolve(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(COMPOSE),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def fail(message: str) -> None:
+    print(f"portainer SMB compose audit failed: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+environment = dict(os.environ)
+for name in PROXY_INPUTS:
+    environment.pop(name, None)
+environment.update(REQUIRED)
+resolved = resolve(environment)
+if resolved.returncode != 0:
+    fail("Compose could not resolve with the documented variables")
+model = json.loads(resolved.stdout)
+services = model["services"]
+
+proxy_consumers = {"api", "celery-processing"}
+for name, service in services.items():
+    service_environment = service.get("environment", {})
+    if STANDARD_PROXY_ENVIRONMENT & set(service_environment):
+        fail(f"standard proxy environment leaked into service {name}")
+    if name in proxy_consumers:
+        if AZURE_PROXY_ENVIRONMENT not in service_environment:
+            fail(f"{name} is missing the optional proxy contract")
+        if service_environment[AZURE_PROXY_ENVIRONMENT] != "":
+            fail(f"{name} did not preserve direct Azure behavior by default")
+    elif AZURE_PROXY_ENVIRONMENT in service_environment:
+        fail(f"Azure proxy setting leaked into unrelated service {name}")
+
+http_only_environment = dict(environment)
+http_only_environment["http_proxy"] = "http://fallback-proxy.example.internal:8080"
+http_only_resolved = resolve(http_only_environment)
+if http_only_resolved.returncode != 0:
+    fail("Compose could not resolve the lowercase HTTP proxy fallback")
+http_only_services = json.loads(http_only_resolved.stdout)["services"]
+for name in proxy_consumers:
+    if (
+        http_only_services[name]["environment"][AZURE_PROXY_ENVIRONMENT]
+        != http_only_environment["http_proxy"]
+    ):
+        fail(f"{name} did not apply the HTTP proxy fallback")
+
+lowercase_environment = dict(environment)
+lowercase_environment.update({
+    "http_proxy": "http://http-proxy.example.internal:8080",
+    "https_proxy": "http://https-proxy.example.internal:8443",
+})
+lowercase_resolved = resolve(lowercase_environment)
+if lowercase_resolved.returncode != 0:
+    fail("Compose could not resolve lowercase optional proxy inputs")
+lowercase_model = json.loads(lowercase_resolved.stdout)
+lowercase_services = lowercase_model["services"]
+for name in proxy_consumers:
+    service_environment = lowercase_services[name]["environment"]
+    if service_environment[AZURE_PROXY_ENVIRONMENT] != lowercase_environment["https_proxy"]:
+        fail(f"{name} did not prefer the lowercase HTTPS proxy for Azure")
+
+uppercase_environment = dict(lowercase_environment)
+uppercase_environment.update({
+    "HTTP_PROXY": "http://upper-http-proxy.example.internal:8080",
+    "HTTPS_PROXY": "http://upper-https-proxy.example.internal:8443",
+})
+uppercase_resolved = resolve(uppercase_environment)
+if uppercase_resolved.returncode != 0:
+    fail("Compose could not resolve uppercase optional proxy inputs")
+uppercase_services = json.loads(uppercase_resolved.stdout)["services"]
+for name in proxy_consumers:
+    if (
+        uppercase_services[name]["environment"][AZURE_PROXY_ENVIRONMENT]
+        != uppercase_environment["HTTPS_PROXY"]
+    ):
+        fail(f"{name} did not apply uppercase HTTPS proxy precedence")
+
+if lowercase_model["volumes"]["atlas-production-artifacts"] != model["volumes"][
+    "atlas-production-artifacts"
+]:
+    fail("proxy-only configuration changed SMB volume identity or DriverOpts")
+
+artifact_consumers = {
+    name
+    for name, service in services.items()
+    if any(
+        mount.get("source") == "atlas-production-artifacts"
+        for mount in service.get("volumes", [])
+    )
+}
+expected_consumers = {
+    "api",
+    "artifact-storage-init",
+    "celery-processing",
+    "celery-maintenance",
+}
+if artifact_consumers != expected_consumers:
+    fail("artifact volume consumer set drifted")
+
+expected_artifact_gated = expected_consumers - {"artifact-storage-init"}
+expected_gated = expected_artifact_gated | {
+    "celery-dispatch",
+    "celery-indexing",
+}
+gated = {
+    name
+    for name, service in services.items()
+    if service.get("depends_on", {})
+    .get("artifact-storage-init", {})
+    .get("condition")
+    == "service_completed_successfully"
+}
+if gated != expected_gated:
+    fail("artifact consumers are not gated on initializer success")
+
+smb_coordinates = {
+    "ATLAS_SMB_HOST",
+    "ATLAS_SMB_SHARE",
+    "ATLAS_SMB_SUBDIR",
+    "ATLAS_SMB_USERNAME",
+    "ATLAS_SMB_DOMAIN",
+    "ATLAS_SMB_VERSION",
+}
+if any("ATLAS_SMB_PASSWORD" in service.get("environment", {}) for service in services.values()):
+    fail("SMB password leaked into a service environment")
+for name, service in services.items():
+    exposed = smb_coordinates & set(service.get("environment", {}))
+    if name == "artifact-storage-init":
+        if exposed != smb_coordinates:
+            fail("initializer is missing non-secret SMB validation inputs")
+    elif exposed:
+        fail("SMB coordinates leaked into a long-running service environment")
+
+config_mounts = {
+    name: next(
+        (
+            mount
+            for mount in service.get("volumes", [])
+            if mount.get("source") == "atlas-production-artifact-config"
+        ),
+        None,
+    )
+    for name, service in services.items()
+}
+if config_mounts["artifact-storage-init"] is None or config_mounts[
+    "artifact-storage-init"
+].get("read_only", False):
+    fail("initializer must receive the artifact config volume read-write")
+for name in expected_artifact_gated:
+    mount = config_mounts[name]
+    if mount is None or not mount.get("read_only", False):
+        fail("artifact consumers must receive the artifact config volume read-only")
+
+volume = model["volumes"]["atlas-production-artifacts"]
+if volume.get("name") != "atlas-production-smb-g7":
+    fail("generation did not control the immutable volume name")
+if volume.get("driver") != "local" or volume.get("driver_opts", {}).get("type") != "cifs":
+    fail("artifact volume is not a local CIFS volume")
+
+missing_environment = dict(os.environ)
+for name in REQUIRED:
+    missing_environment.pop(name, None)
+missing = resolve(missing_environment)
+if missing.returncode == 0:
+    fail("Compose accepted a deployment with required variables missing")
+
+print("portainer SMB compose audit passed")

@@ -1,0 +1,808 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Barrier
+
+import pytest
+from sqlalchemy import delete, select, update
+
+from atlas_production.infrastructure.persistence.turn_runtime import (
+    AtlasTurnAcceptanceResourceRow,
+    AtlasTurnExecutionLeaseRow,
+    AtlasTurnExecutionRow,
+    AtlasTurnReleaseIntentRow,
+    AtlasTurnTerminalIntentRow,
+    AtlasTurnTerminalOutcomeRow,
+)
+from atlas_production.infrastructure.postgres_owner.turn_runtime import (
+    PostgresTurnRuntimeOwner,
+    TurnRuntimeBudgetExceeded,
+    TurnRuntimeCurrentnessConflict,
+    TurnRuntimeLeaseConflict,
+    TurnRuntimeReplayConflict,
+    TurnRuntimeTerminalConflict,
+)
+from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+from atlas_production.modules.turn_runtime.public import (
+    AcceptExecutionV1,
+    AllocateExecutionV1,
+    BeginResultGovernanceV1,
+    BeginToolInvocationV1,
+    BindContextV1,
+    CommitTerminalV1,
+    CompleteReleaseIntentV1,
+    CompleteToolInvocationV1,
+    ExecutionState,
+    FailCarrierExecutionV1,
+    FinalizeExpiredExecutionV1,
+    LeasePolicyV1,
+    PrepareTerminalV1,
+    RenewExecutionLeaseV1,
+    RequestModelActionV1,
+    RoutePolicyV1,
+    StageAcceptanceResourceV1,
+    TurnRouteSnapshotV2,
+)
+
+
+PREFIX = "atr020-runtime-owner-"
+
+
+def route_snapshot() -> TurnRouteSnapshotV2:
+    return TurnRouteSnapshotV2(
+        route_id="test-route",
+        route_revision=1,
+        runtime_policy_revision=1,
+        tokenizer_profile="cl100k_base",
+        context_window_tokens=128000,
+        max_input_tokens_per_invocation=112000,
+        max_output_tokens_per_invocation=16000,
+        max_tool_result_tokens_per_execution=16000,
+        max_total_tokens_per_conversation=256000,
+    )
+
+
+def _cleanup(runtime: PostgresRuntime) -> None:
+    pattern = f"{PREFIX}%"
+    with runtime.session_factory() as session, session.begin():
+        session.execute(
+            delete(AtlasTurnReleaseIntentRow).where(
+                AtlasTurnReleaseIntentRow.execution_id.like(pattern)
+            )
+        )
+        session.execute(
+            delete(AtlasTurnTerminalOutcomeRow).where(
+                AtlasTurnTerminalOutcomeRow.execution_id.like(pattern)
+            )
+        )
+        session.execute(
+            delete(AtlasTurnTerminalIntentRow).where(
+                AtlasTurnTerminalIntentRow.execution_id.like(pattern)
+            )
+        )
+        session.execute(
+            delete(AtlasTurnAcceptanceResourceRow).where(
+                AtlasTurnAcceptanceResourceRow.execution_id.like(pattern)
+            )
+        )
+        session.execute(
+            delete(AtlasTurnExecutionRow).where(
+                AtlasTurnExecutionRow.execution_id.like(pattern)
+            )
+        )
+
+
+@pytest.fixture(autouse=True)
+def clean_runtime_rows(postgres_runtime: PostgresRuntime):
+    _cleanup(postgres_runtime)
+    yield
+    _cleanup(postgres_runtime)
+
+
+def _owner(runtime: PostgresRuntime) -> PostgresTurnRuntimeOwner:
+    return PostgresTurnRuntimeOwner(runtime.session_factory)
+
+
+def _allocate(
+    owner: PostgresTurnRuntimeOwner,
+    suffix: str,
+    *,
+    max_tools: int = 2,
+    max_catalog_pages: int = 2,
+) -> object:
+    execution_id = f"{PREFIX}{suffix}"
+    return owner.allocate(
+        AllocateExecutionV1(
+            execution_id=execution_id,
+            turn_id=f"turn-{execution_id}",
+            conversation_id=f"conversation-{suffix}",
+            actor_id="actor-1",
+            holder_id="holder-1",
+            route_policy=RoutePolicyV1(
+                max_tool_invocations=max_tools,
+                max_catalog_pages=max_catalog_pages,
+                max_search_rounds=2,
+                max_unique_evidence=2,
+                max_provider_invocations=max_tools + 2,
+                context_token_budget=20,
+                tool_token_budget=20,
+                deadline_seconds=120,
+            ),
+            route=route_snapshot(),
+            lease_policy=LeasePolicyV1(ttl_seconds=30),
+            idempotency_key=f"allocate-{suffix}",
+            operation="create_turn",
+            retry_of_turn_id=None,
+            input_digest="0" * 64,
+            response_language="zh-TW",
+            applied_guidance_revision=0,
+            applied_guidance_digest=None,
+        )
+    )
+
+
+def _accept_and_bind(owner: PostgresTurnRuntimeOwner, snapshot: object):
+    accepted = owner.accept(
+        AcceptExecutionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            grant_ref="grant-1",
+            catalog_ref="catalog-1",
+        )
+    )
+    return owner.bind_context(
+        BindContextV1(
+            execution_id=accepted.execution_id,
+            expected_version=accepted.version,
+            fencing_token=accepted.lease.fencing_token,
+            context_pack_ref="context-1",
+        )
+    )
+
+
+def _tool_cycle(
+    owner: PostgresTurnRuntimeOwner,
+    snapshot: object,
+    ordinal: int,
+    *,
+    context_tokens: int = 2,
+):
+    requested = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            context_tokens=context_tokens,
+        )
+    )
+    started = owner.begin_tool(
+        BeginToolInvocationV1(
+            execution_id=requested.execution_id,
+            expected_version=requested.version,
+            fencing_token=requested.lease.fencing_token,
+            tool_invocation_id=f"tool-{requested.execution_id}-{ordinal}",
+            invocation_ordinal=ordinal,
+            tool_name="search",
+            schema_version="v1",
+            arguments_digest=f"{ordinal}" * 64,
+            reserve_catalog_pages=1 if ordinal == 1 else 0,
+            reserve_document_candidates=1,
+            reserve_search_rounds=1 if ordinal == 1 else 0,
+            reserve_unique_evidence=1,
+            reserve_tool_tokens=2,
+        )
+    )
+    return owner.complete_tool(
+        CompleteToolInvocationV1(
+            execution_id=started.execution_id,
+            expected_version=started.version,
+            fencing_token=started.lease.fencing_token,
+            tool_invocation_id=f"tool-{started.execution_id}-{ordinal}",
+            invocation_ordinal=ordinal,
+            result_ref=f"result-{ordinal}",
+            result_digest=f"{ordinal + 2}" * 64,
+            document_candidate_handles=["document-1", "document-1"],
+            unique_evidence_identities=["evidence-1", "evidence-1"],
+            catalog_pages=1 if ordinal == 1 else 0,
+            search_rounds=1 if ordinal == 1 else 0,
+            tool_tokens=2,
+        )
+    )
+
+
+def _prepare(owner: PostgresTurnRuntimeOwner, snapshot: object):
+    requested = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    governing = owner.begin_governance(
+        BeginResultGovernanceV1(
+            execution_id=requested.execution_id,
+            expected_version=requested.version,
+            fencing_token=requested.lease.fencing_token,
+            finalize_action_digest="f" * 64,
+        )
+    )
+    return owner.prepare_terminal(
+        PrepareTerminalV1(
+            execution_id=governing.execution_id,
+            expected_version=governing.version,
+            fencing_token=governing.lease.fencing_token,
+            evidence_pack_ref="evidence-pack-1",
+            governed_answer_draft_ref="answer-draft-1",
+            citation_binding_draft_ref="citation-draft-1",
+            audit_draft_ref="audit-draft-1",
+        )
+    )
+
+
+def test_allocation_exact_replay_conflict_and_competing_cas(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    first = _allocate(owner, "allocation")
+    replay = _allocate(owner, "allocation")
+    assert replay.execution_id == first.execution_id
+    assert replay.version == first.version == 1
+    conflicting = AllocateExecutionV1(
+        execution_id=first.execution_id,
+        turn_id=first.turn_id,
+        conversation_id=first.conversation_id,
+        actor_id=first.actor_id,
+        holder_id="other-holder",
+        route_policy=RoutePolicyV1(max_tool_invocations=2, max_provider_invocations=4),
+        route=route_snapshot(),
+        lease_policy=LeasePolicyV1(ttl_seconds=30),
+        idempotency_key="allocate-allocation",
+        operation="create_turn",
+        retry_of_turn_id=None,
+        input_digest="1" * 64,
+        response_language="zh-TW",
+        applied_guidance_revision=0,
+        applied_guidance_digest=None,
+    )
+    with pytest.raises(TurnRuntimeReplayConflict):
+        owner.allocate(conflicting)
+
+    command = AcceptExecutionV1(
+        execution_id=first.execution_id,
+        expected_version=first.version,
+        fencing_token=first.lease.fencing_token,
+        grant_ref="grant-1",
+        catalog_ref="catalog-1",
+    )
+    barrier = Barrier(2)
+
+    def compete() -> str:
+        barrier.wait()
+        try:
+            owner.accept(command)
+            return "accepted"
+        except TurnRuntimeCurrentnessConflict:
+            return "stale"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(lambda _: compete(), range(2))) == ["accepted", "stale"]
+
+
+def test_lease_renewal_is_fenced_and_expiry_is_terminal_no_takeover(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _allocate(owner, "lease")
+    for changes in (
+        {"holder_id": "wrong"},
+        {"fencing_token": snapshot.lease.fencing_token + 1},
+        {"expected_lease_version": snapshot.lease.lease_version + 1},
+    ):
+        payload = {
+            "execution_id": snapshot.execution_id,
+            "expected_lease_version": snapshot.lease.lease_version,
+            "fencing_token": snapshot.lease.fencing_token,
+            "holder_id": snapshot.lease.holder_id,
+            **changes,
+        }
+        with pytest.raises(TurnRuntimeLeaseConflict):
+            owner.renew_lease(RenewExecutionLeaseV1(**payload))
+
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.execute(
+            update(AtlasTurnExecutionLeaseRow)
+            .where(AtlasTurnExecutionLeaseRow.execution_id == snapshot.execution_id)
+            .values(expires_at=AtlasTurnExecutionLeaseRow.heartbeat_at + timedelta(microseconds=1))
+        )
+    with pytest.raises(TurnRuntimeLeaseConflict):
+        owner.renew_lease(
+            RenewExecutionLeaseV1(
+                execution_id=snapshot.execution_id,
+                expected_lease_version=1,
+                fencing_token=1,
+                holder_id="holder-1",
+            )
+        )
+    failed = owner.finalize_expired(
+        FinalizeExpiredExecutionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            expected_lease_version=1,
+            failure_code="lease_expired",
+            detected_by="lease_sweep",
+        )
+    )
+    assert failed.state == ExecutionState.TERMINAL_FAILED
+    assert failed.lease.holder_id == "holder-1"
+
+
+def test_pre_acceptance_saga_survives_failure_before_refs_are_bound(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _allocate(owner, "acceptance-saga")
+    for resource_owner, release_kind in (
+        ("authorization", "release_turn_grant"),
+        ("retrieval", "release_knowledge_catalog"),
+        ("context_engineering", "release_context_pack"),
+    ):
+        owner.stage_acceptance_resource(
+            StageAcceptanceResourceV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                resource_owner=resource_owner,
+                release_kind=release_kind,
+            )
+        )
+
+    failed = owner.fail_carrier(
+        FailCarrierExecutionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            holder_id=snapshot.lease.holder_id,
+            expected_lease_version=snapshot.lease.lease_version,
+            fencing_token=snapshot.lease.fencing_token,
+            failure_code="contract_violation",
+            detected_by="runtime_validator",
+        )
+    )
+    assert failed.state is ExecutionState.TERMINAL_FAILED
+    intents = owner.pending_release_intents(limit=10)
+    assert {(item.resource_owner, item.resource_ref) for item in intents} == {
+        ("authorization", f"execution-resource:authorization:{snapshot.execution_id}"),
+        ("retrieval", f"execution-resource:retrieval:{snapshot.execution_id}"),
+        (
+            "context_engineering",
+            f"execution-resource:context_engineering:{snapshot.execution_id}",
+        ),
+    }
+
+
+def test_expired_sweep_cas_loser_does_not_overwrite_terminal_outcome(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    primary = _owner(postgres_runtime)
+    snapshot = _allocate(primary, "sweep-race")
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.execute(
+            update(AtlasTurnExecutionLeaseRow)
+            .where(AtlasTurnExecutionLeaseRow.execution_id == snapshot.execution_id)
+            .values(
+                expires_at=AtlasTurnExecutionLeaseRow.heartbeat_at
+                + timedelta(microseconds=1)
+            )
+        )
+
+    class RacingOwner(PostgresTurnRuntimeOwner):
+        def finalize_expired(self, command: FinalizeExpiredExecutionV1):
+            primary.finalize_expired(
+                command.model_copy(
+                    update={
+                        "failure_code": "execution_carrier_lost",
+                        "detected_by": "startup_sweep",
+                    }
+                )
+            )
+            return super().finalize_expired(command)
+
+    assert RacingOwner(postgres_runtime.session_factory).fail_expired_leases(limit=1) == []
+    with postgres_runtime.session_factory() as session:
+        outcome = session.get(AtlasTurnTerminalOutcomeRow, snapshot.execution_id)
+        assert outcome is not None
+        assert outcome.failure_code == "execution_carrier_lost"
+
+
+def test_dedup_budgets_terminal_rollback_single_outcome_and_release_saga(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(owner, _allocate(owner, "journey"))
+    after_first = _tool_cycle(owner, snapshot, 1)
+    after_second = _tool_cycle(owner, after_first, 2)
+    assert after_second.budget.tool_invocations == 2
+    assert after_second.budget.document_candidates == 1
+    assert after_second.budget.unique_evidence == 1
+    assert after_second.budget.catalog_pages == 1
+    assert after_second.budget.search_rounds == 1
+    prepared = _prepare(owner, after_second)
+    with pytest.raises(TurnRuntimeTerminalConflict):
+        owner.commit_terminal(
+            CommitTerminalV1(
+                execution_id=prepared.execution_id,
+                expected_version=prepared.version,
+                fencing_token=prepared.lease.fencing_token,
+                terminal_commit_intent_ref="wrong-intent",
+            )
+        )
+    with postgres_runtime.session_factory() as session:
+        current = session.get(AtlasTurnExecutionRow, prepared.execution_id)
+        assert current is not None
+        assert current.state == ExecutionState.MATERIALIZING_TERMINAL.value
+        assert current.version == prepared.version
+    completed = owner.commit_terminal(
+        CommitTerminalV1(
+            execution_id=prepared.execution_id,
+            expected_version=prepared.version,
+            fencing_token=prepared.lease.fencing_token,
+            terminal_commit_intent_ref=prepared.terminal_commit_intent_ref,
+        )
+    )
+    assert completed.state == ExecutionState.TERMINAL_COMPLETED
+    assert [event.sequence for event in owner.events(completed.execution_id)] == sorted(
+        event.sequence for event in owner.events(completed.execution_id)
+    )
+    claimed = [
+        intent
+        for intent in owner.pending_release_intents(limit=50)
+        if intent.execution_id == completed.execution_id
+    ]
+    # Only leased acceptance resources are released. Immutable evidence and
+    # terminal drafts remain durable projection/audit inputs.
+    assert len(claimed) == 3
+    assert {item.resource_owner for item in claimed} == {
+        "authorization",
+        "retrieval",
+        "context_engineering",
+    }
+    assert all(intent.next_attempt_at is not None for intent in claimed)
+    # Active claims are not immediately double-claimed; their due timestamp
+    # makes them recoverable after a reconciler carrier loss.
+    assert not [
+        intent
+        for intent in owner.pending_release_intents(limit=50)
+        if intent.execution_id == completed.execution_id
+    ]
+    released = owner.complete_release_intent(
+        CompleteReleaseIntentV1(
+            release_intent_id=claimed[0].release_intent_id,
+            expected_status="releasing",
+            outcome="released",
+            failure_code=None,
+        )
+    )
+    assert released.status == "released"
+
+
+def test_context_budget_is_per_provider_invocation_while_usage_remains_cumulative(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(owner, _allocate(owner, "per-invocation-context"))
+
+    after_first = _tool_cycle(owner, snapshot, 1, context_tokens=12)
+    after_second = _tool_cycle(owner, after_first, 2, context_tokens=12)
+
+    assert after_second.budget.context_tokens == 24
+    assert after_second.budget.context_tokens > after_second.policy.context_token_budget
+
+    with pytest.raises(
+        TurnRuntimeBudgetExceeded,
+        match="per-invocation context token budget exceeded",
+    ):
+        owner.request_model_action(
+            RequestModelActionV1(
+                execution_id=after_second.execution_id,
+                expected_version=after_second.version,
+                fencing_token=after_second.lease.fencing_token,
+                context_tokens=21,
+            )
+        )
+
+
+def test_candidate_reservation_is_per_call_accounting_not_a_turn_ceiling(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    ready = _accept_and_bind(owner, _allocate(owner, "reservation", max_tools=1))
+    requested = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=ready.execution_id,
+            expected_version=ready.version,
+            fencing_token=ready.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    started = owner.begin_tool(BeginToolInvocationV1(
+        execution_id=requested.execution_id,
+        expected_version=requested.version,
+        fencing_token=requested.lease.fencing_token,
+        tool_invocation_id="tool-three-candidates",
+        invocation_ordinal=1,
+        tool_name="find_knowledge_documents",
+        schema_version="find-knowledge-documents-v1",
+        arguments_digest="a" * 64,
+        reserve_catalog_pages=1,
+        reserve_document_candidates=3,
+        reserve_search_rounds=0,
+        reserve_unique_evidence=0,
+        reserve_tool_tokens=1,
+    ))
+    completed = owner.complete_tool(
+        CompleteToolInvocationV1(
+            execution_id=started.execution_id,
+            expected_version=started.version,
+            fencing_token=started.lease.fencing_token,
+            tool_invocation_id="tool-three-candidates",
+            invocation_ordinal=1,
+            result_ref="result-three-candidates",
+            result_digest="b" * 64,
+            document_candidate_handles=["document-1", "document-2", "document-3"],
+            unique_evidence_identities=[],
+            catalog_pages=1,
+            search_rounds=0,
+            tool_tokens=1,
+        )
+    )
+    assert completed.budget.document_candidates == 3
+
+    second_ready = _accept_and_bind(
+        owner,
+        _allocate(owner, "reservation-overflow", max_tools=1),
+    )
+    second_requested = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=second_ready.execution_id,
+            expected_version=second_ready.version,
+            fencing_token=second_ready.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    bounded = owner.begin_tool(
+        BeginToolInvocationV1(
+            execution_id=second_requested.execution_id,
+            expected_version=second_requested.version,
+            fencing_token=second_requested.lease.fencing_token,
+            tool_invocation_id="tool-bounded-reservation",
+            invocation_ordinal=1,
+            tool_name="find_knowledge_documents",
+            schema_version="find-knowledge-documents-v1",
+            arguments_digest="c" * 64,
+            reserve_catalog_pages=1,
+            reserve_document_candidates=0,
+            reserve_search_rounds=0,
+            reserve_unique_evidence=0,
+            reserve_tool_tokens=1,
+        )
+    )
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        owner.complete_tool(
+            CompleteToolInvocationV1(
+                execution_id=bounded.execution_id,
+                expected_version=bounded.version,
+                fencing_token=bounded.lease.fencing_token,
+                tool_invocation_id="tool-bounded-reservation",
+                invocation_ordinal=1,
+                result_ref="result-over-reservation",
+                result_digest="d" * 64,
+                document_candidate_handles=["new-document"],
+                unique_evidence_identities=[],
+                catalog_pages=1,
+                search_rounds=0,
+                tool_tokens=1,
+            )
+        )
+    snapshot = owner.snapshot(bounded.execution_id)
+    assert snapshot.state == ExecutionState.TOOL_PENDING
+    assert snapshot.budget.document_candidates == 0
+
+
+def test_tool_token_threshold_blocks_only_the_request_after_overshoot(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "tool-token-next-request", max_tools=3),
+    )
+    for ordinal, actual_tokens in ((1, 19), (2, 5)):
+        requested = owner.request_model_action(
+            RequestModelActionV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                context_tokens=1,
+            )
+        )
+        started = owner.begin_tool(
+            BeginToolInvocationV1(
+                execution_id=requested.execution_id,
+                expected_version=requested.version,
+                fencing_token=requested.lease.fencing_token,
+                tool_invocation_id=f"tool-token-{ordinal}",
+                invocation_ordinal=ordinal,
+                tool_name="search_knowledge",
+                schema_version="search-knowledge-v1",
+                arguments_digest=f"{ordinal}" * 64,
+                reserve_catalog_pages=0,
+                reserve_document_candidates=0,
+                reserve_search_rounds=0,
+                reserve_unique_evidence=0,
+                reserve_tool_tokens=20,
+            )
+        )
+        snapshot = owner.complete_tool(
+            CompleteToolInvocationV1(
+                execution_id=started.execution_id,
+                expected_version=started.version,
+                fencing_token=started.lease.fencing_token,
+                tool_invocation_id=f"tool-token-{ordinal}",
+                invocation_ordinal=ordinal,
+                result_ref=f"result-tool-token-{ordinal}",
+                result_digest=f"{ordinal + 4}" * 64,
+                document_candidate_handles=[],
+                unique_evidence_identities=[],
+                catalog_pages=0,
+                search_rounds=0,
+                tool_tokens=actual_tokens,
+            )
+        )
+
+    assert snapshot.budget.tool_tokens == 24
+    requested = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        owner.begin_tool(
+            BeginToolInvocationV1(
+                execution_id=requested.execution_id,
+                expected_version=requested.version,
+                fencing_token=requested.lease.fencing_token,
+                tool_invocation_id="tool-token-3",
+                invocation_ordinal=3,
+                tool_name="search_knowledge",
+                schema_version="search-knowledge-v1",
+                arguments_digest="3" * 64,
+                reserve_catalog_pages=0,
+                reserve_document_candidates=0,
+                reserve_search_rounds=0,
+                reserve_unique_evidence=0,
+                reserve_tool_tokens=20,
+            )
+        )
+
+
+def test_candidate_counter_can_exceed_twenty_without_closing_discovery(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(
+            owner,
+            "candidate-accounting",
+            max_tools=3,
+            max_catalog_pages=4,
+        ),
+    )
+    for ordinal in range(1, 4):
+        requested = owner.request_model_action(
+            RequestModelActionV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                context_tokens=1,
+            )
+        )
+        started = owner.begin_tool(
+            BeginToolInvocationV1(
+                execution_id=requested.execution_id,
+                expected_version=requested.version,
+                fencing_token=requested.lease.fencing_token,
+                tool_invocation_id=f"tool-candidate-page-{ordinal}",
+                invocation_ordinal=ordinal,
+                tool_name="find_knowledge_documents",
+                schema_version="find-knowledge-documents-v1",
+                arguments_digest=f"{ordinal}" * 64,
+                reserve_catalog_pages=1,
+                reserve_document_candidates=10,
+                reserve_search_rounds=0,
+                reserve_unique_evidence=0,
+                reserve_tool_tokens=1,
+            )
+        )
+        snapshot = owner.complete_tool(
+            CompleteToolInvocationV1(
+                execution_id=started.execution_id,
+                expected_version=started.version,
+                fencing_token=started.lease.fencing_token,
+                tool_invocation_id=f"tool-candidate-page-{ordinal}",
+                invocation_ordinal=ordinal,
+                result_ref=f"result-candidate-page-{ordinal}",
+                result_digest=f"{ordinal + 3}" * 64,
+                document_candidate_handles=[
+                    f"document-{ordinal}-{index}" for index in range(10)
+                ],
+                unique_evidence_identities=[],
+                catalog_pages=1,
+                search_rounds=0,
+                tool_tokens=1,
+            )
+        )
+
+    assert snapshot.budget.catalog_pages == 3
+    assert snapshot.budget.document_candidates == 30
+
+
+def test_completed_and_fenced_failure_have_one_terminal_winner(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    prepared = _prepare(
+        owner,
+        _tool_cycle(owner, _accept_and_bind(owner, _allocate(owner, "race", max_tools=1)), 1),
+    )
+    barrier = Barrier(2)
+
+    def complete() -> str:
+        barrier.wait()
+        try:
+            owner.commit_terminal(
+                CommitTerminalV1(
+                    execution_id=prepared.execution_id,
+                    expected_version=prepared.version,
+                    fencing_token=prepared.lease.fencing_token,
+                    terminal_commit_intent_ref=prepared.terminal_commit_intent_ref,
+                )
+            )
+            return "completed"
+        except TurnRuntimeTerminalConflict:
+            return "lost"
+
+    def fail() -> str:
+        barrier.wait()
+        try:
+            owner.fail_carrier(
+                FailCarrierExecutionV1(
+                    execution_id=prepared.execution_id,
+                    expected_version=prepared.version,
+                    holder_id=prepared.lease.holder_id,
+                    expected_lease_version=prepared.lease.lease_version,
+                    fencing_token=prepared.lease.fencing_token,
+                    failure_code="provider_failed",
+                    detected_by="carrier",
+                )
+            )
+            return "failed"
+        except TurnRuntimeTerminalConflict:
+            return "lost"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = {pool.submit(complete), pool.submit(fail)}
+        outcomes = sorted(future.result() for future in results)
+    assert outcomes in (["completed", "lost"], ["failed", "lost"])
+    with postgres_runtime.session_factory() as session:
+        rows = session.scalars(
+            select(AtlasTurnTerminalOutcomeRow).where(
+                AtlasTurnTerminalOutcomeRow.execution_id == prepared.execution_id
+            )
+        ).all()
+        assert len(rows) == 1

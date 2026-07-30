@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Verify that every direct runtime selection has a notice entry."""
+
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+import re
+
+
+ROOT = Path(__file__).resolve().parents[2]
+NOTICE = ROOT / "THIRD_PARTY_NOTICES.md"
+PYTHON_PROJECTS = (
+    ROOT / "api/pyproject.toml",
+    ROOT / "plugin-sdk/pyproject.toml",
+    ROOT / "plugin-runner/pyproject.toml",
+    ROOT / "office-renderer/pyproject.toml",
+)
+INTERNAL_PYTHON_PACKAGES = {"atlas-processing-sdk"}
+CONTAINER_FILES = (
+    ROOT / "api/Dockerfile",
+    ROOT / "plugin-runner/Dockerfile",
+    ROOT / "office-renderer/Dockerfile",
+    ROOT / "web/Dockerfile",
+    ROOT / "infra/docker-compose.p1.yml",
+)
+
+
+def normalize_python_name(requirement: str) -> str:
+    name = re.split(r"[\[<>=!~ ;@]", requirement, maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def python_dependencies(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    project = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", text)
+    if project is None:
+        raise ValueError(f"{path.relative_to(ROOT)} has no [project] table")
+    dependencies = re.search(
+        r"(?ms)^dependencies\s*=\s*\[(.*?)^\]",
+        project.group(1),
+    )
+    if dependencies is None:
+        return set()
+    return {
+        normalize_python_name(value)
+        for value in re.findall(r'["\']([^"\']+)["\']', dependencies.group(1))
+        if normalize_python_name(value) not in INTERNAL_PYTHON_PACKAGES
+    }
+
+
+def web_dependencies() -> set[str]:
+    package = json.loads((ROOT / "web/package.json").read_text(encoding="utf-8"))
+    return set(package.get("dependencies", {}))
+
+
+def container_dependencies() -> set[str]:
+    selected: set[str] = set()
+    for path in CONTAINER_FILES:
+        text = path.read_text(encoding="utf-8")
+        selected.update(
+            match.group(1)
+            for match in re.finditer(r"(?m)^FROM\s+([^\s]+)", text)
+            if not match.group(1).startswith("${")
+        )
+        selected.update(
+            match.group(1)
+            for match in re.finditer(r"(?m)^\s*image:\s*([^\s#]+)", text)
+            if not match.group(1).startswith("${")
+        )
+    return selected
+
+
+def model_dependency() -> str:
+    path = ROOT / "api/src/atlas_production/async_runtime/vector_index.py"
+    values: dict[str, str] = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in {"MODEL_NAME", "MODEL_REVISION"}
+        ):
+            values[node.targets[0].id] = ast.literal_eval(node.value)
+    return f'{values["MODEL_NAME"]}@{values["MODEL_REVISION"]}'
+
+
+def main() -> int:
+    expected = set()
+    for path in PYTHON_PROJECTS:
+        expected.update(python_dependencies(path))
+    expected.update(web_dependencies())
+    expected.update(container_dependencies())
+    expected.add(model_dependency())
+
+    notice = NOTICE.read_text(encoding="utf-8")
+    missing = sorted(token for token in expected if f"`{token}`" not in notice)
+    if missing:
+        print("Third-party notice audit failed:")
+        for token in missing:
+            print(f"- missing direct runtime selection: {token}")
+        return 1
+
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "audit": "direct_runtime_third_party_notices",
+                "selection_count": len(expected),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

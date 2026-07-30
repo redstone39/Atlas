@@ -1,0 +1,44 @@
+[project]
+name = "atlas-plugin-runner"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "atlas-processing-sdk",
+  "docling==2.111.0",
+  "fastapi>=0.116,<0.117",
+  "pypdf==6.0.0",
+  "openpyxl==3.1.5",
+  "python-docx==1.2.0",
+  "python-pptx==1.0.2",
+  "rapidocr==3.9.1",
+  "onnxruntime==1.27.0",
+  "torch==2.13.0",
+  "torchvision==0.28.0",
+  "uvicorn>=0.35,<0.36",
+]
+
+[tool.uv.sources]
+atlas-processing-sdk = { path = "../plugin-sdk" }
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9", "httpx>=0.28,<0.29"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

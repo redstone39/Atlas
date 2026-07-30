@@ -1,0 +1,155 @@
+"""Public Conversation adapter over owner-local PostgreSQL persistence."""
+
+from __future__ import annotations
+
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
+from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
+    AppendTurnMemberInput,
+    ConversationRecord,
+    ConversationStoreConflict,
+    CreateConversationInput,
+    PostgresConversationV1Store,
+    SessionFactory,
+    TurnMemberRecord,
+)
+from atlas_production.modules.conversation.public import (
+    AppendTurnMemberV1,
+    ConversationCreateV1,
+    ConversationTurnMemberV1,
+    ConversationV1,
+)
+
+
+_DEFAULT_TITLE = "New conversation"
+_MAX_ORDINAL_CAS_ATTEMPTS = 8
+
+
+def _conversation(record: ConversationRecord) -> ConversationV1:
+    return ConversationV1(
+        conversation_id=record.conversation_id,
+        owner_actor_id=record.owner_actor_id,
+        title=record.title,
+        status=record.status,
+        response_language=record.response_language,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _turn(record: TurnMemberRecord) -> ConversationTurnMemberV1:
+    return ConversationTurnMemberV1(
+        turn_id=record.turn_id,
+        conversation_id=record.conversation_id,
+        execution_id=record.execution_id,
+        role=record.role,
+        ordinal=record.ordinal,
+        created_at=record.created_at,
+    )
+
+
+class PostgresConversationV1Adapter:
+    """Hides store records and the owner-internal ordinal CAS from callers."""
+
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+        self._store = PostgresConversationV1Store(session_factory)
+
+    def create(self, *, actor_id: str, command: ConversationCreateV1) -> ConversationV1:
+        replay_key = command.idempotency_key or str(uuid4())
+        conversation_id = (
+            f"conversation-{uuid5(NAMESPACE_URL, f'conversation:{actor_id}:{replay_key}')}"
+        )
+        return _conversation(
+            self._store.create(
+                CreateConversationInput(
+                    conversation_id=conversation_id,
+                    actor_id=actor_id,
+                    title=command.title or _DEFAULT_TITLE,
+                    idempotency_key=replay_key,
+                    response_language=command.response_language,
+                )
+            )
+        )
+
+    def append_turn_member(
+        self, *, actor_id: str, command: AppendTurnMemberV1
+    ) -> ConversationTurnMemberV1:
+        return self._append_turn_member(
+            actor_id=actor_id, command=command, retry_of_turn_id=None
+        )
+
+    def append_retry_turn_member(
+        self,
+        *,
+        actor_id: str,
+        command: AppendTurnMemberV1,
+        retry_of_turn_id: str,
+    ) -> ConversationTurnMemberV1:
+        if command.operation != "retry_turn":
+            raise ValueError("retry lineage requires a retry_turn command")
+        return self._append_turn_member(
+            actor_id=actor_id,
+            command=command,
+            retry_of_turn_id=retry_of_turn_id,
+        )
+
+    def _append_turn_member(
+        self,
+        *,
+        actor_id: str,
+        command: AppendTurnMemberV1,
+        retry_of_turn_id: str | None,
+    ) -> ConversationTurnMemberV1:
+        for _ in range(_MAX_ORDINAL_CAS_ATTEMPTS):
+            replay = self.get_turn(command.turn_id)
+            conversation = self._store.get(command.conversation_id)
+            if conversation is None:
+                raise ConversationStoreConflict("conversation does not exist")
+            expected_ordinal = replay.ordinal if replay is not None else conversation.next_ordinal
+            try:
+                return _turn(
+                    self._store.append_turn_member(
+                        AppendTurnMemberInput(
+                            conversation_id=command.conversation_id,
+                            actor_id=actor_id,
+                            turn_id=command.turn_id,
+                            execution_id=command.execution_id,
+                            role=command.role,
+                            expected_next_ordinal=expected_ordinal,
+                            idempotency_key=command.idempotency_key,
+                            operation=command.operation,
+                            retry_of_turn_id=retry_of_turn_id,
+                        )
+                    )
+                )
+            except ConversationStoreConflict as error:
+                if "ordinal CAS failed" not in str(error):
+                    raise
+        raise ConversationStoreConflict("conversation ordinal CAS retry limit exceeded")
+
+    def list_for_actor(self, actor_id: str) -> list[ConversationV1]:
+        return [_conversation(record) for record in self._store.list_for_actor(actor_id)]
+
+    def list_all(self) -> list[ConversationV1]:
+        """Admin/audit projection source; authorization remains its caller's owner."""
+        return [_conversation(record) for record in self._store.list_all()]
+
+    def get(self, conversation_id: str) -> ConversationV1 | None:
+        record = self._store.get(conversation_id)
+        return None if record is None else _conversation(record)
+
+    def get_turn(self, turn_id: str) -> ConversationTurnMemberV1 | None:
+        if not turn_id:
+            raise ValueError("turn_id must be non-empty")
+        record = self._store.get_turn(turn_id)
+        return None if record is None else _turn(record)
+
+    def candidate_turns(self, conversation_id: str) -> list[ConversationTurnMemberV1]:
+        return [_turn(record) for record in self._store.candidate_turns(conversation_id)]
+
+    def retry_sources(self, conversation_id: str) -> dict[str, str]:
+        return self._store.retry_sources(conversation_id)
+
+
+__all__ = ["PostgresConversationV1Adapter"]

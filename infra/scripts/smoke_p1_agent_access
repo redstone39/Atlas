@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+project_name="${ATLAS_PRODUCTION_COMPOSE_PROJECT:-atlas-production-p1-smoke}"
+api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}"
+web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}"
+cookie_file="$(mktemp)"
+suffix="$(date +%s)"
+project_id="proj-p1-smoke-${suffix}"
+agent_id="agent-p1-smoke-${suffix}"
+grant_id="grant-project-access-${project_id}-service_account-${agent_id}"
+agent_name="P1 Smoke Agent ${suffix}"
+legacy_snapshot_table="atlas_""production_snapshots"
+legacy_membership_table="atlas_""memberships"
+legacy_query_table="atlas_""queries"
+legacy_citation_table="atlas_""citation_projects"
+export ATLAS_CREDENTIAL_MASTER_KEY="${ATLAS_CREDENTIAL_MASTER_KEY:-$(openssl rand -base64 32)}"
+export ATLAS_CREDENTIAL_MASTER_KEY_ID="${ATLAS_CREDENTIAL_MASTER_KEY_ID:-p1-smoke-${suffix}}"
+export ATLAS_BOOTSTRAP_ADMIN_EMAIL="${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-smoke-admin-${suffix}@example.test}"
+export ATLAS_BOOTSTRAP_ADMIN_PASSWORD="${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-SmokeBootstrap-${suffix}!}"
+
+compose() {
+  docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
+}
+
+cleanup() {
+  rm -f "$cookie_file"
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  for _ in {1..90}; do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for $name at $url" >&2
+  compose logs >&2 || true
+  return 1
+}
+
+json_field() {
+  python3 -c 'import json,sys; data=json.load(sys.stdin); path=sys.argv[1].split(".");
+value=data
+for key in path:
+    value=value[int(key)] if key.isdigit() else value[key]
+print(value)' "$1"
+}
+
+admin_login_json() {
+  python3 -c 'import json,os,sys; print(json.dumps({
+"email": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
+"password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
+"idempotency_key": sys.argv[1],
+}))' "$1"
+}
+
+api_post() {
+  local path="$1"
+  local body="$2"
+  curl -fsS -b "$cookie_file" -c "$cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$body" \
+    "${api_url}${path}"
+}
+
+api_delete() {
+  local path="$1"
+  curl -fsS -b "$cookie_file" -c "$cookie_file" \
+    -H "Content-Type: application/json" \
+    -X DELETE \
+    "${api_url}${path}"
+}
+
+compose down -v --remove-orphans >/dev/null 2>&1 || true
+compose up --build -d
+
+wait_for_url "production API" "${api_url}/api/v1/ops/health"
+wait_for_url "production Web" "${web_url}/login"
+
+api_post "/api/v1/auth/sessions" \
+  "$(admin_login_json smoke-login)" >/dev/null
+
+api_post "/api/v1/admin/projects" \
+  "{\"project_id\":\"${project_id}\",\"name\":\"P1 Smoke Project\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"smoke-project\"}" >/dev/null
+
+api_post "/api/v1/admin/agent-users" \
+  "{\"actor_id\":\"${agent_id}\",\"display_name\":\"${agent_name}\",\"idempotency_key\":\"smoke-agent\"}" >/dev/null
+
+issued="$(
+  api_post "/api/v1/admin/agent-users/${agent_id}/tokens" \
+    '{"idempotency_key":"smoke-token"}'
+)"
+raw_token="$(printf '%s' "$issued" | json_field raw_token)"
+fingerprint="$(printf '%s' "$issued" | json_field token.token_fingerprint)"
+
+api_post "/api/v1/admin/projects/${project_id}/members" \
+  "{\"subject_type\":\"service_account\",\"subject_id\":\"${agent_id}\",\"role\":\"viewer\",\"effect\":\"allow\",\"idempotency_key\":\"smoke-agent-project-access\"}" >/dev/null
+
+schema_version="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select version_num from alembic_version;" \
+    | tr -d '[:space:]'
+)"
+expected_schema_version="$(
+  python3 - <<'PY'
+import ast
+from pathlib import Path
+
+revisions = set()
+down_revisions = set()
+for path in Path("api/src/atlas_production/migrations/versions").glob("*.py"):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values = {}
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in {"revision", "down_revision"}:
+                values[node.target.id] = ast.literal_eval(node.value)
+    revisions.add(values["revision"])
+    down_revision = values.get("down_revision")
+    if isinstance(down_revision, str):
+        down_revisions.add(down_revision)
+    elif down_revision:
+        down_revisions.update(down_revision)
+heads = revisions - down_revisions
+if len(heads) != 1:
+    raise SystemExit(f"Expected one Alembic head, found {sorted(heads)}")
+print(heads.pop())
+PY
+)"
+if [[ "$schema_version" != "$expected_schema_version" ]]; then
+  echo "PostgreSQL schema version was not controlled by Alembic" >&2
+  exit 1
+fi
+structured_agent_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_users where actor_id = '${agent_id}' and actor_type = 'service_account';" \
+    | tr -d '[:space:]'
+)"
+structured_token_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_agent_tokens where actor_id = '${agent_id}' and token_fingerprint = '${fingerprint}';" \
+    | tr -d '[:space:]'
+)"
+structured_grant_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_permission_grants where grant_id = '${grant_id}' and status = 'active' and effect = 'allow';" \
+    | tr -d '[:space:]'
+)"
+legacy_table_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from (values ('${legacy_snapshot_table}'),('${legacy_membership_table}'),('${legacy_query_table}'),('${legacy_citation_table}')) as legacy(name) where to_regclass('public.' || name) is not null;" \
+    | tr -d '[:space:]'
+)"
+if [[ "$structured_agent_count" != "1" || "$structured_token_count" != "1" || "$structured_grant_count" != "1" ]]; then
+  echo "Structured PostgreSQL tables did not persist P1 runtime data" >&2
+  exit 1
+fi
+if [[ "$legacy_table_count" != "0" ]]; then
+  echo "Legacy compatibility tables must not exist in the development baseline" >&2
+  exit 1
+fi
+
+compose restart api >/dev/null
+wait_for_url "restarted production API" "${api_url}/api/v1/ops/health"
+
+api_post "/api/v1/auth/sessions" \
+  "$(admin_login_json smoke-login-after-restart)" >/dev/null
+
+agents="$(curl -fsS -b "$cookie_file" "${api_url}/api/v1/admin/agent-users")"
+if ! printf '%s' "$agents" | grep -Fq "$agent_id"; then
+  echo "Persisted agent was not found after API restart" >&2
+  exit 1
+fi
+if ! printf '%s' "$agents" | grep -Fq "$fingerprint"; then
+  echo "Persisted token fingerprint was not found after API restart" >&2
+  exit 1
+fi
+if printf '%s' "$agents" | grep -Fq "$raw_token"; then
+  echo "Raw token leaked from agent list after API restart" >&2
+  exit 1
+fi
+if printf '%s' "$agents" | grep -Fq "token_digest"; then
+  echo "Token digest leaked from agent list after API restart" >&2
+  exit 1
+fi
+
+agent_response="$(
+  curl -sS -H "Authorization: Bearer ${raw_token}" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "{\"project_id\":\"${project_id}\",\"query_text\":\"P1 smoke\",\"purpose\":\"local smoke\",\"idempotency_key\":\"smoke-agent-query\"}" \
+    "${api_url}/api/v1/agent/queries" \
+    -w '\n%{http_code}'
+)"
+if [[ "${agent_response##*$'\n'}" != "501" ]]; then
+  echo "Authorized agent token did not reach deferred boundary" >&2
+  echo "$agent_response" >&2
+  exit 1
+fi
+
+api_delete "/api/v1/admin/projects/${project_id}/members/${grant_id}" >/dev/null
+
+revoked_grant_response="$(
+  curl -sS -H "Authorization: Bearer ${raw_token}" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "{\"project_id\":\"${project_id}\",\"query_text\":\"P1 smoke after revoke\",\"purpose\":\"local smoke\",\"idempotency_key\":\"smoke-agent-query-after-revoke\"}" \
+    "${api_url}/api/v1/agent/queries" \
+    -w '\n%{http_code}'
+)"
+if [[ "${revoked_grant_response##*$'\n'}" != "403" ]]; then
+  echo "Revoked agent permission did not block Agent API" >&2
+  echo "$revoked_grant_response" >&2
+  exit 1
+fi
+if ! printf '%s' "$revoked_grant_response" | grep -Fq "agent_project_access_denied"; then
+  echo "Revoked agent permission returned the wrong denial reason" >&2
+  echo "$revoked_grant_response" >&2
+  exit 1
+fi

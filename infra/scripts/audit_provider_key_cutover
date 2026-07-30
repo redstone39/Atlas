@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VENV_PYTHON = REPO_ROOT / "api/.venv/bin/python"
+if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve())])
+
+ACTIVE_ROOTS = (
+    REPO_ROOT / "api/src/atlas_production",
+    REPO_ROOT / "web/src",
+    REPO_ROOT / "infra/scripts",
+)
+FOCUSED_FILES = (
+    REPO_ROOT / "api/src/atlas_production/providers.py",
+    REPO_ROOT / "api/src/atlas_production/routes/model_routes.py",
+    REPO_ROOT / "api/src/atlas_production/modules/model_routing",
+    REPO_ROOT / "web/src/pages/AdminModelsPage.tsx",
+    REPO_ROOT / "web/src/features/model-routing",
+    REPO_ROOT / "web/src/shared/api-client.ts",
+    REPO_ROOT / "infra/scripts",
+)
+INSTRUCTION_FILES = (
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "docs/architecture.md",
+    REPO_ROOT / "docs/configuration.md",
+)
+
+
+def active_source_files(root: Path):
+    if root.is_file():
+        yield root
+        return
+    for suffix in ("*.py", "*.ts", "*.tsx", "*.mjs"):
+        for path in root.rglob(suffix):
+            if ".test." not in path.name and "test-support" not in path.name:
+                yield path
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix == "" and path.name != "audit_provider_key_cutover":
+            yield path
+
+
+def line_findings(path: Path, patterns: list[tuple[str, re.Pattern[str]]]):
+    text = path.read_text(encoding="utf-8")
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        for label, pattern in patterns:
+            if pattern.search(line):
+                yield f"{path.relative_to(REPO_ROOT)}:{line_number}: {label}"
+
+
+def main() -> int:
+    findings: list[str] = []
+    all_active_files = {
+        path
+        for root in ACTIVE_ROOTS
+        for path in active_source_files(root)
+        if "/migrations/" not in path.as_posix()
+    }
+    findings.extend(
+        finding
+        for path in sorted(all_active_files)
+        for finding in line_findings(
+            path,
+            [
+                ("environment Provider credential resolver", re.compile(r"\bsecret_value\s*\(")),
+                (
+                    "Provider key environment reference",
+                    re.compile(r"env:(?:OPENAI|AZURE|ATLAS_.*PROVIDER).*KEY", re.I),
+                ),
+            ],
+        )
+    )
+
+    focused_files = {
+        path
+        for root in FOCUSED_FILES
+        for path in active_source_files(root)
+        if path.exists()
+    }
+    findings.extend(
+        finding
+        for path in sorted(focused_files)
+        for finding in line_findings(
+            path,
+            [
+                ("route-level secret_ref contract", re.compile(r"\bsecret_ref\b")),
+                (
+                    "route-level secret_configured contract",
+                    re.compile(r"\bsecret_configured\b"),
+                ),
+            ],
+        )
+    )
+
+    for path in INSTRUCTION_FILES:
+        if not path.exists():
+            findings.append(
+                f"{path.relative_to(REPO_ROOT)}: required instruction file is missing"
+            )
+            continue
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            lower = line.casefold()
+            if any(term in lower for term in ("removed", "no longer", "不得", "移除", "停用")):
+                continue
+            if re.search(r"(?:secret_ref|provider key).*(?:env:|environment)", line, re.I):
+                findings.append(
+                    f"{path.relative_to(REPO_ROOT)}:{line_number}: affirmative environment-key instruction"
+                )
+
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "api/src"))
+        from atlas_production.openapi_app import create_openapi_app
+
+        openapi = create_openapi_app().openapi()
+        schemas = openapi.get("components", {}).get("schemas", {})
+        for schema_name in ("ModelRouteCreateRequest", "ModelRouteStatus"):
+            properties = schemas.get(schema_name, {}).get("properties", {})
+            for field in ("endpoint_url", "secret_ref", "secret_configured"):
+                if field in properties:
+                    findings.append(
+                        f"generated OpenAPI: {schema_name} still exposes {field}"
+                    )
+    except Exception as exc:
+        findings.append(f"generated OpenAPI inspection failed: {type(exc).__name__}")
+
+    if findings:
+        print("Provider credential cutover audit failed:")
+        print("\n".join(f"- {finding}" for finding in sorted(set(findings))))
+        return 1
+    print(json.dumps({"status": "ok", "audit": "provider_credential_cutover"}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

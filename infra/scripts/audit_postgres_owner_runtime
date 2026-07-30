@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Fail closed when a retired aggregate Store runtime remains reachable."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+from pathlib import Path
+import tempfile
+
+
+DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+SCAN_ROOTS = (
+    "api/src/atlas_production",
+    "api/tests",
+    "api/scripts",
+    "infra/scripts",
+)
+FORBIDDEN_ANCHORS = (
+    "AtlasStore",
+    "FileBackedAtlasStore",
+    "PostgresAtlasStore",
+    "app.state.store",
+    "state.store",
+    "get_store",
+    "load_full_state",
+    "snapshot_store_state",
+    "store_payload",
+    "CONVERSATION_STATE_ATTRIBUTES",
+    "ATLAS_PRODUCTION_STORE_PATH",
+    "ATLAS_PRODUCTION_ALLOW_FILE_STORE",
+    "ATLAS_PRODUCTION_ALLOW_MEMORY_STORE",
+    "default_store",
+    "worker_store",
+    "AsyncJobRepository",
+    "process_one",
+)
+FORBIDDEN_PATHS = (
+    "api/src/atlas_production/stores.py",
+    "api/src/atlas_production/infrastructure/store_factory.py",
+    "api/src/atlas_production/infrastructure/persistence/registry.py",
+    "api/src/atlas_production/infrastructure/agent_store_adapter.py",
+    "api/src/atlas_production/infrastructure/citation_preview_store_adapter.py",
+    "api/src/atlas_production/infrastructure/conversation_access_store_adapter.py",
+    "api/src/atlas_production/infrastructure/conversation_audit_store_adapter.py",
+    "api/src/atlas_production/infrastructure/conversation_store_adapter.py",
+    "api/src/atlas_production/infrastructure/document_store_adapter.py",
+    "api/src/atlas_production/infrastructure/evidence_retrieval_store_adapter.py",
+    "api/src/atlas_production/infrastructure/identity_store_adapter.py",
+    "api/src/atlas_production/infrastructure/model_routing_store_adapter.py",
+    "api/src/atlas_production/infrastructure/ops_store_adapter.py",
+    "api/src/atlas_production/infrastructure/processing_registry_store_adapter.py",
+    "api/src/atlas_production/infrastructure/project_store_adapter.py",
+    "api/src/atlas_production/infrastructure/team_store_adapter.py",
+    "api/src/atlas_production/infrastructure/async_job_repository.py",
+    "api/src/atlas_production/infrastructure/bounded_document_upload_repository.py",
+    "api/src/atlas_production/infrastructure/artifact_storage_runtime.py",
+    "api/src/atlas_production/modules/artifact_storage/service.py",
+    "api/src/atlas_production/modules/workspace_conversation/runtime/coordinator.py",
+    "api/tests/processing_support.py",
+)
+SELF_PATH = "infra/scripts/audit_postgres_owner_runtime"
+
+
+def _source_paths(root: Path):
+    for relative_root in SCAN_ROOTS:
+        candidate = root / relative_root
+        if candidate.is_file():
+            yield candidate
+            continue
+        if not candidate.exists():
+            continue
+        for path in candidate.rglob("*"):
+            if (
+                path.is_file()
+                and "__pycache__" not in path.parts
+                and path.relative_to(root).as_posix() != SELF_PATH
+                and (path.suffix in {".py", ".yml", ".yaml"} or path.suffix == "")
+            ):
+                yield path
+
+
+def _ast_findings(relative: str, text: str) -> list[str]:
+    if not relative.endswith(".py"):
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        return [f"{relative}:{exc.lineno or 1}: Python source could not be parsed"]
+    findings: list[str] = []
+    is_route = "/routes/" in f"/{relative}"
+    is_worker = "worker" in Path(relative).name or "/async_runtime/" in f"/{relative}"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and (
+            node.name.endswith("UnitOfWork") or "GraphPublisher" in node.name
+        ):
+            findings.append(
+                f"{relative}:{node.lineno}: generic aggregate transaction type"
+            )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "persist":
+            parameters = [
+                argument.arg
+                for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+                if argument.arg not in {"self", "cls"}
+            ]
+            if any(
+                name in {"state", "store", "payload", "snapshot"} for name in parameters
+            ):
+                findings.append(
+                    f"{relative}:{node.lineno}: generic or aggregate persist signature"
+                )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "publish_graph":
+            findings.append(f"{relative}:{node.lineno}: generic graph publisher")
+        if isinstance(node, ast.Call):
+            function_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if function_name == "create_app" and any(
+                keyword.arg == "store" for keyword in node.keywords
+            ):
+                findings.append(f"{relative}:{node.lineno}: Store-injected create_app call")
+            if is_worker and function_name == "create_app":
+                findings.append(f"{relative}:{node.lineno}: worker calls API create_app")
+        if is_route and isinstance(node, ast.Attribute):
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr == "state":
+                findings.append(f"{relative}:{node.lineno}: route accesses app.state directly")
+        if is_worker and isinstance(node, (ast.Import, ast.ImportFrom)):
+            imported = [alias.name for alias in node.names]
+            if "create_app" in imported:
+                findings.append(f"{relative}:{node.lineno}: worker imports API create_app")
+    return findings
+
+
+def _findings(root: Path) -> list[str]:
+    findings: list[str] = []
+    for forbidden in FORBIDDEN_PATHS:
+        if (root / forbidden).exists():
+            findings.append(f"{forbidden}: retired aggregate runtime file exists")
+    for path in _source_paths(root):
+        relative = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for anchor in FORBIDDEN_ANCHORS:
+                if anchor in line:
+                    findings.append(f"{relative}:{line_number}: forbidden anchor {anchor}")
+            if "mutation_view" in line and "/tests/" not in f"/{relative}":
+                findings.append(f"{relative}:{line_number}: production mutation_view")
+        findings.extend(_ast_findings(relative, text))
+    return sorted(set(findings))
+
+
+def _seeded_negative_guard() -> None:
+    with tempfile.TemporaryDirectory(prefix="atlas-owner-audit-") as directory:
+        root = Path(directory)
+        source = root / "api/src/atlas_production/example.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("\n".join(FORBIDDEN_ANCHORS), encoding="utf-8")
+        findings = _findings(root)
+        for anchor in FORBIDDEN_ANCHORS:
+            if not any(f"forbidden anchor {anchor}" in finding for finding in findings):
+                raise RuntimeError(f"negative guard missed forbidden anchor: {anchor}")
+
+        source.write_text(
+            "def persist(self, state):\n    pass\n"
+            "def wire(app):\n    return create_app(store=app.state)\n",
+            encoding="utf-8",
+        )
+        route = root / "api/src/atlas_production/routes/example.py"
+        route.parent.mkdir(parents=True)
+        route.write_text("def read(request):\n    return request.app.state.services\n", encoding="utf-8")
+        worker = root / "api/src/atlas_production/example_worker.py"
+        worker.write_text(
+            "from atlas_production.app import create_app\napp = create_app()\n",
+            encoding="utf-8",
+        )
+        generic = root / "api/src/atlas_production/generic.py"
+        generic.write_text(
+            "class RuntimeUnitOfWork:\n    pass\n"
+            "def publish_graph():\n    pass\n",
+            encoding="utf-8",
+        )
+        forbidden = root / FORBIDDEN_PATHS[0]
+        forbidden.write_text("", encoding="utf-8")
+        structural = _findings(root)
+        expected = (
+            "generic or aggregate persist signature",
+            "Store-injected create_app call",
+            "route accesses app.state directly",
+            "worker imports API create_app",
+            "worker calls API create_app",
+            "generic aggregate transaction type",
+            "generic graph publisher",
+            "retired aggregate runtime file exists",
+        )
+        for label in expected:
+            if not any(label in finding for finding in structural):
+                raise RuntimeError(f"negative guard missed structural rule: {label}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--self-test-only", action="store_true")
+    args = parser.parse_args()
+    try:
+        _seeded_negative_guard()
+    except RuntimeError as exc:
+        print(json.dumps({"status": "error", "audit": "postgres_owner_runtime", "detail": str(exc)}))
+        return 2
+    if args.self_test_only:
+        print(json.dumps({"status": "ok", "audit": "postgres_owner_runtime_negative_guard"}))
+        return 0
+    findings = _findings(args.root.resolve())
+    if findings:
+        print("PostgreSQL owner-runtime audit failed:")
+        print("\n".join(f"- {finding}" for finding in findings))
+        return 1
+    print(json.dumps({"status": "ok", "audit": "postgres_owner_runtime"}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

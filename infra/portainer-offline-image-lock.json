@@ -1,0 +1,29 @@
+{
+  "schema_version": "atlas-portainer-offline-image-lock-v1",
+  "images": {
+    "postgres": {
+      "repository": "postgres",
+      "source_tag": "postgres:17",
+      "platform_digests": {
+        "linux/amd64": "sha256:51cf4bf24dcbfa31be362b076acdb51c3dc63afbd7e48d4eb95d09133e54440b",
+        "linux/arm64": "sha256:a94949cd18e9c1de87d5feac6561899a6ca357f505af136540456f0358d48ec5"
+      }
+    },
+    "qdrant": {
+      "repository": "qdrant/qdrant",
+      "source_tag": "qdrant/qdrant:v1.18.1-unprivileged",
+      "platform_digests": {
+        "linux/amd64": "sha256:059837190675ff9d597ed1eebb4971f20648ddded4c4be528d360882224cc4d4",
+        "linux/arm64": "sha256:cb2d32c891a3ccbddc75c5b9a2847a468c4eef4197fa286143bbc2b1aa0e7985"
+      }
+    },
+    "redis": {
+      "repository": "redis",
+      "source_tag": "redis:8.8.0-alpine",
+      "platform_digests": {
+        "linux/amd64": "sha256:cd5f3ac681c77791c6a8eaa62de876ad2be043ee5a428afb7c0095aa08246277",
+        "linux/arm64": "sha256:a7bed941ab9b77ce455c7833d728c7c24459bcd9097a06fd3b246be7f2ac629a"
+      }
+    }
+  }
+}

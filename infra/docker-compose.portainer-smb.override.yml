@@ -1,0 +1,44 @@
+services:
+  artifact-storage-init:
+    environment:
+      ATLAS_SMB_GENERATION: ${ATLAS_SMB_GENERATION:?set a positive SMB generation}
+      ATLAS_SMB_HOST: ${ATLAS_SMB_HOST:?set SMB host}
+      ATLAS_SMB_SHARE: ${ATLAS_SMB_SHARE:?set SMB share}
+      ATLAS_SMB_SUBDIR: ${ATLAS_SMB_SUBDIR:?set existing SMB subdirectory}
+      ATLAS_SMB_USERNAME: ${ATLAS_SMB_USERNAME:?set SMB username}
+      ATLAS_SMB_DOMAIN: ${ATLAS_SMB_DOMAIN:-}
+      ATLAS_SMB_VERSION: ${ATLAS_SMB_VERSION:-3.1.1}
+      ATLAS_ARTIFACT_SWITCH_MODE: ${ATLAS_ARTIFACT_SWITCH_MODE:?set operator_accepted_unverified}
+      ATLAS_ARTIFACT_SWITCH_ACK: ${ATLAS_ARTIFACT_SWITCH_ACK:?acknowledge unverified blob mapping and content}
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.infrastructure.portainer_smb_init
+
+  api:
+    environment:
+      ATLAS_AZURE_PROXY_URL: ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+
+  celery-processing:
+    environment:
+      ATLAS_AZURE_PROXY_URL: ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+
+  celery-maintenance:
+    depends_on:
+      artifact-storage-init:
+        condition: service_completed_successfully
+
+volumes:
+  atlas-production-artifacts:
+    name: atlas-production-smb-g${ATLAS_SMB_GENERATION:?set a positive SMB generation}
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //${ATLAS_SMB_HOST:?set SMB host}/${ATLAS_SMB_SHARE:?set SMB share}
+      o: addr=${ATLAS_SMB_HOST:?set SMB host},username=${ATLAS_SMB_USERNAME:?set SMB username},password=${ATLAS_SMB_PASSWORD:?set SMB password},domain=${ATLAS_SMB_DOMAIN:-},vers=${ATLAS_SMB_VERSION:-3.1.1},prefixpath=${ATLAS_SMB_SUBDIR:?set existing SMB subdirectory},rw,nosuid,nodev,noexec,file_mode=0600,dir_mode=0700

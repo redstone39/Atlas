@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+unset ATLAS_TEST_POSTGRES_URL
+unset ATLAS_PRODUCTION_DATABASE_URL
+PYTHONPATH=src uv run pytest --ignore=tests/postgres_integration tests

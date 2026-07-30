@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-processing-sdk"
+version = "0.1.4"
+description = "Typed plugin contracts and developer/admin CLI for Atlas processing plugins"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "cryptography>=45,<46",
+    "jsonschema>=4.23,<5",
+    "pypdf==6.0.0",
+]
+
+[project.scripts]
+atlas-plugin = "atlas_processing_sdk.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

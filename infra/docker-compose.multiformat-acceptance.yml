@@ -1,0 +1,46 @@
+services:
+  api:
+    volumes:
+      - type: bind
+        source: ./scripts/deterministic_multiformat_provider.py
+        target: /opt/atlas-acceptance/deterministic_provider.py
+        read_only: true
+      - type: volume
+        source: multiformat-provider-calls
+        target: /var/lib/atlas-acceptance
+    # Keep the fixture journey deterministic and memory-bounded; concurrent
+    # same-image fencing is covered by the guarded PostgreSQL suite.
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        /app/.venv/bin/python /opt/atlas-acceptance/deterministic_provider.py
+        --host 127.0.0.1 --port 18081
+        --calls-file /var/lib/atlas-acceptance/api-calls.jsonl &
+        exec /app/.venv/bin/uvicorn atlas_production.app:create_app
+        --factory --host 0.0.0.0 --port 8002
+
+  celery-processing:
+    volumes:
+      - type: bind
+        source: ./scripts/deterministic_multiformat_provider.py
+        target: /opt/atlas-acceptance/deterministic_provider.py
+        read_only: true
+      - type: volume
+        source: multiformat-provider-calls
+        target: /var/lib/atlas-acceptance
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        /app/.venv/bin/python /opt/atlas-acceptance/deterministic_provider.py
+        --host 0.0.0.0 --port 18081
+        --calls-file /var/lib/atlas-acceptance/processing-calls.jsonl &
+        exec /app/.venv/bin/celery
+        -A atlas_production.async_runtime.celery_app:celery_app worker
+        -Q atlas.processing --loglevel=INFO --concurrency=1
+    ports:
+      - "127.0.0.1:${ATLAS_ACCEPTANCE_PROCESSING_PROVIDER_PORT:-18082}:18081"
+
+volumes:
+  multiformat-provider-calls:

@@ -1,0 +1,13 @@
+.git
+.env
+**/.env
+**/.venv
+**/__pycache__
+**/*.pyc
+**/build
+**/*.egg-info
+**/dist
+web/node_modules
+api/tests
+plugin-sdk/tests
+plugin-runner/tests

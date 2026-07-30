@@ -1,0 +1,48 @@
+services:
+  artifact-storage-init:
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.infrastructure.schema_init
+
+  api:
+    volumes:
+      - type: bind
+        source: ${ATLAS_ARTIFACT_HOST_PATH:?set operator-managed artifact path}
+        target: /srv/atlas-artifacts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ATLAS_ARTIFACT_CONFIG_HOST_PATH:?set operator-managed target config directory}
+        target: /run/atlas/artifact-storage
+        read_only: true
+        bind:
+          create_host_path: false
+
+  celery-processing:
+    volumes:
+      - type: bind
+        source: ${ATLAS_ARTIFACT_HOST_PATH:?set operator-managed artifact path}
+        target: /srv/atlas-artifacts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ATLAS_ARTIFACT_CONFIG_HOST_PATH:?set operator-managed target config directory}
+        target: /run/atlas/artifact-storage
+        read_only: true
+        bind:
+          create_host_path: false
+
+  celery-maintenance:
+    volumes:
+      - type: bind
+        source: ${ATLAS_ARTIFACT_HOST_PATH:?set operator-managed artifact path}
+        target: /srv/atlas-artifacts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ATLAS_ARTIFACT_CONFIG_HOST_PATH:?set operator-managed target config directory}
+        target: /run/atlas/artifact-storage
+        read_only: true
+        bind:
+          create_host_path: false

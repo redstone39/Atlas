@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import tempfile
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+BUILDER = REPOSITORY / "infra" / "scripts" / "build_portainer_smb_offline_bundle"
+IMAGE_LOCK = REPOSITORY / "infra" / "portainer-offline-image-lock.json"
+REQUIRED = {
+    "ATLAS_SMB_HOST": "smb.example.internal",
+    "ATLAS_SMB_SHARE": "atlas",
+    "ATLAS_SMB_SUBDIR": "artifacts",
+    "ATLAS_SMB_USERNAME": "atlas-operator",
+    "ATLAS_SMB_PASSWORD": "audit-dummy-password",
+    "ATLAS_SMB_GENERATION": "7",
+    "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
+    "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
+}
+AUDIT_PLATFORM = "linux/arm64"
+AUDIT_PLATFORM_TAG = "linux-arm64"
+EXPECTED_LOCK_SERVICES = {"postgres", "qdrant", "redis"}
+PROXY_INPUTS = {
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+}
+AZURE_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
+
+
+def fail(message: str) -> None:
+    print(f"offline Portainer bundle audit failed: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    value.update(path.read_bytes())
+    return value.hexdigest()
+
+
+with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as directory:
+    builder_contract = runpy.run_path(str(BUILDER))
+    isolated_docker_environment = builder_contract["docker_command_environment"](
+        {
+            "ATLAS_OFFLINE_VERSION": "audit-1",
+            "HTTP_PROXY": "atlasplaceholder-http",
+            "HTTPS_PROXY": "atlasplaceholder-https",
+        },
+        host_environment={"HTTPS_PROXY": "http://packager-proxy.example:8080"},
+    )
+    if isolated_docker_environment != {
+        "ATLAS_OFFLINE_VERSION": "audit-1",
+        "HTTPS_PROXY": "http://packager-proxy.example:8080",
+    }:
+        fail("Compose interpolation placeholders can leak into Docker commands")
+
+    image_lock = json.loads(IMAGE_LOCK.read_text(encoding="utf-8"))
+    if set(image_lock.get("images", {})) != EXPECTED_LOCK_SERVICES:
+        fail("infrastructure image lock service set drifted")
+    for service_name in EXPECTED_LOCK_SERVICES:
+        platforms = image_lock["images"][service_name].get("platform_digests", {})
+        if set(platforms) != {"linux/amd64", "linux/arm64"}:
+            fail(f"infrastructure image lock platform set drifted for {service_name}")
+
+    output = Path(directory) / "bundle"
+    builder_environment = dict(os.environ)
+    for name in PROXY_INPUTS:
+        builder_environment.pop(name, None)
+    generated = subprocess.run(
+        [
+            str(BUILDER),
+            "--version",
+            "audit-1",
+            "--platform",
+            AUDIT_PLATFORM,
+            "--output-dir",
+            str(output),
+            "--compose-only",
+        ],
+        cwd=REPOSITORY,
+        env=builder_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if generated.returncode != 0:
+        fail("compose-only bundle generation failed")
+
+    expected_files = {
+        "README.md",
+        "SMB-RUNBOOK.md",
+        "THIRD_PARTY_NOTICES.md",
+        "OFFICE_RENDERER_THIRD_PARTY_NOTICES.md",
+        "IMAGE-LOCK.json",
+        "docker-compose.yml",
+        "bundle-manifest.json",
+        "SHA256SUMS",
+    }
+    if {path.name for path in output.iterdir()} != expected_files:
+        fail("compose-only bundle file set drifted")
+
+    environment = dict(builder_environment)
+    environment.update(REQUIRED)
+    resolved = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(output / "docker-compose.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=REPOSITORY,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if resolved.returncode != 0:
+        fail("generated image-only Compose did not resolve")
+    model = json.loads(resolved.stdout)
+    services = model["services"]
+    proxy_consumers = {"api", "celery-processing"}
+    for name, service in services.items():
+        service_environment = service.get("environment", {})
+        if PROXY_INPUTS & set(service_environment):
+            fail(f"standard proxy environment leaked into offline service {name}")
+        if name in proxy_consumers:
+            if service_environment.get(AZURE_PROXY_ENVIRONMENT) != "":
+                fail(f"{name} did not preserve direct Azure behavior by default")
+        elif AZURE_PROXY_ENVIRONMENT in service_environment:
+            fail(f"Azure proxy setting leaked into offline service {name}")
+
+    proxy_environment = dict(environment)
+    proxy_environment["https_proxy"] = "http://proxy.example.internal:8080"
+    proxy_resolved = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(output / "docker-compose.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=REPOSITORY,
+        env=proxy_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proxy_resolved.returncode != 0:
+        fail("generated image-only Compose rejected optional proxy input")
+    proxy_model = json.loads(proxy_resolved.stdout)
+    for name in proxy_consumers:
+        if (
+            proxy_model["services"][name]["environment"][AZURE_PROXY_ENVIRONMENT]
+            != proxy_environment["https_proxy"]
+        ):
+            fail(f"offline {name} did not resolve the optional Azure proxy")
+    if proxy_model["volumes"]["atlas-production-artifacts"] != model["volumes"][
+        "atlas-production-artifacts"
+    ]:
+        fail("offline proxy-only configuration changed SMB volume DriverOpts")
+    if any("build" in service for service in services.values()):
+        fail("generated Compose contains a build directive")
+    if any(not service.get("image") for service in services.values()):
+        fail("generated Compose contains a service without an image")
+    if any(service.get("pull_policy") != "never" for service in services.values()):
+        fail("generated Compose can pull from a registry")
+    if model.get("include"):
+        fail("generated Compose retains a Git include")
+    if any(service.get("platform") != AUDIT_PLATFORM for service in services.values()):
+        fail("generated Compose is not locked to the requested target platform")
+
+    api_image = f"atlas-offline/api:audit-1-{AUDIT_PLATFORM_TAG}"
+    api_services = {
+        "api",
+        "artifact-storage-init",
+        "embedding-model-init",
+        "celery-dispatch",
+        "celery-processing",
+        "celery-indexing",
+        "celery-maintenance",
+        "celery-beat",
+    }
+    if any(services[name]["image"] != api_image for name in api_services):
+        fail("API-family image mapping drifted")
+    expected_images = {
+        api_image,
+        f"atlas-offline/plugin-runner:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/office-renderer:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/web:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/postgres:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/redis:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/qdrant:audit-1-{AUDIT_PLATFORM_TAG}",
+    }
+    if {service["image"] for service in services.values()} != expected_images:
+        fail("offline image set drifted")
+
+    compose_text = (output / "docker-compose.yml").read_text(encoding="utf-8")
+    if "${ATLAS_SMB_PASSWORD:?set SMB password}" not in compose_text:
+        fail("operator SMB variable contract was not preserved")
+    if (
+        "${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+        not in compose_text
+    ):
+        fail("optional Azure proxy interpolation contract was not preserved")
+    if str(REPOSITORY) in compose_text or "context:" in compose_text:
+        fail("generated Compose retained a packaging-host path")
+    embedding_init = services["embedding-model-init"]
+    if embedding_init.get("restart") != "no":
+        fail("runtime asset initializer is not one-shot")
+    if embedding_init.get("environment", {}).get("HF_HUB_OFFLINE") != "1":
+        fail("runtime asset initializer is not fail-closed offline")
+    if (
+        embedding_init.get("environment", {}).get("TIKTOKEN_CACHE_DIR")
+        != "/var/lib/atlas-tiktoken"
+    ):
+        fail("runtime asset initializer does not use the embedded tokenizer cache")
+    if embedding_init.get("command") != [
+        "/app/.venv/bin/python",
+        "-m",
+        "atlas_production.async_runtime.offline_runtime_assets",
+    ]:
+        fail("runtime asset initializer command drifted")
+    for name in ("api", "celery-processing", "celery-indexing"):
+        dependency = services[name].get("depends_on", {}).get("embedding-model-init")
+        if not dependency or dependency.get("condition") != "service_completed_successfully":
+            fail(f"{name} is not gated on offline runtime asset verification")
+        if services[name].get("environment", {}).get("ATLAS_EMBEDDING_OFFLINE") != "true":
+            fail(f"{name} can attempt an online embedding model fetch")
+        if (
+            services[name].get("environment", {}).get("TIKTOKEN_CACHE_DIR")
+            != "/var/lib/atlas-tiktoken"
+        ):
+            fail(f"{name} does not use the embedded tokenizer cache")
+
+    manifest = json.loads((output / "bundle-manifest.json").read_text())
+    if manifest["image_archive"] is not None:
+        fail("compose-only audit unexpectedly created an image archive")
+    if set(manifest["images"]) != expected_images:
+        fail("manifest image set drifted")
+    if manifest["platform"] != AUDIT_PLATFORM:
+        fail("manifest target platform drifted")
+    if any(record["platform"] != AUDIT_PLATFORM for record in manifest["image_records"]):
+        fail("manifest image platform records drifted")
+    if set(manifest["documentation"]) != {
+        "README.md",
+        "SMB-RUNBOOK.md",
+        "THIRD_PARTY_NOTICES.md",
+        "OFFICE_RENDERER_THIRD_PARTY_NOTICES.md",
+        "IMAGE-LOCK.json",
+    }:
+        fail("manifest documentation set drifted")
+
+    checksum_lines = (output / "SHA256SUMS").read_text().splitlines()
+    checksums = dict(line.split("  ", 1)[::-1] for line in checksum_lines)
+    for name in expected_files - {"SHA256SUMS"}:
+        if checksums.get(name) != digest(output / name):
+            fail(f"checksum mismatch for {name}")
+
+print("offline Portainer bundle audit passed")

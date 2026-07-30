@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content_kind_hint": {"enum": ["text", "table", "figure", "formula", "image", "unknown"]},
+    "element_kind_hint": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "locator_draft": {"minProperties": 1, "type": "object"},
+    "native_artifact_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "normalized_text_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "parent_region_identity": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "quality_flag_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array"},
+    "region_kind": {"enum": ["page", "slide", "paragraph", "table", "figure", "image_region"]},
+    "source_region_identity": {"minLength": 1, "type": "string"},
+    "structured_content_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]}
+  },
+  "required": ["source_region_identity", "region_kind", "content_kind_hint", "locator_draft", "element_kind_hint", "parent_region_identity", "normalized_text_ref", "structured_content_ref", "native_artifact_ref", "quality_flag_refs"],
+  "type": "object"
+}

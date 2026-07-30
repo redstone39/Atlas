@@ -1,0 +1,30 @@
+[project]
+name = "atlas-production-api"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "alembic>=1.18,<1.19",
+    "atlas-processing-sdk",
+    "celery[redis]==5.6.3",
+    "cryptography>=45,<46",
+    "fastembed==0.8.0",
+    "fastapi>=0.116,<0.117",
+    "httpx>=0.28,<0.29",
+    "pillow==12.3.0",
+    "pikepdf==10.10.0",
+    "pypdf==6.0.0",
+    "python-multipart>=0.0.20,<0.1",
+    "psycopg[binary]>=3.2,<3.4",
+    "qdrant-client==1.18.0",
+    "sqlalchemy>=2.0,<2.1",
+    "uvicorn>=0.35,<0.36",
+    "tiktoken>=0.13,<0.14",
+]
+
+[tool.uv.sources]
+atlas-processing-sdk = { path = "../plugin-sdk" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+]

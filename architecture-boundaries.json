@@ -1,0 +1,412 @@
+{
+  "schema_version": 1,
+  "source_roots": {
+    "backend": {
+      "path": "api/src/atlas_production",
+      "extensions": [".py"],
+      "exclude_path_prefixes": [],
+      "exclude_filename_suffixes": []
+    },
+    "frontend": {
+      "path": "web/src",
+      "extensions": [".ts", ".tsx"],
+      "exclude_path_prefixes": ["web/src/test"],
+      "exclude_filename_suffixes": [
+        ".d.ts",
+        ".test.ts",
+        ".test.tsx",
+        ".test-support.ts",
+        ".test-agent-fixtures.ts"
+      ]
+    }
+  },
+  "owners": [
+    {
+      "id": "backend_composition",
+      "role": "composition",
+      "path_prefixes": [
+        "api/src/atlas_production/__init__.py",
+        "api/src/atlas_production/app.py",
+        "api/src/atlas_production/infrastructure/composition.py",
+        "api/src/atlas_production/openapi_app.py",
+        "api/src/atlas_production/worker_composition.py"
+      ],
+      "public_contracts": []
+    },
+    {
+      "id": "backend_transport",
+      "role": "transport",
+      "path_prefixes": [
+        "api/src/atlas_production/routes",
+        "api/src/atlas_production/transport"
+      ],
+      "public_contracts": []
+    },
+    {
+      "id": "backend_async_runtime",
+      "role": "composition",
+      "path_prefixes": [
+        "api/src/atlas_production/async_runtime"
+      ],
+      "public_contracts": []
+    },
+    {
+      "id": "backend_shared",
+      "role": "shared",
+      "path_prefixes": [
+        "api/src/atlas_production/shared"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/shared/public.py",
+        "api/src/atlas_production/shared/audit_records.py",
+        "api/src/atlas_production/shared/clock.py",
+        "api/src/atlas_production/shared/digests.py"
+      ]
+    },
+    {
+      "id": "backend_infrastructure",
+      "role": "infrastructure",
+      "path_prefixes": [
+        "api/src/atlas_production/migrations",
+        "api/src/atlas_production/infrastructure"
+      ],
+      "public_contracts": []
+    },
+    {
+      "id": "identity_access",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/identity_access",
+        "api/src/atlas_production/rbac.py"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/identity_access/public.py",
+        "api/src/atlas_production/modules/identity_access/records.py",
+        "api/src/atlas_production/modules/identity_access/security.py",
+        "api/src/atlas_production/modules/identity_access/local_pilot.py"
+      ]
+    },
+    {
+      "id": "document_intake",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/document_intake"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/document_intake/public.py",
+        "api/src/atlas_production/modules/document_intake/records.py"
+      ]
+    },
+    {
+      "id": "artifact_storage",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/artifact_storage"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/artifact_storage/public.py",
+        "api/src/atlas_production/modules/artifact_storage/records.py"
+      ]
+    },
+    {
+      "id": "project_governance",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/project_governance"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/project_governance/public.py",
+        "api/src/atlas_production/modules/project_governance/records.py"
+      ]
+    },
+    {
+      "id": "processing_pipeline",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/processing_pipeline"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/processing_pipeline/public.py",
+        "api/src/atlas_production/modules/processing_pipeline/records.py"
+      ]
+    },
+    {
+      "id": "conversation",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/conversation"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/conversation/public.py"
+      ]
+    },
+    {
+      "id": "authorization",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/authorization"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/authorization/public.py"
+      ]
+    },
+    {
+      "id": "context_engineering",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/context_engineering"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/context_engineering/public.py"
+      ]
+    },
+    {
+      "id": "turn_runtime",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/turn_runtime"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/turn_runtime/public.py"
+      ]
+    },
+    {
+      "id": "turn_execution",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/turn_execution"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/turn_execution/public.py"
+      ]
+    },
+    {
+      "id": "workspace_turn",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/workspace_turn"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/workspace_turn/public.py"
+      ]
+    },
+    {
+      "id": "citation_preview",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/citation_preview"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/citation_preview/public.py"
+      ]
+    },
+    {
+      "id": "result_governance",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/result_governance"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/result_governance/public.py"
+      ]
+    },
+    {
+      "id": "retrieval",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/retrieval"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/retrieval/public.py"
+      ]
+    },
+    {
+      "id": "model_routing",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/providers.py",
+        "api/src/atlas_production/modules/model_routing"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/model_routing/public.py",
+        "api/src/atlas_production/modules/model_routing/records.py"
+      ]
+    },
+    {
+      "id": "agent_runtime",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/agent_runtime"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/agent_runtime/public.py"
+      ]
+    },
+    {
+      "id": "audit",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/audit"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/audit/public.py"
+      ]
+    },
+    {
+      "id": "ops",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/ops"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/ops/public.py"
+      ]
+    },
+    {
+      "id": "conversation_audit",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/conversation_audit"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/conversation_audit/public.py"
+      ]
+    },
+    {
+      "id": "frontend_composition",
+      "role": "composition",
+      "path_prefixes": [
+        "web/src/App.tsx",
+        "web/src/main.tsx",
+        "web/src/i18n.ts",
+        "web/src/app",
+        "web/src/locales"
+      ],
+      "public_contracts": []
+    },
+    {
+      "id": "frontend_pages",
+      "role": "transport",
+      "path_prefixes": ["web/src/pages"],
+      "public_contracts": []
+    },
+    {
+      "id": "frontend_features",
+      "role": "module",
+      "path_prefixes": ["web/src/features"],
+      "public_contracts": [
+        "web/src/features/agent-access/index.ts",
+        "web/src/features/conversation-audit/index.ts",
+        "web/src/features/document-library/index.ts",
+        "web/src/features/identity-session/index.ts",
+        "web/src/features/invite-acceptance/index.ts",
+        "web/src/features/knowledge-library/index.ts",
+        "web/src/features/model-routing/index.ts",
+        "web/src/features/ops/index.ts",
+        "web/src/features/project-governance/index.ts",
+        "web/src/features/team-administration/index.ts",
+        "web/src/features/user-administration/index.ts",
+        "web/src/features/workspace/index.ts"
+      ]
+    },
+    {
+      "id": "frontend_shared",
+      "role": "shared",
+      "path_prefixes": [
+        "web/src/components/ui",
+        "web/src/hooks",
+        "web/src/lib",
+        "web/src/shared"
+      ],
+      "public_contracts": []
+    }
+  ],
+  "dependency_rules": [
+    {
+      "id": "backend-routes-do-not-import-routes",
+      "language": "python",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["atlas_production.routes"],
+      "forbidden_target_prefixes": ["atlas_production.routes"],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "backend-shared-dependency-direction",
+      "language": "python",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["atlas_production.shared"],
+      "forbidden_target_prefixes": [
+        "atlas_production.app",
+        "atlas_production.routes",
+        "atlas_production.modules",
+        "atlas_production.infrastructure",
+        "atlas_production.stores",
+        "atlas_production.orm"
+      ],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "backend-module-public-api",
+      "language": "python",
+      "kind": "cross_slice_public_api",
+      "slice_root": "atlas_production.modules",
+      "public_target_suffixes": ["", ".public", ".records"]
+    },
+    {
+      "id": "backend-routes-use-module-public-api",
+      "language": "python",
+      "kind": "public_api_only",
+      "source_prefixes": ["atlas_production.routes"],
+      "target_root": "atlas_production.modules",
+      "public_target_suffixes": [".public"]
+    },
+    {
+      "id": "frontend-shared-dependency-direction",
+      "language": "typescript",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["shared", "components/ui", "hooks", "lib"],
+      "forbidden_target_prefixes": ["app", "pages", "features"],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "frontend-features-do-not-import-upper-layers",
+      "language": "typescript",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["features"],
+      "forbidden_target_prefixes": ["app", "pages"],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "frontend-feature-public-api",
+      "language": "typescript",
+      "kind": "cross_slice_public_api",
+      "slice_root": "features",
+      "public_target_suffixes": ["/index"]
+    },
+    {
+      "id": "frontend-consumers-use-feature-public-api",
+      "language": "typescript",
+      "kind": "public_api_only",
+      "source_prefixes": ["pages", "api", "types"],
+      "target_root": "features",
+      "public_target_suffixes": ["/index"]
+    },
+    {
+      "id": "frontend-pages-do-not-import-app",
+      "language": "typescript",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["pages"],
+      "forbidden_target_prefixes": ["app"],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "frontend-pages-do-not-import-pages",
+      "language": "typescript",
+      "kind": "forbid_prefix",
+      "source_prefixes": ["pages"],
+      "forbidden_target_prefixes": ["pages"],
+      "allowed_target_ids": []
+    }
+  ],
+  "ownership_exceptions": []
+}

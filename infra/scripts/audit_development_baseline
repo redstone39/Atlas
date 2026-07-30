@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Fail when resettable-development compatibility paths reappear."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+MIGRATIONS = ROOT / "api/src/atlas_production/migrations/versions"
+EXPECTED_MIGRATION = "20260711_0001_development_baseline.py"
+
+
+def migration_contract() -> list[str]:
+    failures: list[str] = []
+    revisions = sorted(
+        path for path in MIGRATIONS.glob("*.py") if path.name != "__init__.py"
+    )
+    if [path.name for path in revisions] != [EXPECTED_MIGRATION]:
+        failures.append(
+            "expected exactly one development baseline migration: "
+            f"{EXPECTED_MIGRATION}"
+        )
+        return failures
+
+    values: dict[str, object] = {}
+    tree = ast.parse(revisions[0].read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in {"revision", "down_revision"}:
+                values[node.target.id] = ast.literal_eval(node.value)
+    if values.get("revision") != "20260711_0001":
+        failures.append("development baseline revision must be 20260711_0001")
+    if values.get("down_revision", object()) is not None:
+        failures.append("development baseline down_revision must be None")
+    return failures
+
+
+def compatibility_contract() -> list[str]:
+    failures: list[str] = []
+    forbidden = [
+        "atlas_" + "production_snapshots",
+        "atlas_" + "memberships",
+        "atlas_" + "queries",
+        "atlas_" + "citation_projects",
+        "grant_" + "compatibility_membership",
+        "revoke_" + "compatibility_membership",
+        "build_" + "legacy_cards",
+        "map_" + "legacy_projects",
+        "/api/v1/admin/" + "memberships",
+        "/api/v1/workspace/" + "queries",
+        "ask" + "CompatibilityQuery",
+        "_legacy_" + "password_digest",
+        "atlas_" + "citation_viewer_access",
+        "atlas_" + "citation_viewer_sessions",
+        "atlas_" + "citation_viewer_items",
+        "atlas_" + "conversations",
+        "atlas_" + "conversation_summaries",
+        "atlas_" + "conversation_turns",
+        "atlas_" + "response_segment_records",
+        "atlas_" + "claim_records",
+        "atlas_" + "claim_evidence_links",
+        "atlas_" + "claim_support_assessments",
+        "atlas_" + "turn_requests",
+        "atlas_" + "runtime_attempts",
+        "atlas_" + "runtime_events",
+        "atlas_" + "citation_anchors",
+        "atlas_" + "context_packs",
+        "atlas_" + "conversation_plans",
+        "atlas_" + "evidence_packs",
+        "atlas_" + "prompt_snapshots",
+        "atlas_" + "tool_invocations",
+    ]
+    scan_roots = [
+        ROOT / "api/src",
+        ROOT / "api/tests",
+        ROOT / "web/src",
+        ROOT / "infra/scripts",
+    ]
+    this_file = Path(__file__).resolve()
+    allowed_contract_tests = {
+        (ROOT / "api/tests/test_development_baseline.py").resolve(),
+        (ROOT / "api/tests/test_development_baseline_postgres.py").resolve(),
+        (ROOT / "api/tests/test_turn_owner_persistence_schema_baseline.py").resolve(),
+        (ROOT / "api/tests/postgres_integration/test_turn_owner_stores.py").resolve(),
+    }
+    for scan_root in scan_roots:
+        for path in scan_root.rglob("*"):
+            if not path.is_file() or path.resolve() in {this_file, *allowed_contract_tests}:
+                continue
+            if any(part in {"node_modules", "dist", "__pycache__"} for part in path.parts):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            for token in forbidden:
+                if token in content:
+                    failures.append(f"{path.relative_to(ROOT)} contains {token}")
+    return failures
+
+
+def policy_contract() -> list[str]:
+    policy = (ROOT / "README.md").read_text(encoding="utf-8")
+    if "resettable_development" not in policy:
+        return ["README.md must declare the resettable_development lifecycle"]
+    return []
+
+
+def main() -> int:
+    failures = migration_contract() + compatibility_contract() + policy_contract()
+    if failures:
+        print("Development baseline audit failed:")
+        for failure in failures:
+            print(f"- {failure}")
+        return 1
+    print("Development baseline audit passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [{
+    "if": {"properties": {"channel_id": {"const": "table"}}, "required": ["channel_id"]},
+    "then": {"properties": {
+      "cell_bboxes": {"minProperties": 1, "type": "object"},
+      "content_kind_hint": {"const": "table"},
+      "element_kind_hint": {"const": "table"},
+      "table_grid": {"type": "object"}
+    }}
+  }],
+  "properties": {
+    "candidate_payload_ref": {"minLength": 1, "type": "string"},
+    "cell_bboxes": {"anyOf": [{"additionalProperties": {"items": {"type": "number"}, "maxItems": 4, "minItems": 4, "type": "array"}, "type": "object"}, {"type": "null"}]},
+    "channel_id": {"minLength": 1, "type": "string"},
+    "content_kind_hint": {"enum": ["text", "table", "figure", "formula", "image", "unknown"]},
+    "content_rendition_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "preview_region": {"anyOf": [{"additionalProperties": false, "properties": {"coordinate_system": {"const": "pdf_crop_box_relative_bottom_left"}, "geometry_version": {"const": "docling-page-region-v1"}, "page_height": {"exclusiveMinimum": 0, "type": "number"}, "page_number": {"minimum": 1, "type": "integer"}, "page_width": {"exclusiveMinimum": 0, "type": "number"}, "rectangles": {"items": {"items": {"type": "number"}, "maxItems": 4, "minItems": 4, "type": "array"}, "minItems": 1, "type": "array"}, "region_kind": {"enum": ["paragraph", "table", "figure", "image"]}, "source_element_id": {"minLength": 1, "type": "string"}}, "required": ["page_number", "region_kind", "source_element_id", "coordinate_system", "rectangles", "page_width", "page_height", "geometry_version"], "type": "object"}, {"type": "null"}]},
+    "element_kind_hint": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "figure_asset_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array"},
+    "native_artifact_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "output_contract_version": {"const": "eir-draft-v1"},
+    "quality_flag_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array"},
+    "source_region_ids": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array"},
+    "structured_content_ref": {"anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]},
+    "table_asset_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array"},
+    "table_grid": {"anyOf": [{"type": "object"}, {"type": "null"}]}
+  },
+  "required": ["source_region_ids", "channel_id", "output_contract_version", "candidate_payload_ref", "content_kind_hint", "element_kind_hint", "structured_content_ref", "native_artifact_ref", "table_grid", "cell_bboxes", "table_asset_refs", "figure_asset_refs", "content_rendition_ref", "preview_region", "quality_flag_refs"],
+  "type": "object"
+}

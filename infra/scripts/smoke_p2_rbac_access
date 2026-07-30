@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+project_name="${ATLAS_PRODUCTION_COMPOSE_PROJECT:-atlas-production-p2-rbac-smoke}"
+api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}"
+web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}"
+cookie_file="$(mktemp)"
+user_cookie_file="$(mktemp)"
+fixture_file="$(mktemp)"
+suffix="$(date +%s)"
+project_id="proj-p2-rbac-${suffix}"
+document_id="doc-p2-rbac-${suffix}"
+user_email="rbac-smoke-${suffix}@example.test"
+project_name_label="P2 RBAC Smoke ${suffix}"
+parent_team_id="team-p2-parent-${suffix}"
+child_team_id="team-p2-child-${suffix}"
+export ATLAS_BOOTSTRAP_ADMIN_EMAIL="${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-smoke-admin-${suffix}@example.test}"
+export ATLAS_BOOTSTRAP_ADMIN_PASSWORD="${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-SmokeBootstrap-${suffix}!}"
+
+compose() {
+  docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
+}
+
+cleanup() {
+  rm -f "$cookie_file" "$user_cookie_file" "$fixture_file"
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  for _ in {1..90}; do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for $name at $url" >&2
+  compose logs >&2 || true
+  return 1
+}
+
+json_field() {
+  python3 -c 'import json,sys; data=json.load(sys.stdin); path=sys.argv[1].split(".");
+value=data
+for key in path:
+    value=value[int(key)] if key.isdigit() else value[key]
+print(value)' "$1"
+}
+
+admin_login_json() {
+  python3 -c 'import json,os,sys; print(json.dumps({
+"email": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
+"password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
+"idempotency_key": sys.argv[1],
+}))' "$1"
+}
+
+api_get() {
+  local path="$1"
+  curl -fsS -b "$cookie_file" -c "$cookie_file" "${api_url}${path}"
+}
+
+api_post() {
+  local path="$1"
+  local body="$2"
+  curl -fsS -b "$cookie_file" -c "$cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$body" \
+    "${api_url}${path}"
+}
+
+user_api_post() {
+  local path="$1"
+  local body="$2"
+  curl -fsS -b "$user_cookie_file" -c "$user_cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$body" \
+    "${api_url}${path}"
+}
+
+user_document_visible() {
+  curl -fsS -b "$user_cookie_file" "${api_url}/api/v1/library/documents" \
+    | python3 -c 'import json,sys; document_id=sys.argv[1]; data=json.load(sys.stdin); print("True" if any(item["document_id"] == document_id for item in data["documents"]) else "False")' \
+      "$document_id"
+}
+
+latest_decision_source() {
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select coalesce(source_id, '') from atlas_access_decisions where actor_id = '${actor_id}' and project_id = '${project_id}' and action = 'workspace_query' order by created_at desc, decision_id desc limit 1;" \
+    | tr -d '[:space:]'
+}
+
+compose up --build -d
+
+wait_for_url "production API" "${api_url}/api/v1/ops/health"
+wait_for_url "production Web" "${web_url}/login"
+
+api_post "/api/v1/auth/sessions" \
+  "$(admin_login_json smoke-login)" >/dev/null
+
+invite="$(
+  api_post "/api/v1/admin/user-invites" \
+    "{\"display_name\":\"RBAC Smoke User\",\"email\":\"${user_email}\",\"system_role\":\"user\",\"idempotency_key\":\"invite-${suffix}\"}"
+)"
+actor_id="$(printf '%s' "$invite" | json_field invite.actor_id)"
+invite_token="$(printf '%s' "$invite" | json_field local_pilot_acceptance.acceptance_token)"
+
+api_post "/api/v1/auth/invitations/accept" \
+  "{\"invite_token\":\"${invite_token}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"accept-${suffix}\"}" >/dev/null
+
+api_post "/api/v1/admin/projects" \
+  "{\"project_id\":\"${project_id}\",\"name\":\"${project_name_label}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}" >/dev/null
+
+printf 'Atlas contextual RBAC smoke fixture.\n' >"$fixture_file"
+curl -fsS -b "$cookie_file" -c "$cookie_file" \
+  -F "document_id=${document_id}" \
+  -F "scope_type=project" \
+  -F "scope_id=${project_id}" \
+  -F "allow_member_download=true" \
+  -F "idempotency_key=upload-${document_id}" \
+  -F "file=@${fixture_file};filename=rbac-smoke.txt;type=text/plain" \
+  "${api_url}/api/v1/admin/document-library" >/dev/null
+
+user_api_post "/api/v1/auth/sessions" \
+  "{\"email\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"member-login-${suffix}\"}" >/dev/null
+
+api_post "/api/v1/admin/teams" \
+  "{\"team_id\":\"${parent_team_id}\",\"name\":\"Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}" >/dev/null
+api_post "/api/v1/admin/teams" \
+  "{\"team_id\":\"${child_team_id}\",\"name\":\"Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}" >/dev/null
+api_post "/api/v1/admin/teams/${child_team_id}/members" \
+  "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${actor_id}\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
+
+api_post "/api/v1/admin/projects/${project_id}/members" \
+  "{\"subject_type\":\"team\",\"subject_id\":\"${parent_team_id}\",\"role\":\"admin\",\"effect\":\"deny\",\"idempotency_key\":\"grant-parent-deny-${suffix}\"}" >/dev/null
+api_post "/api/v1/admin/projects/${project_id}/members" \
+  "{\"subject_type\":\"team\",\"subject_id\":\"${child_team_id}\",\"role\":\"viewer\",\"effect\":\"allow\",\"idempotency_key\":\"grant-child-allow-${suffix}\"}" >/dev/null
+
+if [[ "$(user_document_visible)" != "True" ]]; then
+  echo "Child team allow did not override parent team deny for workspace query" >&2
+  exit 1
+fi
+if [[ "$(latest_decision_source)" != "grant-project-access-${project_id}-team-${child_team_id}" ]]; then
+  echo "The document-library read did not record the child team grant as the winning source" >&2
+  exit 1
+fi
+
+api_post "/api/v1/admin/projects/${project_id}/members" \
+  "{\"subject_type\":\"team\",\"subject_id\":\"${child_team_id}\",\"role\":\"viewer\",\"effect\":\"deny\",\"idempotency_key\":\"grant-child-deny-${suffix}\"}" >/dev/null
+if [[ "$(user_document_visible)" != "False" ]]; then
+  echo "Same-tier deny did not override child team allow" >&2
+  exit 1
+fi
+
+api_post "/api/v1/admin/projects/${project_id}/members" \
+  "{\"subject_type\":\"user\",\"subject_id\":\"${actor_id}\",\"role\":\"viewer\",\"effect\":\"allow\",\"idempotency_key\":\"grant-direct-allow-${suffix}\"}" >/dev/null
+if [[ "$(user_document_visible)" != "True" ]]; then
+  echo "Direct user grant did not override team deny" >&2
+  exit 1
+fi
+if [[ "$(latest_decision_source)" != "grant-project-access-${project_id}-user-${actor_id}" ]]; then
+  echo "The document-library read did not record the direct grant as the winning source" >&2
+  exit 1
+fi
+
+schema_version="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select version_num from alembic_version;" \
+    | tr -d '[:space:]'
+)"
+expected_schema_version="$(
+  python3 - <<'PY'
+import ast
+from pathlib import Path
+
+revisions = set()
+down_revisions = set()
+for path in Path("api/src/atlas_production/migrations/versions").glob("*.py"):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values = {}
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in {"revision", "down_revision"}:
+                values[node.target.id] = ast.literal_eval(node.value)
+    revisions.add(values["revision"])
+    down_revision = values.get("down_revision")
+    if isinstance(down_revision, str):
+        down_revisions.add(down_revision)
+    elif down_revision:
+        down_revisions.update(down_revision)
+heads = revisions - down_revisions
+if len(heads) != 1:
+    raise SystemExit(f"Expected one Alembic head, found {sorted(heads)}")
+print(heads.pop())
+PY
+)"
+if [[ "$schema_version" != "$expected_schema_version" ]]; then
+  echo "PostgreSQL schema version did not reach the current migration head" >&2
+  exit 1
+fi
+
+team_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_teams where team_id in ('${parent_team_id}', '${child_team_id}');" \
+    | tr -d '[:space:]'
+)"
+grant_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_permission_grants where project_id = '${project_id}' and status = 'active';" \
+    | tr -d '[:space:]'
+)"
+decision_count="$(
+  compose exec -T postgres psql -U atlas -d atlas_production -tAc \
+    "select count(*) from atlas_access_decisions where project_id = '${project_id}';" \
+    | tr -d '[:space:]'
+)"
+if [[ "$team_count" != "2" || "$grant_count" -lt "4" || "$decision_count" -lt "4" ]]; then
+  echo "Structured RBAC tables did not persist expected runtime data" >&2
+  exit 1
+fi
+
+compose restart api >/dev/null
+wait_for_url "restarted production API" "${api_url}/api/v1/ops/health"
+
+api_post "/api/v1/auth/sessions" \
+  "$(admin_login_json smoke-login-after-restart)" >/dev/null
+
+user_api_post "/api/v1/auth/sessions" \
+  "{\"email\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"member-login-after-restart-${suffix}\"}" >/dev/null
+
+if [[ "$(user_document_visible)" != "True" ]]; then
+  echo "Persisted direct user grant was not effective after API restart" >&2
+  exit 1
+fi
+
+users="$(api_get "/api/v1/admin/users")"
+if ! printf '%s' "$users" | grep -Fq "$actor_id"; then
+  echo "Persisted user was not found after API restart" >&2
+  exit 1
+fi
+if printf '%s' "$users" | grep -Fq "$invite_token"; then
+  echo "Invite token leaked from admin users list" >&2
+  exit 1
+fi
+if printf '%s' "$users" | grep -Eq "password_digest|token_digest|invite_token_digest"; then
+  echo "Secret digest field leaked from admin users list" >&2
+  exit 1
+fi
