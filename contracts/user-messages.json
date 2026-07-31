@@ -832,6 +832,9 @@
     "audit.admin_opened_bounded_runtime_trace": {
       "params": {}
     },
+    "audit.admin_opened_declared_evidence": {
+      "params": {}
+    },
     "project.member_was_not_found_after_update": {
       "params": {}
     },

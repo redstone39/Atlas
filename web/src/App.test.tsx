@@ -398,7 +398,13 @@ describe("Atlas production web", () => {
     expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
     expect(screen.queryByText("Conversations")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Message")).toBeInTheDocument();
+    const composer = screen.getByLabelText("Message");
+    expect(composer).toHaveAttribute(
+      "placeholder",
+      "For example: summarize a document or compare information across related sources.",
+    );
+    await waitFor(() => expect(composer).toHaveFocus());
+    expect(composer.parentElement).toHaveClass("items-center");
     expect(screen.queryByText("Finish workspace setup")).not.toBeInTheDocument();
     expect(screen.queryByText("Knowledge status")).not.toBeInTheDocument();
     expect(screen.queryByText("Safety checks")).not.toBeInTheDocument();
@@ -545,6 +551,11 @@ describe("Atlas production web", () => {
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     fireEvent.keyDown(composer, { key: "Enter", code: "Enter", keyCode: 229 });
     fireEvent.keyDown(composer, { key: "Enter", code: "Enter", shiftKey: true });
+    expect(fireEvent.keyDown(composer, {
+      key: "Enter",
+      code: "Enter",
+      altKey: true,
+    })).toBe(true);
     expect(conversationCreateCalls()).toHaveLength(0);
 
     fireEvent.keyDown(composer, { key: "Enter", code: "Enter", keyCode: 13 });
@@ -4414,6 +4425,10 @@ describe("Atlas production web", () => {
     fireEvent.click(screen.getByRole("button", { name: "Knowledge Library" }));
 
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New conversation" }))
+      .toHaveAttribute("data-variant", "ghost");
+    expect(screen.getByRole("button", { name: "Knowledge Library" }))
+      .toHaveAttribute("data-variant", "secondary");
     expect(screen.getByRole("button", { name: "Knowledge Library" }))
       .toHaveAttribute("aria-current", "page");
     expect(screen.getByText("Signal Integrity Guide")).toBeInTheDocument();
@@ -4431,6 +4446,57 @@ describe("Atlas production web", () => {
         { credentials: "include", method: "HEAD" },
       ),
     );
+  });
+
+  it("shows a spinner only beside conversations whose latest turn is processing", async () => {
+    window.history.pushState({}, "", "/workspace");
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/workspace/conversations" &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse({
+          conversations: [
+            {
+              conversation_id: "conv-processing-001",
+              owner_actor_id: "user-engineer-001",
+              title: "Processing conversation",
+              status: "active",
+              response_language: "en",
+              created_at: "2026-07-31T00:00:00Z",
+              updated_at: "2026-07-31T00:01:00Z",
+              last_turn_status: "processing",
+            },
+            {
+              conversation_id: "conv-completed-001",
+              owner_actor_id: "user-engineer-001",
+              title: "Completed conversation",
+              status: "active",
+              response_language: "en",
+              created_at: "2026-07-31T00:00:00Z",
+              updated_at: "2026-07-31T00:00:30Z",
+              last_turn_status: "completed",
+            },
+          ],
+        });
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+
+    const processingButton = (await screen.findByText("Processing conversation"))
+      .closest("button");
+    const completedButton = screen.getByText("Completed conversation").closest("button");
+    expect(processingButton?.querySelector(
+      '[data-slot="conversation-processing-indicator"]',
+    )).toHaveClass("animate-spin");
+    expect(completedButton?.querySelector(
+      '[data-slot="conversation-processing-indicator"]',
+    )).not.toBeInTheDocument();
   });
 
   it("Knowledge Library sidebar returns to a new or selected Workspace conversation", async () => {
@@ -4466,7 +4532,9 @@ describe("Atlas production web", () => {
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
     await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
-    expect(await screen.findByLabelText("Message")).toHaveValue("");
+    const composer = await screen.findByLabelText("Message");
+    expect(composer).toHaveValue("");
+    await waitFor(() => expect(composer).toHaveFocus());
     expect(screen.queryByText(
       "The PCIe reference lane controlled impedance target is 85 ohms differential.",
     )).not.toBeInTheDocument();

@@ -1108,7 +1108,7 @@ export function ModelRoutingFeature({
       </Dialog>
 
       <Dialog open={modelDialogOpen} onOpenChange={(open) => !open && closeModelDialog()}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editingRoute ? t("models.editModel") : t("models.addModel")}</DialogTitle>
             <DialogDescription>{t("models.modelDialogDescription")}</DialogDescription>

@@ -616,7 +616,7 @@ export function DocumentLibraryFeature({
       </Dialog>
 
       <Dialog open={Boolean(selectedDocument)} onOpenChange={(open) => !open && setSelectedDocumentId("")}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent>
           {selectedDocument && (
             <>
               <DialogHeader>

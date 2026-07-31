@@ -115,6 +115,7 @@ export function WorkspaceFeature({
   const [citationLoading, setCitationLoading] = useState(false);
   const composerCompositionRef = useRef(false);
   const compositionEndTimerRef = useRef<number | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const conversationRequestRef = useRef<AbortController | null>(null);
   const liveTurnRequestRef = useRef<AbortController | null>(null);
   const initialLoading = historyLoading || conversationLoading;
@@ -314,6 +315,24 @@ export function WorkspaceFeature({
     void selectConversation(conversationId);
   }, [activeView, conversationId, conversationReloadKey]);
 
+  useEffect(() => {
+    if (
+      activeView === "/workspace" &&
+      !conversationId &&
+      !activeConversation &&
+      !initialLoading &&
+      !reconnectingExecutionId
+    ) {
+      composerRef.current?.focus();
+    }
+  }, [
+    activeView,
+    conversationId,
+    activeConversation,
+    initialLoading,
+    reconnectingExecutionId,
+  ]);
+
   function startNewConversation() {
     cancelLiveTurnRequest();
     conversationRequestRef.current?.abort();
@@ -332,6 +351,7 @@ export function WorkspaceFeature({
     if (conversationId || activeView !== "/workspace") {
       onNavigate("/workspace");
     }
+    composerRef.current?.focus();
   }
 
   async function openConversation(conversationId: string) {
@@ -542,6 +562,7 @@ export function WorkspaceFeature({
     if (
       event.key !== "Enter" ||
       event.shiftKey ||
+      event.altKey ||
       composerCompositionRef.current ||
       event.nativeEvent.isComposing ||
       event.nativeEvent.keyCode === 229
@@ -787,8 +808,9 @@ export function WorkspaceFeature({
                 <FieldLabel htmlFor="message" className="sr-only">
                   {t("workspace.message")}
                 </FieldLabel>
-                <div className="flex items-end gap-2">
+                <div className="flex items-center gap-2">
                   <Textarea
+                    ref={composerRef}
                     id="message"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
@@ -872,7 +894,7 @@ function ConversationHistorySidebar({
       {header}
       <div className="flex flex-col gap-1 p-3 pb-1">
         <Button
-          variant="secondary"
+          variant={knowledgeLibraryActive ? "ghost" : "secondary"}
           className="w-full justify-start"
           onClick={onNew}
         >
@@ -930,7 +952,14 @@ function ConversationHistorySidebar({
             <span className="flex min-w-0 flex-col">
               <span className="truncate font-medium">{conversation.title}</span>
               {conversation.last_turn_status && (
-                <span className="mt-1">
+                <span className="mt-1 flex items-center gap-1.5">
+                  {conversation.last_turn_status === "processing" && (
+                    <Spinner
+                      aria-hidden="true"
+                      className="size-3"
+                      data-slot="conversation-processing-indicator"
+                    />
+                  )}
                   <StatusBadge {...resultStatusPresentation(conversation.last_turn_status, t)} />
                 </span>
               )}

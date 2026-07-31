@@ -52,10 +52,7 @@ export function EvidenceViewerDialog({
       }}
     >
       <DialogContent
-        className={cn(
-          "max-h-[85vh] overflow-y-auto",
-          pagePreview ? "sm:max-w-5xl" : "sm:max-w-2xl",
-        )}
+        className="max-h-[85vh] overflow-y-auto"
       >
         <DialogHeader>
           <DialogTitle>{t("citationViewer.title")}</DialogTitle>

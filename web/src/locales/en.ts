@@ -97,9 +97,9 @@ export const en = {
 "workspace.question": "Message",
 "workspace.message": "Message",
 "workspace.questionHelp": "Atlas checks sources before answering and says when it does not know.",
-"workspace.messageHelp": "Press Enter to send. Press Shift Enter for a new line.",
+"workspace.messageHelp": "Press Enter to send. Press Shift Enter or Alt/Option Enter for a new line.",
 "workspace.supportedQuestion":
-  "Message Atlas about PCIe impedance targets, stackup notes, or another engineering question.",
+  "For example: summarize a document or compare information across related sources.",
 "workspace.unsupportedQuestion":
   "What is the full board-level root cause of the intermittent boot failure?",
 "workspace.ask": "Send",
@@ -1185,6 +1185,7 @@ export const en = {
 "messages.audit.admin_listed_conversation_history": "The administrator viewed the conversation history.",
 "messages.audit.admin_opened_conversation_transcript": "The administrator opened the conversation transcript.",
 "messages.audit.admin_opened_bounded_runtime_trace": "The administrator opened the bounded runtime trace.",
+"messages.audit.admin_opened_declared_evidence": "The administrator opened the model-declared evidence.",
 "messages.audit.metadata_was_redacted": "Sensitive metadata was redacted.",
 "messages.audit.runtime_converged": "Runtime state has converged.",
 "messages.audit.runtime_trace_was_not_found": "The runtime trace was not found.",

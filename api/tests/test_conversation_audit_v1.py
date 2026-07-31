@@ -7,6 +7,9 @@ import pytest
 from atlas_production.infrastructure.persistence.audit_events import (
     _audit_metadata_payload,
 )
+from atlas_production.infrastructure.postgres_audit_adapter import (
+    build_audit_event,
+)
 from atlas_production.modules.conversation.public import ConversationV1
 from atlas_production.modules.conversation_audit.contracts import ConversationAuditError
 from atlas_production.modules.conversation_audit.service import ConversationAuditService
@@ -95,6 +98,20 @@ class AuditWriter:
         metadata = facts.get("metadata")
         assert metadata is None or isinstance(metadata, dict)
         _audit_metadata_payload(metadata)
+        actor_id = facts.get("actor_id")
+        target_ref = facts.get("target_ref")
+        message_code = facts.get("message_code")
+        assert actor_id is None or isinstance(actor_id, str)
+        assert target_ref is None or isinstance(target_ref, str)
+        assert isinstance(message_code, str)
+        build_audit_event(
+            event_type=event_type,
+            actor_id=actor_id,
+            target_ref=target_ref,
+            project_id=None,
+            message_code=message_code,
+            metadata=metadata or {},
+        )
         self.calls.append((event_type, facts))
         return object()
 
@@ -219,6 +236,9 @@ def test_admin_declared_evidence_read_is_role_checked_and_audited() -> None:
         ("admin-1", "conversation-1", "turn-1", "declared-open-1")
     ]
     assert writer.calls[0][0] == "read_declared_evidence"
+    assert writer.calls[0][1]["message_code"] == (
+        "audit.admin_opened_declared_evidence"
+    )
 
     user = UserRecord("user-1", "User", None, "user", None)
     with pytest.raises(ConversationAuditError):

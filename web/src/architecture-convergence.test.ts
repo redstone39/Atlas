@@ -183,6 +183,31 @@ describe("frontend compatibility convergence", () => {
     }
   });
 
+  it("keeps every centered modal on the shared large width", () => {
+    const dialogSource = readFileSync(
+      resolve(webRoot, "src/components/ui/dialog.tsx"),
+      "utf8",
+    );
+    const alertDialogSource = readFileSync(
+      resolve(webRoot, "src/components/ui/alert-dialog.tsx"),
+      "utf8",
+    );
+    expect(dialogSource).toContain("sm:max-w-3xl");
+    expect(alertDialogSource).toContain("sm:max-w-3xl");
+    expect(alertDialogSource).not.toMatch(/data-\[size=sm\]:max-w-/);
+
+    for (const file of activeUiSourceFiles(resolve(webRoot, "src"))) {
+      if (
+        file.endsWith("/components/ui/dialog.tsx") ||
+        file.endsWith("/components/ui/alert-dialog.tsx")
+      ) continue;
+      const source = readFileSync(file, "utf8");
+      expect(source, file).not.toMatch(
+        /<(?:DialogContent|AlertDialogContent)\b[^>]*(?:sm:)?max-w-/s,
+      );
+    }
+  });
+
   it("owns shared sidebar chrome without a global authenticated header", () => {
     const accountMenuSource = readFileSync(
       resolve(webRoot, "src/app/AccountMenu.tsx"),

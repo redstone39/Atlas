@@ -1279,7 +1279,7 @@ export function ConversationAuditFeature({
         if (!open) setDiscoveryPreview(null);
       }}
     >
-      <DialogContent className="max-h-[85vh] sm:max-w-2xl">
+      <DialogContent className="max-h-[85vh]">
         <DialogHeader>
           <DialogTitle>{t("audit.discoveryPreviewTitle")}</DialogTitle>
           <DialogDescription className="break-all">
