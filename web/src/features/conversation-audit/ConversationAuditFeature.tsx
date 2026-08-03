@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Button } from "../../components/ui/button";
+import { Badge } from "../../components/ui/badge";
 import { Bubble, BubbleContent } from "../../components/ui/bubble";
 import {
   Card,
@@ -47,6 +48,7 @@ import {
   LoadingState,
   PageHeader,
   StatusBadge,
+  TechnicalDetails,
   conversationTurnStatusPresentation,
   serverMessage,
 } from "../../shared/product-ui";
@@ -69,6 +71,7 @@ import { conversationAuditApi } from "./api";
 import type {
   AuditEvent,
   DiscoveryCandidateTrace,
+  ReasoningTrace,
   RuntimeTraceDetail,
 } from "./types";
 
@@ -759,6 +762,7 @@ export function ConversationAuditFeature({
                                 >
                                   <BubbleContent className="flex flex-col gap-3">
                                     {turn.role === "assistant" && (
+                                      <TechnicalDetails label={t("common.technicalDetails")}>
                                       <div
                                         data-slot="assistant-attempt-lineage"
                                         data-testid="assistant-attempt-lineage"
@@ -820,6 +824,7 @@ export function ConversationAuditFeature({
                                           </div>
                                         </dl>
                                       </div>
+                                      </TechnicalDetails>
                                     )}
                                     <span>
                                       {turn.input_text ?? turn.answer_text ?? serverMessage(turn.user_reason, t)}
@@ -841,6 +846,7 @@ export function ConversationAuditFeature({
                                       </div>
                                     )}
                                     {turn.role === "assistant" && turn.assessment_state && (
+                                      <TechnicalDetails label={t("audit.sourceCheckDetails")}>
                                       <dl
                                         data-testid="evidence-review-assessment"
                                         className="grid gap-2 rounded-md border bg-muted/30 p-3 text-xs sm:grid-cols-2"
@@ -866,6 +872,7 @@ export function ConversationAuditFeature({
                                           value={turn.assessment_output_digest}
                                         />
                                       </dl>
+                                      </TechnicalDetails>
                                     )}
                                     {turn.citations.length > 0 && (
                                       <div className="grid gap-2">
@@ -886,12 +893,14 @@ export function ConversationAuditFeature({
                                       </div>
                                     )}
                                     {turn.role === "assistant" && (
+                                      <TechnicalDetails label={t("audit.evidenceDetails")}>
                                       <ClaimedEvidenceTrace
                                         items={turn.model_claimed_evidence}
                                         showEmpty={turn.execution_status === "completed"}
                                         onOpen={(protectedOpenRef) =>
                                           void openDeclaredEvidence(turn, protectedOpenRef)}
                                       />
+                                      </TechnicalDetails>
                                     )}
                                   </BubbleContent>
                                 </Bubble>
@@ -955,6 +964,7 @@ export function ConversationAuditFeature({
                             <AuditField label={t("audit.traceId")} value={selectedRuntime.execution_id} />
                             <AuditField label={t("audit.finalValidationStatus")} value={selectedRuntime.state} />
                             <AuditField label={t("audit.attemptReference")} value={String(selectedRuntime.version)} />
+                            <AuditField label={t("audit.reasoningMode")} value={selectedRuntime.reasoning_mode} />
                             <AuditField label={t("audit.errorCode")} value={selectedRuntime.failure_code ?? "—"} />
                             <AuditField
                               label={t("audit.answerGuidanceRevision")}
@@ -980,6 +990,18 @@ export function ConversationAuditFeature({
                             />
                           </div>
                         </div>
+                        {selectedRuntime.reasoning_mode === "deep" ? (
+                          selectedRuntime.reasoning_trace ? (
+                            <ReasoningTracePanel trace={selectedRuntime.reasoning_trace} />
+                          ) : (
+                            <div>
+                              <div className="font-medium">{t("audit.reasoningTrace")}</div>
+                              <p className="mt-1 text-sm text-muted-foreground">
+                                {t("audit.reasoningTraceUnavailable")}
+                              </p>
+                            </div>
+                          )
+                        ) : null}
                         <div>
                           <div className="font-medium">{t("audit.runtimeBudget")}</div>
                           <Table className="mt-2">
@@ -1306,6 +1328,184 @@ export function ConversationAuditFeature({
       }}
     />
     </>
+  );
+}
+
+function ReasoningTracePanel({ trace }: { trace: ReasoningTrace }) {
+  const { t } = useTranslation();
+  return (
+    <section className="flex flex-col gap-3" aria-labelledby="reasoning-trace-title">
+      <div>
+        <div id="reasoning-trace-title" className="font-medium">
+          {t("audit.reasoningTrace")}
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("audit.processScoreDisclaimer")}
+        </p>
+      </div>
+      <div className="grid gap-3 rounded-md border p-3 sm:grid-cols-2">
+        <AuditField label={t("audit.reasoningTraceStatus")} value={trace.status} />
+        <AuditField
+          label={t("audit.reasoningTermination")}
+          value={trace.termination_reason ?? "—"}
+        />
+        <AuditField
+          label={t("audit.reasoningTraceRevision")}
+          value={String(trace.trace_revision)}
+        />
+        <AuditField label={t("audit.reasoningTraceDigest")} value={trace.trace_digest} />
+        <AuditField
+          label={t("audit.reasoningParentDigest")}
+          value={trace.parent_trace_digest ?? "—"}
+        />
+        <AuditField label={t("audit.reasoningSchemaVersion")} value={trace.schema_version} />
+      </div>
+      <div>
+        <div className="text-sm font-medium">{t("audit.reasoningPlan")}</div>
+        {trace.plans.length > 0 ? (
+          <div className="mt-2 flex flex-col gap-3">
+            {trace.plans.map((plan) => (
+              <div key={plan.generation} className="rounded-md border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">
+                    {t("audit.reasoningPlanGeneration", { generation: plan.generation })}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {t("audit.reasoningParentGeneration", {
+                      generation: plan.parent_generation ?? "—",
+                    })}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm">{plan.next_objective}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{plan.completion_condition}</p>
+                <ol className="mt-2 flex flex-col gap-2">
+                  {plan.items.map((item) => (
+                    <li key={item.item_id} className="flex items-start gap-2 rounded-md border p-2 text-sm">
+                      <Badge variant="outline">{item.status}</Badge>
+                      <span>{item.summary}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-1 text-sm text-muted-foreground">{t("audit.notReported")}</p>
+        )}
+      </div>
+      <div>
+        <div className="text-sm font-medium">{t("audit.provisionalEvidenceChecks")}</div>
+        {trace.provisional_evidence_checks.length === 0 ? (
+          <p className="mt-1 text-sm text-muted-foreground">{t("audit.notReported")}</p>
+        ) : (
+          <ol className="mt-2 flex flex-col gap-2">
+            {trace.provisional_evidence_checks.map((check) => (
+              <li key={check.ordinal} className="rounded-md border p-2 text-sm">
+                <span className="font-medium">
+                  {t("audit.provisionalEvidenceCheck", {
+                    ordinal: check.ordinal,
+                    kind: check.candidate_kind,
+                    consistency: check.consistency,
+                    disposition: check.candidate_disposition,
+                  })}
+                </span>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("audit.provisionalEvidenceLinks", {
+                    evaluation: check.linked_evaluation_cycle ?? "—",
+                    reason: check.reason_code,
+                    answer: check.answer_digest.slice(0, 12),
+                    subset: check.declared_subset_digest.slice(0, 12),
+                    images: check.visual_image_digests.length,
+                  })}
+                </p>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <div>
+        <div className="text-sm font-medium">{t("audit.reasoningEvaluations")}</div>
+        {trace.evaluations.length === 0 ? (
+          <p className="mt-1 text-sm text-muted-foreground">{t("audit.notReported")}</p>
+        ) : (
+          <div className="mt-2 flex flex-col gap-3">
+            {trace.evaluations.map((evaluation) => (
+              <div key={evaluation.cycle} className="rounded-md border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">
+                    {t("audit.reasoningCycle", { cycle: evaluation.cycle })}
+                  </Badge>
+                  <StatusBadge
+                    semantic={evaluation.verdict === "unavailable" ? "attention" : "inactive"}
+                    label={evaluation.verdict}
+                  />
+                  {evaluation.score ? (
+                    <Badge>{t("audit.processScoreTotal", { total: evaluation.score.total })}</Badge>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-sm">
+                  {evaluation.summary ?? evaluation.unavailable_reason ?? t("audit.notReported")}
+                </p>
+                {evaluation.finding_codes.length > 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {evaluation.finding_codes.join(", ")}
+                  </p>
+                ) : null}
+                {evaluation.score ? (
+                  <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                    <AuditTraceValue label={t("audit.scorePlanCoverage")} value={String(evaluation.score.plan_coverage)} />
+                    <AuditTraceValue label={t("audit.scoreEvidenceHandling")} value={String(evaluation.score.evidence_handling)} />
+                    <AuditTraceValue label={t("audit.scoreConflictHandling")} value={String(evaluation.score.conflict_handling)} />
+                    <AuditTraceValue label={t("audit.scoreGapResolution")} value={String(evaluation.score.gap_resolution)} />
+                    <AuditTraceValue label={t("audit.scoreRevisionCompletion")} value={String(evaluation.score.revision_completion)} />
+                  </dl>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      {trace.corrections.length > 0 ? (
+        <div>
+          <div className="text-sm font-medium">{t("audit.reasoningCorrections")}</div>
+          <ol className="mt-2 flex flex-col gap-2">
+            {trace.corrections.map((correction) => (
+              <li key={correction.cycle} className="rounded-md border p-2 text-sm">
+                <span className="font-medium">
+                  {t("audit.reasoningCorrection", {
+                    cycle: correction.cycle,
+                    kind: correction.kind,
+                  })}
+                </span>
+                <p className="mt-1">{correction.summary}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("audit.reasoningCorrectionLinks", {
+                    trigger: correction.triggering_evaluation,
+                    result: correction.result_evaluation,
+                    generation: correction.plan_generation ?? "—",
+                    tools:
+                      correction.tool_invocation_start === null
+                        ? "—"
+                        : `${correction.tool_invocation_start}–${correction.tool_invocation_end}`,
+                  })}
+                </p>
+                {correction.addressed_finding_codes.length > 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {correction.addressed_finding_codes.join(", ")}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+      {trace.limit_finalization ? (
+        <div className="rounded-md border p-3 text-sm">
+          <div className="font-medium">{t("audit.reasoningLimitFinalization")}</div>
+          <p className="mt-1">{trace.limit_finalization.summary}</p>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

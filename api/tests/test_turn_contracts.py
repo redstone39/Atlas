@@ -5,7 +5,10 @@ from typing import Any
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from atlas_production.modules.conversation.public import ConversationCreateV1
+from atlas_production.modules.conversation.public import (
+    AppendTurnMemberV1,
+    ConversationCreateV1,
+)
 from atlas_production.modules.authorization.public import CreateTurnAccessGrantV1
 from atlas_production.modules.context_engineering.public import (
     ContextLineageGraphV3,
@@ -30,6 +33,10 @@ from atlas_production.modules.turn_runtime.public import (
     FailCarrierExecutionV1,
     FinalizeExpiredExecutionV1,
     LeasePolicyV1,
+    ProcessScoreV1,
+    ReasoningPlanItemV2,
+    ReasoningPlanV2,
+    ReasoningTraceV3,
     RoutePolicyV1,
     TERMINAL_STATES,
 )
@@ -195,13 +202,104 @@ def test_policy_defaults_match_the_approved_hard_limits() -> None:
     assert policy.context_token_budget == 272_000
     assert policy.tool_token_budget == 64_000
     assert policy.deadline_seconds == 240
-    assert policy.max_provider_invocations >= policy.max_tool_invocations + 2
+    assert policy.max_reasoning_revision_cycles == 2
+    assert policy.max_provider_invocations == 26
+    assert policy.max_provider_invocations >= (
+        policy.max_tool_invocations
+        + 4 * policy.max_reasoning_revision_cycles
+        + 6
+    )
     lease = LeasePolicyV1()
     assert (lease.heartbeat_interval_seconds, lease.ttl_seconds, lease.failure_sweep_interval_seconds) == (5, 15, 5)
     with pytest.raises(ValidationError):
-        RoutePolicyV1(max_tool_invocations=12, max_provider_invocations=13)
+        RoutePolicyV1(max_tool_invocations=12, max_provider_invocations=19)
+    assert RoutePolicyV1(
+        max_reasoning_revision_cycles=0,
+        max_provider_invocations=18,
+    ).max_provider_invocations == 18
+    assert RoutePolicyV1(
+        max_reasoning_revision_cycles=3,
+        max_provider_invocations=30,
+    ).max_provider_invocations == 30
+    with pytest.raises(ValidationError):
+        RoutePolicyV1(
+            max_reasoning_revision_cycles=3,
+            max_provider_invocations=29,
+        )
     with pytest.raises(ValidationError):
         LeasePolicyV1(heartbeat_interval_seconds=15, ttl_seconds=15)
+
+
+def test_reasoning_contracts_are_closed_bounded_and_do_not_claim_accuracy() -> None:
+    score = ProcessScoreV1(
+        plan_coverage=2,
+        evidence_handling=1,
+        conflict_handling=1,
+        gap_resolution=2,
+        revision_completion=1,
+        total=7,
+    )
+    assert score.total == 7
+    with pytest.raises(ValidationError):
+        ProcessScoreV1.model_validate({**score.model_dump(), "accuracy": 0.9})
+    trace = ReasoningTraceV3(
+        trace_revision=1,
+        trace_digest="a" * 64,
+        status="running",
+        plans=[ReasoningPlanV2(
+            generation=1,
+            next_objective="確認需求",
+            completion_condition="需求已確認",
+            items=[ReasoningPlanItemV2(item_id="plan-1", summary="確認需求")],
+        )],
+    )
+    assert len(trace.model_dump_json().encode("utf-8")) <= 32768
+    with pytest.raises(ValidationError):
+        ReasoningTraceV3.model_validate(
+            {**trace.model_dump(), "raw_draft": "private model output"}
+        )
+    with pytest.raises(ValidationError):
+        ReasoningTraceV3(
+            trace_revision=1,
+            trace_digest="b" * 64,
+            status="running",
+            plans=[
+                trace.plans[0],
+                ReasoningPlanV2(
+                    generation=2,
+                    parent_generation=1,
+                    next_objective="補查",
+                    completion_condition="完成",
+                    items=[
+                        ReasoningPlanItemV2(
+                            item_id="plan-2",
+                            summary="遺漏既有 pending 項目",
+                        )
+                    ],
+                ),
+            ],
+        )
+
+
+def test_fresh_membership_requires_mode_and_retry_cannot_change_it() -> None:
+    base = {
+        "conversation_id": "conversation-1",
+        "turn_id": "turn-1",
+        "execution_id": "execution-1",
+        "role": "user",
+        "idempotency_key": "member-1",
+    }
+    assert AppendTurnMemberV1(**base, reasoning_mode="deep").reasoning_mode == "deep"
+    with pytest.raises(ValidationError):
+        AppendTurnMemberV1(**base)
+    retry = AppendTurnMemberV1(
+        **base,
+        operation="retry_turn",
+        reasoning_mode=None,
+    )
+    assert retry.reasoning_mode is None
+    with pytest.raises(ValidationError):
+        AppendTurnMemberV1(**base, operation="retry_turn", reasoning_mode="standard")
 
 
 def test_conversation_response_language_defaults_and_rejects_unknown_values() -> None:
@@ -227,7 +325,7 @@ def test_model_route_policy_v4_api_requires_and_round_trips_execution_limits() -
 
     request = ModelRouteCreateRequest.model_validate(payload)
 
-    assert request.runtime_policy.schema_version == "model-route-runtime-policy-v4"
+    assert request.runtime_policy.schema_version == "model-route-runtime-policy-v7"
     assert request.runtime_policy.max_catalog_pages == 5
     assert request.runtime_policy.max_search_rounds == 6
     assert request.runtime_policy.max_unique_evidence == 40

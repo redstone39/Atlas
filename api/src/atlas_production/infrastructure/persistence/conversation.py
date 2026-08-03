@@ -21,6 +21,9 @@ class AtlasTurnConversationRow(OrmBase):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     response_language: Mapped[str] = mapped_column(String(10), nullable=False)
+    reasoning_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="standard"
+    )
     next_ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -30,6 +33,10 @@ class AtlasTurnConversationRow(OrmBase):
         CheckConstraint(
             "response_language IN ('zh-TW','en')",
             name="ck_atlas_turn_conversation_response_language",
+        ),
+        CheckConstraint(
+            "reasoning_mode IN ('standard','deep')",
+            name="ck_atlas_turn_conversation_reasoning_mode",
         ),
         CheckConstraint("next_ordinal >= 1", name="ck_atlas_turn_conversation_next_ordinal"),
     )

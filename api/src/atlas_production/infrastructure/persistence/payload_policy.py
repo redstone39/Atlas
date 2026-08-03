@@ -18,6 +18,7 @@ MODEL_RUNTIME_POLICY_FIELDS = frozenset(
         "tokenizer_profile",
         "max_tool_executions",
         "max_provider_invocations",
+        "max_reasoning_revision_cycles",
         "max_catalog_pages",
         "max_search_rounds",
         "max_unique_evidence",
@@ -158,6 +159,16 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
         "search_projection",
         262_144,
         "turn_retrieval_observation",
+    ),
+    "atlas_turn_executions.reasoning_trace": (
+        "reasoning_trace",
+        32_768,
+        "atlas_reasoning_trace_v2",
+    ),
+    "atlas_turn_runtime_events.message_params": (
+        "user_message_params",
+        8_192,
+        "reasoning_progress_message_params",
     ),
 }
 

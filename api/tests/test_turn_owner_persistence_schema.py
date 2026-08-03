@@ -239,14 +239,18 @@ def test_runtime_has_independent_versioned_lease_and_dedup_ledgers() -> None:
     assert {
         "max_tool_invocations", "max_catalog_pages",
         "max_search_rounds", "max_unique_evidence", "max_provider_invocations",
+        "max_reasoning_revision_cycles",
         "context_token_budget", "tool_token_budget", "deadline_seconds",
         "heartbeat_interval_seconds", "ttl_seconds", "failure_sweep_interval_seconds",
     } <= set(execution.columns.keys())
     assert {
         "response_language",
+        "reasoning_mode",
+        "reasoning_trace",
         "applied_guidance_revision",
         "applied_guidance_digest",
     } <= set(execution.columns.keys())
+    assert execution.c.reasoning_trace.type.none_as_null is True
     assert "max_document_candidates" not in execution.columns
     assert "route_policy" not in execution.columns
     assert "lease_policy" not in execution.columns
@@ -256,6 +260,8 @@ def test_runtime_has_independent_versioned_lease_and_dedup_ledgers() -> None:
         "ck_atlas_turn_execution_positive_policy",
         "ck_atlas_turn_execution_lease_policy",
         "ck_atlas_turn_execution_response_language",
+        "ck_atlas_turn_execution_reasoning_mode",
+        "ck_atlas_turn_execution_reasoning_trace",
         "ck_atlas_turn_execution_guidance_snapshot",
     } <= _constraint_names(execution.name, CheckConstraint)
 
@@ -263,7 +269,11 @@ def test_runtime_has_independent_versioned_lease_and_dedup_ledgers() -> None:
 def test_conversation_language_and_answer_behavior_are_durably_bounded() -> None:
     conversation = OrmBase.metadata.tables["atlas_turn_conversations"]
     assert conversation.c.response_language.nullable is False
+    assert conversation.c.reasoning_mode.nullable is False
     assert "ck_atlas_turn_conversation_response_language" in _constraint_names(
+        conversation.name, CheckConstraint
+    )
+    assert "ck_atlas_turn_conversation_reasoning_mode" in _constraint_names(
         conversation.name, CheckConstraint
     )
     guidance = OrmBase.metadata.tables[
@@ -306,6 +316,20 @@ def test_conversation_language_and_answer_behavior_are_durably_bounded() -> None
 
 
 def test_terminal_events_and_release_intents_are_single_winner_shapes() -> None:
+    events = OrmBase.metadata.tables["atlas_turn_runtime_events"]
+    assert {
+        "reasoning_phase",
+        "progress_status",
+        "cycle",
+        "message_code",
+        "message_params",
+    } <= set(events.columns.keys())
+    assert "ck_atlas_turn_runtime_event_reasoning_shape" in _constraint_names(
+        events.name, CheckConstraint
+    )
+    assert "ck_atlas_turn_runtime_event_message_params_bound" in _constraint_names(
+        events.name, CheckConstraint
+    )
     assert "uq_atlas_turn_runtime_event_sequence" in _constraint_names(
         "atlas_turn_runtime_events", UniqueConstraint
     )

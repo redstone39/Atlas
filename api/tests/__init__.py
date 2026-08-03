@@ -14,10 +14,11 @@ os.environ.setdefault("ATLAS_CREDENTIAL_MASTER_KEY_ID", "test-master-key")
 
 def model_route_runtime_policy(**overrides):
     policy = {
-        "schema_version": "model-route-runtime-policy-v4",
+        "schema_version": "model-route-runtime-policy-v7",
         "tokenizer_profile": "cl100k_base",
         "max_tool_executions": 12,
-        "max_provider_invocations": 14,
+        "max_provider_invocations": 26,
+        "max_reasoning_revision_cycles": 2,
         "max_catalog_pages": 5,
         "max_search_rounds": 6,
         "max_unique_evidence": 40,

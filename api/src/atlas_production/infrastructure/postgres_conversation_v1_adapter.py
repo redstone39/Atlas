@@ -32,6 +32,7 @@ def _conversation(record: ConversationRecord) -> ConversationV1:
         title=record.title,
         status=record.status,
         response_language=record.response_language,
+        reasoning_mode=record.reasoning_mode,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -120,6 +121,7 @@ class PostgresConversationV1Adapter:
                             idempotency_key=command.idempotency_key,
                             operation=command.operation,
                             retry_of_turn_id=retry_of_turn_id,
+                            reasoning_mode=command.reasoning_mode,
                         )
                     )
                 )

@@ -8,11 +8,12 @@ processing plugins, an Office renderer, and governed artifact storage.
 
 1. An administrator uploads a document and assigns its access scope.
 2. Document intake and processing create a current, traceable generation.
-3. A user submits a turn in a Workspace conversation.
+3. A user submits a `standard` or `deep` turn in a Workspace conversation.
 4. The runtime resolves current authorization, builds immutable context
    references, and invokes retrieval and answer tools under bounded budgets.
-5. A terminal transaction publishes the answer, runtime events, evidence review
-   status, and protected evidence references.
+   Deep turns additionally run bounded planning, evaluation, and revision.
+5. A terminal transaction publishes the answer, runtime events, safe reasoning
+   progress, evidence review status, and protected evidence references.
 6. Every later protected read recomputes current authorization and checks exact
    artifact lineage.
 
@@ -49,6 +50,22 @@ Architecture ownership and dependency direction are executable in
 - Protected previews do not provide public URLs, persistent viewer tokens, or
   cross-page document navigation.
 
+## Reasoning execution
+
+- A conversation records its default `standard|deep` mode. Each accepted
+  execution keeps an immutable mode; retry uses the source execution's mode.
+- Deep execution uses the existing runtime lease, fence, budgets, tools,
+  retrieval, governance, and terminal transaction. It does not add a background
+  reasoning service or a second answer authority.
+- Workspace receives only allowlisted phase, status, cycle, and message fields.
+  Plans, drafts, prompts, Provider payloads, and Provider reasoning are not
+  projected to members.
+- System Admin may inspect a bounded structured trace containing Atlas-owned
+  plan, evaluation, revision, termination, and digest metadata. Process scores
+  measure completion of configured steps, not factual correctness.
+- Provisional evidence checks can require another revision or mark the final
+  answer questionable, but they do not create formal citation authority.
+
 ## Product surfaces
 
 - Document Library: upload, scope, processing control, status, and authorized
@@ -64,8 +81,9 @@ Architecture ownership and dependency direction are executable in
 
 This snapshot supports `resettable_development`. It has one Alembic baseline
 with `down_revision = None`. Existing application data is not migrated between
-software versions. A second deployment must not share PostgreSQL or artifact
-storage with the first.
+software versions. Replacing a snapshot requires a fresh database and fresh
+Compose volumes; it is not an in-place software upgrade. A second deployment
+must not share PostgreSQL or artifact storage with the first.
 
 Operator-owned responsibilities include TLS, host hardening, mounts, capacity,
 monitoring, backups, service lifecycle, and physical recovery. Atlas owns safe

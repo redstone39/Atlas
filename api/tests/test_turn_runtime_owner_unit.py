@@ -28,7 +28,11 @@ def _allocation(**changes: object) -> AllocateExecutionV1:
         "conversation_id": "conversation-1",
         "actor_id": "actor-1",
         "holder_id": "holder-1",
-        "route_policy": RoutePolicyV1(max_tool_invocations=1, max_provider_invocations=3),
+        "route_policy": RoutePolicyV1(
+            max_tool_invocations=1,
+            max_provider_invocations=7,
+            max_reasoning_revision_cycles=0,
+        ),
         "route": route_snapshot(),
         "lease_policy": LeasePolicyV1(),
         "idempotency_key": "allocation-1",
@@ -47,6 +51,9 @@ def test_allocation_digest_is_exact_and_deterministic() -> None:
     command = _allocation()
     assert _digest_model(command) == _digest_model(command.model_copy(deep=True))
     assert _digest_model(command) != _digest_model(_allocation(holder_id="holder-2"))
+    assert _digest_model(command) != _digest_model(
+        _allocation(reasoning_mode="deep")
+    )
 
 
 def test_release_identity_is_deterministic_and_resource_scoped() -> None:
@@ -86,7 +93,7 @@ def test_all_persisted_budget_deltas_are_typed_and_nonnegative() -> None:
 
 def test_repository_has_complete_public_surface_and_no_cross_owner_imports() -> None:
     for method in (
-        "find_execution", "snapshot", "allocate", "accept", "bind_context", "request_model_action", "begin_tool",
+        "find_execution", "snapshot", "allocate", "accept", "bind_context", "request_model_action", "record_reasoning_progress", "begin_tool",
         "complete_tool", "begin_governance", "prepare_terminal", "commit_terminal",
         "fail_carrier", "finalize_expired", "renew_lease", "fail_expired_leases",
         "pending_release_intents", "complete_release_intent", "events",

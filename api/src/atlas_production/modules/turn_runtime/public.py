@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import json
 from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from atlas_production.modules.conversation.public import ResponseLanguage
+from atlas_production.modules.conversation.public import ReasoningMode, ResponseLanguage
 
 
 Identity = Annotated[str, Field(min_length=1, max_length=200)]
 OpaqueRef = Annotated[str, Field(min_length=1, max_length=300)]
+Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+MessageParamString = Annotated[str, Field(max_length=500)]
+MessageParamValue = MessageParamString | int | bool | None
 
 
 class _StrictModel(BaseModel):
@@ -73,15 +77,242 @@ class RoutePolicyV1(_StrictModel):
     max_catalog_pages: int = Field(default=5, ge=0)
     max_search_rounds: int = Field(default=6, ge=0)
     max_unique_evidence: int = Field(default=40, ge=0)
-    max_provider_invocations: int = Field(default=14, ge=2)
+    max_provider_invocations: int = Field(default=26, ge=6)
+    max_reasoning_revision_cycles: int = Field(default=2, ge=0, le=3)
     context_token_budget: int = Field(default=272000, ge=1)
     tool_token_budget: int = Field(default=64000, ge=1)
     deadline_seconds: int = Field(default=240, ge=1)
 
     @model_validator(mode="after")
     def reserve_provider_rounds_for_initial_and_terminal_actions(self) -> "RoutePolicyV1":
-        if self.max_provider_invocations < self.max_tool_invocations + 2:
-            raise ValueError("provider invocation budget must cover tool rounds plus initial and terminal actions")
+        required = self.max_tool_invocations + 4 * self.max_reasoning_revision_cycles + 6
+        if self.max_provider_invocations < required:
+            raise ValueError(
+                "provider invocation budget must cover tools, planning, evaluation, revisions, and terminal actions"
+            )
+        return self
+
+
+ReasoningPhase = Literal[
+    "understanding",
+    "planning",
+    "researching",
+    "drafting",
+    "evaluating",
+    "revising",
+    "governing",
+    "finalizing",
+    "completed",
+    "failed",
+]
+ReasoningProgressStatus = Literal["started", "completed", "degraded", "failed"]
+
+
+class ReasoningPlanItemV2(_StrictModel):
+    item_id: str = Field(min_length=1, max_length=32, pattern=r"^[\x21-\x7e]+$")
+    summary: str = Field(min_length=1, max_length=120)
+    status: Literal["pending", "completed", "skipped"] = "pending"
+
+
+class ReasoningPlanV2(_StrictModel):
+    schema_version: Literal["atlas-reasoning-plan-v2"] = "atlas-reasoning-plan-v2"
+    generation: int = Field(ge=1, le=4)
+    parent_generation: int | None = Field(default=None, ge=1, le=3)
+    next_objective: str = Field(min_length=1, max_length=160)
+    completion_condition: str = Field(min_length=1, max_length=160)
+    items: list[ReasoningPlanItemV2] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def require_generation_parent(self) -> "ReasoningPlanV2":
+        if self.generation == 1 and self.parent_generation is not None:
+            raise ValueError("initial plan cannot have a parent generation")
+        if self.generation > 1 and self.parent_generation != self.generation - 1:
+            raise ValueError("replanned generation must reference its immediate parent")
+        if len({item.item_id for item in self.items}) != len(self.items):
+            raise ValueError("plan item ids must be unique within a generation")
+        return self
+
+
+class ProcessScoreV1(_StrictModel):
+    rubric_version: Literal["atlas-process-rubric-v1"] = "atlas-process-rubric-v1"
+    plan_coverage: int = Field(ge=0, le=2)
+    evidence_handling: int = Field(ge=0, le=2)
+    conflict_handling: int = Field(ge=0, le=2)
+    gap_resolution: int = Field(ge=0, le=2)
+    revision_completion: int = Field(ge=0, le=2)
+    total: int = Field(ge=0, le=10)
+
+    @model_validator(mode="after")
+    def require_derived_total(self) -> "ProcessScoreV1":
+        expected = (
+            self.plan_coverage
+            + self.evidence_handling
+            + self.conflict_handling
+            + self.gap_resolution
+            + self.revision_completion
+        )
+        if self.total != expected:
+            raise ValueError("process score total must equal the rubric dimensions")
+        return self
+
+
+class ReasoningEvaluationV1(_StrictModel):
+    cycle: int = Field(ge=1, le=4)
+    verdict: Literal["accept", "revise_only", "research_then_revise", "unavailable"]
+    finding_codes: list[Identity] = Field(default_factory=list, max_length=8)
+    summary: str | None = Field(default=None, max_length=240)
+    score: ProcessScoreV1 | None = None
+    unavailable_reason: Literal[
+        "provider_unavailable", "budget_exhausted", "deadline_exceeded"
+    ] | None = None
+
+    @model_validator(mode="after")
+    def require_evaluation_shape(self) -> "ReasoningEvaluationV1":
+        unavailable = self.verdict == "unavailable"
+        if unavailable != (self.unavailable_reason is not None):
+            raise ValueError("unavailable evaluation requires exactly one safe reason")
+        if unavailable == (self.score is not None):
+            raise ValueError("only an available evaluation can have a process score")
+        return self
+
+
+class ReasoningCorrectionV2(_StrictModel):
+    cycle: int = Field(ge=1, le=3)
+    kind: Literal["revise_only", "research_then_revise"]
+    triggering_evaluation: int = Field(ge=1, le=3)
+    plan_generation: int | None = Field(default=None, ge=2, le=4)
+    tool_invocation_start: int | None = Field(default=None, ge=1)
+    tool_invocation_end: int | None = Field(default=None, ge=1)
+    result_evaluation: int = Field(ge=2, le=4)
+    addressed_finding_codes: list[Identity] = Field(default_factory=list, max_length=8)
+    summary: str = Field(min_length=1, max_length=240)
+
+    @model_validator(mode="after")
+    def require_correction_shape(self) -> "ReasoningCorrectionV2":
+        research = self.kind == "research_then_revise"
+        if research != (self.plan_generation is not None):
+            raise ValueError("research correction requires exactly one plan generation")
+        if (self.tool_invocation_start is None) != (self.tool_invocation_end is None):
+            raise ValueError("tool invocation span requires both ordinals")
+        if research and self.tool_invocation_start is None:
+            raise ValueError("research correction requires a tool invocation span")
+        if not research and self.tool_invocation_start is not None:
+            raise ValueError("revise-only correction cannot record tool invocations")
+        if (
+            self.tool_invocation_start is not None
+            and self.tool_invocation_end is not None
+            and self.tool_invocation_start > self.tool_invocation_end
+        ):
+            raise ValueError("tool invocation span is reversed")
+        if self.result_evaluation != self.triggering_evaluation + 1:
+            raise ValueError("correction must link adjacent evaluations")
+        return self
+
+
+class ReasoningLimitFinalizationV2(_StrictModel):
+    triggering_evaluation: int = Field(ge=1, le=4)
+    summary: str = Field(min_length=1, max_length=240)
+
+
+class ProvisionalEvidenceCheckV1(_StrictModel):
+    ordinal: int = Field(ge=1, le=5)
+    candidate_kind: Literal["normal", "limit_final"]
+    linked_evaluation_cycle: int | None = Field(default=None, ge=1, le=4)
+    consistency: Literal[
+        "aligned", "conflict", "insufficient", "not_applicable", "unavailable"
+    ]
+    reason_code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    candidate_disposition: Literal[
+        "pending", "accepted", "revised", "degraded", "limit_finalized"
+    ] = "pending"
+    answer_digest: Digest
+    declared_subset_digest: Digest
+    assessment_input_digest: Digest | None = None
+    assessment_output_digest: Digest | None = None
+    visual_image_digests: list[Digest] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def require_candidate_link(self) -> "ProvisionalEvidenceCheckV1":
+        if self.candidate_kind == "normal" and self.linked_evaluation_cycle is None:
+            raise ValueError("normal provisional check requires an evaluation cycle")
+        if self.candidate_kind == "limit_final" and self.linked_evaluation_cycle is not None:
+            raise ValueError("limit-final provisional check cannot link an evaluation")
+        return self
+
+
+class ReasoningTraceV3(_StrictModel):
+    schema_version: Literal["atlas-reasoning-trace-v3"] = "atlas-reasoning-trace-v3"
+    trace_revision: int = Field(ge=1)
+    trace_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    parent_trace_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mode: Literal["deep"] = "deep"
+    status: Literal["planning", "running", "completed", "degraded", "failed"]
+    plans: list[ReasoningPlanV2] = Field(default_factory=list, max_length=4)
+    evaluations: list[ReasoningEvaluationV1] = Field(default_factory=list, max_length=4)
+    corrections: list[ReasoningCorrectionV2] = Field(default_factory=list, max_length=3)
+    provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] = Field(
+        default_factory=list, max_length=5
+    )
+    limit_finalization: ReasoningLimitFinalizationV2 | None = None
+    termination_reason: Literal[
+        "completed",
+        "planner_failed",
+        "evaluator_unavailable",
+        "provisional_evidence_unavailable",
+        "replanner_failed",
+        "correction_limit_reached",
+        "budget_exhausted",
+        "deadline_exceeded",
+        "execution_failed",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def require_bounded_trace(self) -> "ReasoningTraceV3":
+        encoded = json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 32768:
+            raise ValueError("reasoning trace exceeds 32 KiB")
+        if self.trace_revision == 1 and self.parent_trace_digest is not None:
+            raise ValueError("initial trace cannot have a parent digest")
+        if self.trace_revision > 1 and self.parent_trace_digest is None:
+            raise ValueError("updated trace requires a parent digest")
+        if self.status in {"completed", "degraded", "failed"} and self.termination_reason is None:
+            raise ValueError("terminal reasoning trace requires a termination reason")
+        for index, plan in enumerate(self.plans, start=1):
+            if plan.generation != index:
+                raise ValueError("plan generations must be contiguous and ordered")
+            if index == 1:
+                continue
+            previous = {item.item_id: item.status for item in self.plans[index - 2].items}
+            current = {item.item_id: item.status for item in plan.items}
+            for item_id, prior_status in previous.items():
+                if prior_status == "pending" and item_id not in current:
+                    raise ValueError("pending plan items must be retained or closed")
+                if prior_status in {"completed", "skipped"} and current.get(item_id) == "pending":
+                    raise ValueError("closed plan items cannot be reopened")
+        if [evaluation.cycle for evaluation in self.evaluations] != list(
+            range(1, len(self.evaluations) + 1)
+        ):
+            raise ValueError("evaluations must be contiguous and ordered")
+        if [correction.cycle for correction in self.corrections] != list(
+            range(1, len(self.corrections) + 1)
+        ):
+            raise ValueError("corrections must be contiguous and ordered")
+        if [check.ordinal for check in self.provisional_evidence_checks] != list(
+            range(1, len(self.provisional_evidence_checks) + 1)
+        ):
+            raise ValueError("provisional evidence checks must be contiguous and ordered")
+        if self.status in {"completed", "degraded", "failed"} and any(
+            check.candidate_disposition == "pending"
+            for check in self.provisional_evidence_checks
+        ):
+            raise ValueError("terminal trace cannot retain a pending evidence check")
+        if self.limit_finalization is not None and self.termination_reason != "correction_limit_reached":
+            raise ValueError("limit finalization requires correction-limit termination")
         return self
 
 
@@ -139,6 +370,8 @@ class ExecutionSnapshotV1(_StrictModel):
     route: TurnRouteSnapshotV2
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_language: ResponseLanguage
+    reasoning_mode: ReasoningMode = "standard"
+    reasoning_trace: ReasoningTraceV3 | None = None
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(
         pattern=r"^[0-9a-f]{64}$"
@@ -179,6 +412,7 @@ class AllocateExecutionV1(_StrictModel):
     retry_of_turn_id: Identity | None
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_language: ResponseLanguage
+    reasoning_mode: ReasoningMode = "standard"
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(
         pattern=r"^[0-9a-f]{64}$"
@@ -233,6 +467,20 @@ class RequestModelActionV1(_StrictModel):
     fencing_token: int = Field(ge=1)
     context_tokens: int = Field(ge=0)
     contract_repair: bool = False
+
+
+class RecordReasoningProgressV1(_StrictModel):
+    execution_id: Identity
+    expected_version: int = Field(ge=1)
+    fencing_token: int = Field(ge=1)
+    trace: ReasoningTraceV3
+    phase: ReasoningPhase
+    progress_status: ReasoningProgressStatus
+    cycle: int | None = Field(default=None, ge=1, le=4)
+    message_code: Identity
+    message_params: dict[Identity, MessageParamValue] = Field(
+        default_factory=dict, max_length=12
+    )
 
 
 class BeginToolInvocationV1(_StrictModel):
@@ -354,6 +602,7 @@ class RuntimeEventV1(_StrictModel):
         "execution_accepted",
         "context_ready",
         "model_action_requested",
+        "reasoning_progressed",
         "tool_started",
         "tool_completed",
         "governance_started",
@@ -364,7 +613,28 @@ class RuntimeEventV1(_StrictModel):
     invocation_ordinal: int | None = Field(default=None, ge=1)
     result_ref: OpaqueRef | None = None
     failure_code: str | None = None
+    reasoning_phase: ReasoningPhase | None = None
+    progress_status: ReasoningProgressStatus | None = None
+    cycle: int | None = Field(default=None, ge=1, le=4)
+    message_code: Identity | None = None
+    message_params: dict[Identity, MessageParamValue] = Field(
+        default_factory=dict, max_length=12
+    )
     created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def require_reasoning_event_shape(self) -> "RuntimeEventV1":
+        reasoning_fields = (
+            self.reasoning_phase,
+            self.progress_status,
+            self.message_code,
+        )
+        if self.event_type == "reasoning_progressed":
+            if any(value is None for value in reasoning_fields):
+                raise ValueError("reasoning progress event requires safe progress fields")
+        elif any(value is not None for value in (*reasoning_fields, self.cycle)) or self.message_params:
+            raise ValueError("non-reasoning events cannot expose reasoning progress fields")
+        return self
 
 
 class TerminalOutcomeV1(_StrictModel):
@@ -414,6 +684,10 @@ class TurnRuntimeOwner(Protocol):
 
     def request_model_action(self, command: RequestModelActionV1) -> ExecutionSnapshotV1: ...
 
+    def record_reasoning_progress(
+        self, command: RecordReasoningProgressV1
+    ) -> ExecutionSnapshotV1: ...
+
     def begin_tool(self, command: BeginToolInvocationV1) -> ExecutionSnapshotV1: ...
 
     def complete_tool(self, command: CompleteToolInvocationV1) -> ExecutionSnapshotV1: ...
@@ -442,7 +716,7 @@ class TurnRuntimeOwner(Protocol):
 __all__ = [
     name
     for name in globals()
-    if name.endswith(("V1", "V2"))
+    if name.endswith(("V1", "V2", "V3"))
     or name.startswith("TurnRuntime")
     or name in {"ExecutionState", "TERMINAL_STATES"}
 ]

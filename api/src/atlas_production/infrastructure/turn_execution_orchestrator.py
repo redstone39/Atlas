@@ -27,6 +27,7 @@ from atlas_production.modules.result_governance.public import (
     FinalizedAnswerV1,
     MaterializeGovernedAnswerDraftV2,
     PostHocAnswerEvaluatorV2,
+    ProvisionalEvidenceAssessmentV1,
     ResultGovernanceDraftOwnerV2,
     RetrievalStatusV1,
 )
@@ -46,7 +47,10 @@ from atlas_production.modules.retrieval.public import (
     VisualImagePayloadV1,
 )
 from atlas_production.modules.turn_execution.public import (
+    DeepReasoningContractError,
+    DeepReasoningModel,
     FinalizeAnswerV1,
+    ProvisionalEvidenceEvaluationInputV1,
     ModelContractViolationV1,
     StrictTurnModel,
     TurnExecutionOrchestrator,
@@ -61,14 +65,35 @@ from atlas_production.modules.turn_runtime.public import (
     ExecutionState,
     FailCarrierExecutionV1,
     PrepareTerminalV1,
+    ReasoningEvaluationV1,
+    ReasoningPhase,
+    ReasoningCorrectionV2,
+    ReasoningLimitFinalizationV2,
+    ReasoningPlanV2,
+    ProvisionalEvidenceCheckV1,
+    ReasoningProgressStatus,
+    ReasoningTraceV3,
+    RecordReasoningProgressV1,
     RequestModelActionV1,
     TERMINAL_STATES,
     TurnRuntimeOwner,
+    TurnRuntimeBudgetExceeded,
 )
 
 
 logger = logging.getLogger(__name__)
 _DISCOVERY_PAGE_SIZE = 10
+ReasoningTerminationReason = Literal[
+    "completed",
+    "planner_failed",
+    "evaluator_unavailable",
+    "provisional_evidence_unavailable",
+    "replanner_failed",
+    "correction_limit_reached",
+    "budget_exhausted",
+    "deadline_exceeded",
+    "execution_failed",
+]
 
 
 class TurnModelInputSource(Protocol):
@@ -93,6 +118,39 @@ def _digest(value: object) -> str:
 
 def _ref(kind: str, execution_id: str) -> str:
     return f"{kind}:{hashlib.sha256(f'{kind}:{execution_id}'.encode()).hexdigest()}"
+
+
+def _next_reasoning_trace(
+    previous: ReasoningTraceV3 | None,
+    *,
+    status: Literal["planning", "running", "completed", "degraded", "failed"],
+    plans: list[ReasoningPlanV2],
+    evaluations: list[ReasoningEvaluationV1],
+    corrections: list[ReasoningCorrectionV2],
+    provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] | None = None,
+    limit_finalization: ReasoningLimitFinalizationV2 | None = None,
+    termination_reason: ReasoningTerminationReason | None = None,
+) -> ReasoningTraceV3:
+    payload = {
+        "trace_revision": 1 if previous is None else previous.trace_revision + 1,
+        "trace_digest": "0" * 64,
+        "parent_trace_digest": None if previous is None else previous.trace_digest,
+        "status": status,
+        "plans": plans,
+        "evaluations": evaluations,
+        "corrections": corrections,
+        "provisional_evidence_checks": (
+            provisional_evidence_checks
+            if provisional_evidence_checks is not None
+            else ([] if previous is None else previous.provisional_evidence_checks)
+        ),
+        "limit_finalization": limit_finalization,
+        "termination_reason": termination_reason,
+    }
+    provisional = ReasoningTraceV3.model_validate(payload)
+    digest_payload = provisional.model_dump(mode="json")
+    digest_payload.pop("trace_digest")
+    return provisional.model_copy(update={"trace_digest": _digest(digest_payload)})
 
 
 def _action_reservation(
@@ -188,15 +246,19 @@ def _context_token_reservation(
     count_tokens: Callable[[TurnModelInputV3, bool], int],
     *,
     finalize_only: bool,
+    reasoning_plan: ReasoningPlanV2 | None = None,
 ) -> int:
     """Converge on the route-tokenized size of the post-CAS model input."""
 
-    estimate = count_tokens(
-        source.build(
+    initial = source.build(
             snapshot,
             observations=observations,
             contract_repair_remaining=contract_repair_remaining,
-        ),
+        )
+    if reasoning_plan is not None:
+        initial = initial.model_copy(update={"reasoning_plan": reasoning_plan})
+    estimate = count_tokens(
+        initial,
         finalize_only=finalize_only,
     )
     for _ in range(8):
@@ -213,12 +275,17 @@ def _context_token_reservation(
                 "budget": predicted_budget,
             }
         )
-        required = count_tokens(
-            source.build(
+        predicted_input = source.build(
                 predicted,
                 observations=observations,
                 contract_repair_remaining=contract_repair_remaining,
-            ),
+            )
+        if reasoning_plan is not None:
+            predicted_input = predicted_input.model_copy(
+                update={"reasoning_plan": reasoning_plan}
+            )
+        required = count_tokens(
+            predicted_input,
             finalize_only=finalize_only,
         )
         if required <= estimate:
@@ -241,6 +308,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         citation: CitationBindingDraftOwnerV2,
         audit: TurnAuditDraftOwnerV2,
         evaluator: PostHocAnswerEvaluatorV2,
+        reasoning_model: DeepReasoningModel | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -250,6 +318,128 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._citation = citation
         self._audit = audit
         self._evaluator = evaluator
+        self._reasoning_model = reasoning_model
+
+    def _record_reasoning_progress(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        trace: ReasoningTraceV3,
+        *,
+        phase: ReasoningPhase,
+        progress_status: ReasoningProgressStatus,
+        cycle: int | None = None,
+        message_code: str,
+        message_params: dict[str, str | int | bool | None] | None = None,
+    ) -> ExecutionSnapshotV1:
+        return self._runtime.record_reasoning_progress(
+            RecordReasoningProgressV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                trace=trace,
+                phase=phase,
+                progress_status=progress_status,
+                cycle=cycle,
+                message_code=message_code,
+                message_params=message_params or {},
+            )
+        )
+
+    def _assess_provisional_evidence(
+        self,
+        *,
+        snapshot: ExecutionSnapshotV1,
+        proposal: FinalizeAnswerV1,
+        visual_images_by_handle: dict[str, VisualImagePayloadV1],
+        assessment_ordinal: int,
+    ) -> tuple[ExecutionSnapshotV1, ProvisionalEvidenceAssessmentV1]:
+        if snapshot.catalog_ref is None:
+            raise ValueError("candidate assessment lost its catalog ref")
+        finalized_answer = FinalizedAnswerV1(
+            segments=[segment.model_dump(mode="json") for segment in proposal.segments]
+        )
+        declared_subset = self._retrieval.read_declared_evidence_subset(
+            execution_id=snapshot.execution_id,
+            catalog_ref=snapshot.catalog_ref,
+            handles=proposal.claimed_evidence_handles,
+            visual_images=list(visual_images_by_handle.values()),
+        )
+        answer_digest = _digest(finalized_answer.model_dump(mode="json"))
+        visual_image_digests = [
+            image.image_digest for image in declared_subset.visual_images
+        ]
+        common = {
+            "answer_digest": answer_digest,
+            "declared_subset_digest": declared_subset.digest,
+            "visual_image_digests": visual_image_digests,
+        }
+        if not proposal.claimed_evidence_handles:
+            return snapshot, ProvisionalEvidenceAssessmentV1(
+                state="not_attempted",
+                consistency="not_applicable",
+                reason_code="empty_declaration",
+                **common,
+            )
+        if not declared_subset.items:
+            return snapshot, ProvisionalEvidenceAssessmentV1(
+                state="not_attempted",
+                consistency="insufficient",
+                reason_code="no_resolved_declared_evidence",
+                **common,
+            )
+        try:
+            snapshot = self._runtime.request_model_action(
+                RequestModelActionV1(
+                    execution_id=snapshot.execution_id,
+                    expected_version=snapshot.version,
+                    fencing_token=snapshot.lease.fencing_token,
+                    context_tokens=0,
+                )
+            )
+            assessment = self._evaluator.assess(
+                execution_id=snapshot.execution_id,
+                finalized_answer=finalized_answer,
+                declared_evidence_subset=declared_subset,
+                deadline_at=snapshot.deadline_at,
+                route=snapshot.route,
+                assessment_ordinal=assessment_ordinal,
+            )
+        except ClaimAssessmentUnavailable as error:
+            return snapshot, ProvisionalEvidenceAssessmentV1(
+                state="unavailable",
+                consistency="unavailable",
+                reason_code=error.reason_code,
+                **common,
+            )
+        except TurnRuntimeBudgetExceeded:
+            return snapshot, ProvisionalEvidenceAssessmentV1(
+                state="unavailable",
+                consistency="unavailable",
+                reason_code=(
+                    "deadline_elapsed"
+                    if datetime.now(timezone.utc) >= snapshot.deadline_at
+                    else "physical_limit_rejected"
+                ),
+                **common,
+            )
+        if (
+            assessment.answer_digest != answer_digest
+            or assessment.declared_subset_digest != declared_subset.digest
+            or assessment.visual_image_digests != visual_image_digests
+        ):
+            raise ValueError("provisional evidence assessment binding changed")
+        partially_unresolved = any(
+            mapping.resolution_status == "unresolved"
+            for mapping in declared_subset.mappings
+        )
+        if partially_unresolved and assessment.consistency != "conflict":
+            assessment = assessment.model_copy(
+                update={
+                    "consistency": "insufficient",
+                    "reason_code": "partially_unresolved_declared_evidence",
+                }
+            )
+        return snapshot, assessment
 
     def run(self, execution_id: str) -> None:
         snapshot = self._runtime.snapshot(execution_id)
@@ -270,7 +460,21 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         session = None
         contract_repair_request = False
         failure_code = "contract_violation"
+        reasoning_replanner_failed = False
         step_ordinal = 0
+        reasoning_trace: ReasoningTraceV3 | None = None
+        reasoning_plan: ReasoningPlanV2 | None = None
+        reasoning_plans: list[ReasoningPlanV2] = []
+        reasoning_evaluations: list[ReasoningEvaluationV1] = []
+        reasoning_corrections: list[ReasoningCorrectionV2] = []
+        provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] = []
+        pending_correction: tuple[
+            Literal["revise_only", "research_then_revise"], int, list[str], str, int | None, int
+        ] | None = None
+        pending_limit_finalization: tuple[int, str] | None = None
+        shared_plan_repair_remaining = 1
+        force_finalize_only = False
+        terminal_provisional_assessment: ProvisionalEvidenceAssessmentV1 | None = None
         try:
             initial_input = self._model_inputs.build(
                 snapshot,
@@ -278,13 +482,116 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 contract_repair_remaining=contract_repair_remaining,
             )
             _validate_model_input(snapshot, initial_input)
+            if snapshot.reasoning_mode == "deep":
+                if self._reasoning_model is None:
+                    raise ValueError("deep execution has no reasoning model")
+                reasoning_trace = _next_reasoning_trace(
+                    None,
+                    status="planning",
+                    plans=[],
+                    evaluations=[],
+                    corrections=[],
+                )
+                snapshot = self._record_reasoning_progress(
+                    snapshot,
+                    reasoning_trace,
+                    phase="understanding",
+                    progress_status="completed",
+                    message_code="reasoning.understanding_completed",
+                )
+                for repair in (False, True):
+                    planner_input = self._model_inputs.build(
+                        snapshot,
+                        observations=observations,
+                        contract_repair_remaining=contract_repair_remaining,
+                    )
+                    _validate_model_input(snapshot, planner_input)
+                    context_tokens = self._reasoning_model.estimate_plan_request_tokens(
+                        planner_input, repair=repair
+                    )
+                    snapshot = self._runtime.request_model_action(
+                        RequestModelActionV1(
+                            execution_id=execution_id,
+                            expected_version=snapshot.version,
+                            fencing_token=snapshot.lease.fencing_token,
+                            context_tokens=context_tokens,
+                            contract_repair=repair,
+                        )
+                    )
+                    planner_input = self._model_inputs.build(
+                        snapshot,
+                        observations=observations,
+                        contract_repair_remaining=contract_repair_remaining,
+                    )
+                    _validate_model_input(snapshot, planner_input)
+                    try:
+                        plan_result = self._reasoning_model.plan(
+                            planner_input, repair=repair
+                        )
+                    except DeepReasoningContractError:
+                        step_ordinal += 1
+                        audit_steps.append(
+                            TurnAuditStepV1(
+                                ordinal=step_ordinal,
+                                step_kind="model",
+                                operation="deep_reasoning_plan_repair",
+                                status="failed",
+                                safe_input_digest=_digest(
+                                    planner_input.model_dump(mode="json")
+                                ),
+                            )
+                        )
+                        if not repair:
+                            shared_plan_repair_remaining = 0
+                            continue
+                        raise
+                    reasoning_plan = plan_result.plan
+                    step_ordinal += 1
+                    audit_steps.append(
+                        TurnAuditStepV1(
+                            ordinal=step_ordinal,
+                            step_kind="model",
+                            operation="deep_reasoning_plan",
+                            status="completed",
+                            safe_input_digest=_digest(
+                                planner_input.model_dump(mode="json")
+                            ),
+                            input_tokens=plan_result.input_tokens,
+                            output_tokens=plan_result.output_tokens,
+                        )
+                    )
+                    break
+                if reasoning_plan is None:
+                    raise ValueError("deep reasoning planner did not produce a plan")
+                reasoning_plans.append(reasoning_plan)
+                reasoning_trace = _next_reasoning_trace(
+                    reasoning_trace,
+                    status="running",
+                    plans=reasoning_plans,
+                    evaluations=reasoning_evaluations,
+                    corrections=reasoning_corrections,
+                )
+                snapshot = self._record_reasoning_progress(
+                    snapshot,
+                    reasoning_trace,
+                    phase="planning",
+                    progress_status="completed",
+                    message_code="reasoning.planning_completed",
+                    message_params={"plan_items": len(reasoning_plan.items)},
+                )
+                initial_input = self._model_inputs.build(
+                    snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,
+                ).model_copy(update={"reasoning_plan": reasoning_plan})
+                _validate_model_input(snapshot, initial_input)
             session = self._model.open_session(initial_input)
 
             while True:
                 if datetime.now(timezone.utc) >= snapshot.deadline_at:
                     failure_code = "deadline_exceeded"
                     raise TimeoutError("turn deadline elapsed")
-                finalize_only = not _has_legal_tool(
+                finalize_only = force_finalize_only or not _has_legal_tool(
                     snapshot,
                     has_documents=bool(document_candidate_handles),
                     has_evidence=bool(evidence_by_handle),
@@ -298,6 +605,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         value, finalize_only=finalize_only
                     ),
                     finalize_only=finalize_only,
+                    reasoning_plan=reasoning_plan,
                 )
                 failure_code = "budget_exhausted"
                 snapshot = self._runtime.request_model_action(
@@ -315,6 +623,10 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     observations=observations,
                     contract_repair_remaining=contract_repair_remaining,
                 )
+                if reasoning_plan is not None:
+                    model_input = model_input.model_copy(
+                        update={"reasoning_plan": reasoning_plan}
+                    )
                 _validate_model_input(snapshot, model_input)
                 if (
                     session.estimate_next_request_tokens(
@@ -371,6 +683,540 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
 
                 action = model_result.action
                 if isinstance(action, FinalizeAnswerV1):
+                    if snapshot.reasoning_mode == "deep":
+                        assert reasoning_trace is not None
+                        assert reasoning_plan is not None
+                        assert self._reasoning_model is not None
+                        if (
+                            pending_correction is not None
+                            and pending_correction[0] == "research_then_revise"
+                            and snapshot.budget.tool_invocations < pending_correction[5]
+                        ):
+                            failure_code = "contract_violation"
+                            raise DeepReasoningContractError(
+                                "deep_reasoning_research_tool_required"
+                            )
+                        assessment_ordinal = len(provisional_evidence_checks) + 1
+                        snapshot, terminal_provisional_assessment = (
+                            self._assess_provisional_evidence(
+                                snapshot=snapshot,
+                                proposal=action,
+                                visual_images_by_handle=visual_images_by_handle,
+                                assessment_ordinal=assessment_ordinal,
+                            )
+                        )
+                        is_limit_final = pending_limit_finalization is not None
+                        provisional_evidence_checks.append(
+                            ProvisionalEvidenceCheckV1(
+                                ordinal=assessment_ordinal,
+                                candidate_kind=(
+                                    "limit_final" if is_limit_final else "normal"
+                                ),
+                                linked_evaluation_cycle=(
+                                    None
+                                    if is_limit_final
+                                    else len(reasoning_evaluations) + 1
+                                ),
+                                consistency=terminal_provisional_assessment.consistency,
+                                reason_code=terminal_provisional_assessment.reason_code,
+                                candidate_disposition=(
+                                    "limit_finalized" if is_limit_final else "pending"
+                                ),
+                                answer_digest=terminal_provisional_assessment.answer_digest,
+                                declared_subset_digest=(
+                                    terminal_provisional_assessment.declared_subset_digest
+                                ),
+                                assessment_input_digest=(
+                                    terminal_provisional_assessment.assessment_input_digest
+                                ),
+                                assessment_output_digest=(
+                                    terminal_provisional_assessment.assessment_output_digest
+                                ),
+                                visual_image_digests=(
+                                    terminal_provisional_assessment.visual_image_digests
+                                ),
+                            )
+                        )
+                        step_ordinal += 1
+                        audit_steps.append(
+                            TurnAuditStepV1(
+                                ordinal=step_ordinal,
+                                step_kind="governance",
+                                operation="provisional_declared_evidence_gate",
+                                status=(
+                                    "skipped"
+                                    if terminal_provisional_assessment.state
+                                    == "not_attempted"
+                                    else "completed"
+                                    if terminal_provisional_assessment.state == "completed"
+                                    else "failed"
+                                ),
+                                safe_input_digest=_digest(
+                                    [
+                                        terminal_provisional_assessment.answer_digest,
+                                        terminal_provisional_assessment.declared_subset_digest,
+                                        terminal_provisional_assessment.visual_image_digests,
+                                    ]
+                                ),
+                                evidence_count=len(action.claimed_evidence_handles),
+                            )
+                        )
+                        terminal_trace_status: Literal["completed", "degraded"]
+                        termination_reason: ReasoningTerminationReason
+                        if pending_limit_finalization is not None:
+                            trigger_cycle, limit_summary = pending_limit_finalization
+                            limit_finalization = ReasoningLimitFinalizationV2(
+                                triggering_evaluation=trigger_cycle,
+                                summary=limit_summary,
+                            )
+                            pending_limit_finalization = None
+                            terminal_trace_status = "degraded"
+                            termination_reason = "correction_limit_reached"
+                            reasoning_trace = _next_reasoning_trace(
+                                reasoning_trace,
+                                status="degraded",
+                                plans=reasoning_plans,
+                                evaluations=reasoning_evaluations,
+                                corrections=reasoning_corrections,
+                                provisional_evidence_checks=provisional_evidence_checks,
+                                limit_finalization=limit_finalization,
+                                termination_reason=termination_reason,
+                            )
+                            snapshot = self._record_reasoning_progress(
+                                snapshot,
+                                reasoning_trace,
+                                phase="revising",
+                                progress_status="degraded",
+                                cycle=trigger_cycle,
+                                message_code="reasoning.correction_limit_reached",
+                                message_params={"cycle": trigger_cycle},
+                            )
+                        else:
+                            reasoning_trace = _next_reasoning_trace(
+                                reasoning_trace,
+                                status="running",
+                                plans=reasoning_plans,
+                                evaluations=reasoning_evaluations,
+                                corrections=reasoning_corrections,
+                                provisional_evidence_checks=provisional_evidence_checks,
+                            )
+                            snapshot = self._record_reasoning_progress(
+                                snapshot,
+                                reasoning_trace,
+                                phase="drafting",
+                                progress_status="completed",
+                                message_code="reasoning.drafting_completed",
+                                message_params={
+                                    "candidate_segments": len(action.segments)
+                                },
+                            )
+                            evaluation_cycle = len(reasoning_evaluations) + 1
+                            provisional_input = ProvisionalEvidenceEvaluationInputV1(
+                                check_ordinal=assessment_ordinal,
+                                consistency=terminal_provisional_assessment.consistency,
+                                reason_code=terminal_provisional_assessment.reason_code,
+                            )
+                            try:
+                                evaluation_input = self._model_inputs.build(
+                                    snapshot,
+                                    observations=observations,
+                                    contract_repair_remaining=contract_repair_remaining,
+                                ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                _validate_model_input(snapshot, evaluation_input)
+                                evaluation_tokens = (
+                                    self._reasoning_model.estimate_evaluation_request_tokens(
+                                        evaluation_input,
+                                        plan=reasoning_plan,
+                                        proposal=action,
+                                        observations=observations,
+                                        cycle=evaluation_cycle,
+                                        provisional_evidence=provisional_input,
+                                    )
+                                )
+                                snapshot = self._runtime.request_model_action(
+                                    RequestModelActionV1(
+                                        execution_id=execution_id,
+                                        expected_version=snapshot.version,
+                                        fencing_token=snapshot.lease.fencing_token,
+                                        context_tokens=evaluation_tokens,
+                                    )
+                                )
+                                evaluation_input = self._model_inputs.build(
+                                    snapshot,
+                                    observations=observations,
+                                    contract_repair_remaining=contract_repair_remaining,
+                                ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                _validate_model_input(snapshot, evaluation_input)
+                                evaluation_result = self._reasoning_model.evaluate(
+                                    evaluation_input,
+                                    plan=reasoning_plan,
+                                    proposal=action,
+                                    observations=observations,
+                                    cycle=evaluation_cycle,
+                                    provisional_evidence=provisional_input,
+                                )
+                                evaluation = evaluation_result.evaluation
+                                required_finding = {
+                                    "conflict": "declared_evidence_conflict",
+                                    "insufficient": "declared_evidence_insufficient",
+                                }.get(terminal_provisional_assessment.consistency)
+                                if (
+                                    required_finding is not None
+                                    and required_finding not in evaluation.finding_codes
+                                ):
+                                    evaluation = evaluation.model_copy(
+                                        update={
+                                            "finding_codes": [
+                                                *evaluation.finding_codes[:7],
+                                                required_finding,
+                                            ]
+                                        }
+                                    )
+                                if (
+                                    terminal_provisional_assessment.consistency
+                                    in {"conflict", "insufficient"}
+                                    and evaluation.verdict == "accept"
+                                ):
+                                    raise DeepReasoningContractError(
+                                        "deep_reasoning_evaluation_invalid"
+                                    )
+                                step_ordinal += 1
+                                audit_steps.append(
+                                    TurnAuditStepV1(
+                                        ordinal=step_ordinal,
+                                        step_kind="model",
+                                        operation="deep_reasoning_evaluation",
+                                        status="completed",
+                                        safe_input_digest=_digest(
+                                            evaluation_input.model_dump(mode="json")
+                                        ),
+                                        input_tokens=evaluation_result.input_tokens,
+                                        output_tokens=evaluation_result.output_tokens,
+                                    )
+                                )
+                            except Exception as error:
+                                safe_code = getattr(error, "safe_code", "")
+                                unavailable_reason = (
+                                    "deadline_exceeded"
+                                    if datetime.now(timezone.utc) >= snapshot.deadline_at
+                                    else "budget_exhausted"
+                                    if "budget" in safe_code
+                                    or "budget" in type(error).__name__.lower()
+                                    else "provider_unavailable"
+                                )
+                                evaluation = ReasoningEvaluationV1(
+                                    cycle=evaluation_cycle,
+                                    verdict="unavailable",
+                                    unavailable_reason=unavailable_reason,
+                                )
+                                step_ordinal += 1
+                                audit_steps.append(
+                                    TurnAuditStepV1(
+                                        ordinal=step_ordinal,
+                                        step_kind="model",
+                                        operation="deep_reasoning_evaluation",
+                                        status="failed",
+                                        safe_input_digest=_digest(
+                                            {
+                                                "execution_id": execution_id,
+                                                "cycle": evaluation_cycle,
+                                            }
+                                        ),
+                                    )
+                                )
+                            reasoning_evaluations.append(evaluation)
+                            disposition = (
+                                "degraded"
+                                if evaluation.verdict == "unavailable"
+                                else "accepted"
+                                if evaluation.verdict == "accept"
+                                else "revised"
+                            )
+                            provisional_evidence_checks[-1] = (
+                                provisional_evidence_checks[-1].model_copy(
+                                    update={"candidate_disposition": disposition}
+                                )
+                            )
+                            if pending_correction is not None:
+                                (
+                                    correction_kind,
+                                    triggering_evaluation,
+                                    addressed_codes,
+                                    correction_summary,
+                                    correction_plan_generation,
+                                    tool_start,
+                                ) = pending_correction
+                                tool_end = snapshot.budget.tool_invocations
+                                reasoning_corrections.append(
+                                    ReasoningCorrectionV2(
+                                        cycle=len(reasoning_corrections) + 1,
+                                        kind=correction_kind,
+                                        triggering_evaluation=triggering_evaluation,
+                                        plan_generation=correction_plan_generation,
+                                        tool_invocation_start=(
+                                            tool_start
+                                            if correction_kind == "research_then_revise"
+                                            else None
+                                        ),
+                                        tool_invocation_end=(
+                                            tool_end
+                                            if correction_kind == "research_then_revise"
+                                            else None
+                                        ),
+                                        result_evaluation=evaluation_cycle,
+                                        addressed_finding_codes=addressed_codes,
+                                        summary=correction_summary,
+                                    )
+                                )
+                                pending_correction = None
+                            reasoning_trace = _next_reasoning_trace(
+                                reasoning_trace,
+                                status=(
+                                    "degraded"
+                                    if evaluation.verdict == "unavailable"
+                                    else "running"
+                                ),
+                                plans=reasoning_plans,
+                                evaluations=reasoning_evaluations,
+                                corrections=reasoning_corrections,
+                                provisional_evidence_checks=provisional_evidence_checks,
+                                termination_reason=(
+                                    "evaluator_unavailable"
+                                    if evaluation.verdict == "unavailable"
+                                    else None
+                                ),
+                            )
+                            snapshot = self._record_reasoning_progress(
+                                snapshot,
+                                reasoning_trace,
+                                phase="evaluating",
+                                progress_status=(
+                                    "degraded"
+                                    if evaluation.verdict == "unavailable"
+                                    else "completed"
+                                ),
+                                cycle=evaluation_cycle,
+                                message_code=(
+                                    "reasoning.evaluator_unavailable"
+                                    if evaluation.verdict == "unavailable"
+                                    else "reasoning.evaluation_completed"
+                                ),
+                                message_params={"cycle": evaluation_cycle},
+                            )
+                            if evaluation.verdict == "unavailable":
+                                terminal_trace_status = "degraded"
+                                termination_reason = "evaluator_unavailable"
+                            elif evaluation.verdict == "accept":
+                                if (
+                                    terminal_provisional_assessment.consistency
+                                    == "unavailable"
+                                ):
+                                    terminal_trace_status = "degraded"
+                                    termination_reason = (
+                                        "provisional_evidence_unavailable"
+                                    )
+                                else:
+                                    terminal_trace_status = "completed"
+                                    termination_reason = "completed"
+                            elif (
+                                len(reasoning_corrections)
+                                < snapshot.policy.max_reasoning_revision_cycles
+                            ):
+                                replacement_plan: ReasoningPlanV2 | None = None
+                                if evaluation.verdict == "research_then_revise":
+                                    failure_code = "contract_violation"
+                                    reasoning_replanner_failed = True
+                                    for repair in (False, True):
+                                        if repair and shared_plan_repair_remaining == 0:
+                                            raise DeepReasoningContractError(
+                                                "deep_reasoning_replan_invalid"
+                                            )
+                                        replan_input = self._model_inputs.build(
+                                            snapshot,
+                                            observations=observations,
+                                            contract_repair_remaining=contract_repair_remaining,
+                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        _validate_model_input(snapshot, replan_input)
+                                        replan_tokens = (
+                                            self._reasoning_model.estimate_replan_request_tokens(
+                                                replan_input,
+                                                plan=reasoning_plan,
+                                                evaluation=evaluation,
+                                                repair=repair,
+                                            )
+                                        )
+                                        snapshot = self._runtime.request_model_action(
+                                            RequestModelActionV1(
+                                                execution_id=execution_id,
+                                                expected_version=snapshot.version,
+                                                fencing_token=snapshot.lease.fencing_token,
+                                                context_tokens=replan_tokens,
+                                                contract_repair=repair,
+                                            )
+                                        )
+                                        replan_input = self._model_inputs.build(
+                                            snapshot,
+                                            observations=observations,
+                                            contract_repair_remaining=contract_repair_remaining,
+                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        _validate_model_input(snapshot, replan_input)
+                                        try:
+                                            replan_result = self._reasoning_model.replan(
+                                                replan_input,
+                                                plan=reasoning_plan,
+                                                evaluation=evaluation,
+                                                repair=repair,
+                                            )
+                                        except DeepReasoningContractError:
+                                            step_ordinal += 1
+                                            audit_steps.append(
+                                                TurnAuditStepV1(
+                                                    ordinal=step_ordinal,
+                                                    step_kind="model",
+                                                    operation="deep_reasoning_replan_repair",
+                                                    status="failed",
+                                                    safe_input_digest=_digest(
+                                                        replan_input.model_dump(mode="json")
+                                                    ),
+                                                )
+                                            )
+                                            if not repair and shared_plan_repair_remaining == 1:
+                                                shared_plan_repair_remaining = 0
+                                                continue
+                                            raise
+                                        replacement_plan = replan_result.plan
+                                        step_ordinal += 1
+                                        audit_steps.append(
+                                            TurnAuditStepV1(
+                                                ordinal=step_ordinal,
+                                                step_kind="model",
+                                                operation="deep_reasoning_replan",
+                                                status="completed",
+                                                safe_input_digest=_digest(
+                                                    replan_input.model_dump(mode="json")
+                                                ),
+                                                input_tokens=replan_result.input_tokens,
+                                                output_tokens=replan_result.output_tokens,
+                                            )
+                                        )
+                                        break
+                                    if replacement_plan is None:
+                                        raise DeepReasoningContractError(
+                                            "deep_reasoning_replan_invalid"
+                                        )
+                                    reasoning_replanner_failed = False
+                                    reasoning_plan = replacement_plan
+                                    reasoning_plans.append(replacement_plan)
+                                    reasoning_trace = _next_reasoning_trace(
+                                        reasoning_trace,
+                                        status="running",
+                                        plans=reasoning_plans,
+                                        evaluations=reasoning_evaluations,
+                                        corrections=reasoning_corrections,
+                                    )
+                                    snapshot = self._record_reasoning_progress(
+                                        snapshot,
+                                        reasoning_trace,
+                                        phase="planning",
+                                        progress_status="completed",
+                                        cycle=evaluation_cycle,
+                                        message_code="reasoning.replanning_completed",
+                                        message_params={
+                                            "generation": replacement_plan.generation,
+                                            "cycle": evaluation_cycle,
+                                        },
+                                    )
+                                session.accept_reasoning_feedback(
+                                    evaluation,
+                                    plan=replacement_plan,
+                                )
+                                correction_summary = (
+                                    evaluation.summary
+                                    or "Correction requested by process evaluator."
+                                )
+                                pending_correction = (
+                                    evaluation.verdict,
+                                    evaluation_cycle,
+                                    evaluation.finding_codes,
+                                    correction_summary,
+                                    None if replacement_plan is None else replacement_plan.generation,
+                                    snapshot.budget.tool_invocations + 1,
+                                )
+                                reasoning_trace = _next_reasoning_trace(
+                                    reasoning_trace,
+                                    status="running",
+                                    plans=reasoning_plans,
+                                    evaluations=reasoning_evaluations,
+                                    corrections=reasoning_corrections,
+                                )
+                                snapshot = self._record_reasoning_progress(
+                                    snapshot,
+                                    reasoning_trace,
+                                    phase="revising",
+                                    progress_status="started",
+                                    cycle=evaluation_cycle,
+                                    message_code="reasoning.correction_requested",
+                                    message_params={
+                                        "cycle": evaluation_cycle,
+                                        "research": evaluation.verdict
+                                        == "research_then_revise",
+                                    },
+                                )
+                                force_finalize_only = evaluation.verdict == "revise_only"
+                                continue
+                            else:
+                                session.accept_reasoning_limit(evaluation)
+                                pending_limit_finalization = (
+                                    evaluation_cycle,
+                                    evaluation.summary
+                                    or "Correction limit reached with unresolved findings.",
+                                )
+                                reasoning_trace = _next_reasoning_trace(
+                                    reasoning_trace,
+                                    status="running",
+                                    plans=reasoning_plans,
+                                    evaluations=reasoning_evaluations,
+                                    corrections=reasoning_corrections,
+                                )
+                                snapshot = self._record_reasoning_progress(
+                                    snapshot,
+                                    reasoning_trace,
+                                    phase="revising",
+                                    progress_status="started",
+                                    cycle=evaluation_cycle,
+                                    message_code="reasoning.limit_finalization_started",
+                                    message_params={"cycle": evaluation_cycle},
+                                )
+                                force_finalize_only = True
+                                continue
+                        reasoning_trace = _next_reasoning_trace(
+                            reasoning_trace,
+                            status=terminal_trace_status,
+                            plans=reasoning_plans,
+                            evaluations=reasoning_evaluations,
+                            corrections=reasoning_corrections,
+                            limit_finalization=(
+                                limit_finalization
+                                if termination_reason == "correction_limit_reached"
+                                else None
+                            ),
+                            termination_reason=termination_reason,
+                        )
+                        snapshot = self._record_reasoning_progress(
+                            snapshot,
+                            reasoning_trace,
+                            phase="governing",
+                            progress_status=(
+                                "degraded"
+                                if terminal_trace_status == "degraded"
+                                else "started"
+                            ),
+                            message_code="reasoning.governance_started",
+                            message_params={
+                                "evaluations": len(reasoning_evaluations),
+                                "corrections": len(reasoning_corrections),
+                            },
+                        )
                     failure_code = "terminal_materialization_failed"
                     self._materialize_terminal(
                         snapshot=snapshot,
@@ -381,6 +1227,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         used_retrieval=used_retrieval,
                         retrieval_error_status=retrieval_error_status,
                         finalize_only=finalize_only,
+                        provisional_assessment=terminal_provisional_assessment,
                     )
                     return
 
@@ -520,6 +1367,36 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         visual_image=envelope.visual_image,
                     )
         except Exception as error:
+            if snapshot.reasoning_mode == "deep" and reasoning_trace is not None:
+                try:
+                    current = self._runtime.snapshot(snapshot.execution_id)
+                    if current.state not in TERMINAL_STATES:
+                        reasoning_trace = _next_reasoning_trace(
+                            reasoning_trace,
+                            status="failed",
+                            plans=reasoning_plans,
+                            evaluations=reasoning_evaluations,
+                            corrections=reasoning_corrections,
+                            termination_reason=(
+                                "planner_failed"
+                                if reasoning_plan is None
+                                else "replanner_failed"
+                                if reasoning_replanner_failed
+                                else "execution_failed"
+                            ),
+                        )
+                        snapshot = self._record_reasoning_progress(
+                            current,
+                            reasoning_trace,
+                            phase="failed",
+                            progress_status="failed",
+                            message_code="reasoning.execution_failed",
+                        )
+                except Exception:
+                    logger.exception(
+                        "failed to persist deep reasoning failure trace execution_id=%s",
+                        snapshot.execution_id,
+                    )
             if getattr(error, "safe_code", None) == "context_limit_exceeded":
                 failure_code = "context_limit_exceeded"
             logger.error(
@@ -553,6 +1430,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         used_retrieval: bool,
         retrieval_error_status: RetrievalStatusV1 | None,
         finalize_only: bool,
+        provisional_assessment: ProvisionalEvidenceAssessmentV1 | None,
     ) -> None:
         execution_id = snapshot.execution_id
         snapshot = self._runtime.begin_governance(
@@ -605,32 +1483,70 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         assessment_input_digest: str | None = None
         assessment_output_digest: str | None = None
         assessment_results = []
-        if not proposal.claimed_evidence_handles:
-            assessment_state = "not_attempted"
-            assessment_reason_code = "empty_declaration"
-        elif not declared_subset.items:
-            assessment_state = "not_attempted"
-            assessment_reason_code = "no_resolved_declared_evidence"
+        answer_digest = _digest(finalized_answer.model_dump(mode="json"))
+        visual_image_digests = [
+            image.image_digest for image in declared_subset.visual_images
+        ]
+        assessment_consistency: Literal[
+            "aligned", "conflict", "insufficient", "not_applicable", "unavailable"
+        ]
+        if provisional_assessment is not None:
+            if (
+                provisional_assessment.answer_digest != answer_digest
+                or provisional_assessment.declared_subset_digest
+                != declared_subset.digest
+                or provisional_assessment.visual_image_digests
+                != visual_image_digests
+            ):
+                raise ValueError("terminal provisional assessment binding changed")
+            assessment_state = provisional_assessment.state
+            assessment_reason_code = (
+                "completed"
+                if provisional_assessment.state == "completed"
+                else "empty_declaration"
+                if provisional_assessment.reason_code == "empty_declaration"
+                else "no_resolved_declared_evidence"
+                if provisional_assessment.reason_code
+                == "no_resolved_declared_evidence"
+                else provisional_assessment.reason_code
+            )
+            assessment_consistency = provisional_assessment.consistency
+            assessment_input_digest = provisional_assessment.assessment_input_digest
+            assessment_output_digest = provisional_assessment.assessment_output_digest
+            assessment_results = provisional_assessment.results
         else:
-            assessment_state = "unavailable"
-            assessment_reason_code = "provider_failed"
-        try:
-            if declared_subset.items:
-                assessment_result = self._evaluator.assess(
-                    execution_id=execution_id,
-                    finalized_answer=finalized_answer,
-                    declared_evidence_subset=declared_subset,
-                    deadline_at=snapshot.deadline_at,
-                    route=snapshot.route,
-                )
-                assessment_state = "completed"
-                assessment_reason_code = "completed"
-                assessment_input_digest = assessment_result.assessment_input_digest
-                assessment_output_digest = assessment_result.assessment_output_digest
-                assessment_results = assessment_result.results
-        except ClaimAssessmentUnavailable as error:
-            assessment_state = "unavailable"
-            assessment_reason_code = error.reason_code
+            if not proposal.claimed_evidence_handles:
+                assessment_state = "not_attempted"
+                assessment_reason_code = "empty_declaration"
+                assessment_consistency = "not_applicable"
+            elif not declared_subset.items:
+                assessment_state = "not_attempted"
+                assessment_reason_code = "no_resolved_declared_evidence"
+                assessment_consistency = "insufficient"
+            else:
+                assessment_state = "unavailable"
+                assessment_reason_code = "provider_failed"
+                assessment_consistency = "unavailable"
+            try:
+                if declared_subset.items:
+                    assessment_result = self._evaluator.assess(
+                        execution_id=execution_id,
+                        finalized_answer=finalized_answer,
+                        declared_evidence_subset=declared_subset,
+                        deadline_at=snapshot.deadline_at,
+                        route=snapshot.route,
+                        assessment_ordinal=1,
+                    )
+                    assessment_state = "completed"
+                    assessment_reason_code = "completed"
+                    assessment_consistency = assessment_result.consistency
+                    assessment_input_digest = assessment_result.assessment_input_digest
+                    assessment_output_digest = assessment_result.assessment_output_digest
+                    assessment_results = assessment_result.results
+            except ClaimAssessmentUnavailable as error:
+                assessment_state = "unavailable"
+                assessment_reason_code = error.reason_code
+                assessment_consistency = "unavailable"
         assessment_step = TurnAuditStepV1(
             ordinal=len(audit_steps) + 1,
             step_kind="governance",
@@ -655,6 +1571,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 evidence_lineage=declared_lineage,
                 assessment_state=assessment_state,
                 assessment_reason_code=assessment_reason_code,
+                assessment_version="provisional-declared-evidence-v1",
+                assessment_consistency=assessment_consistency,
+                assessment_answer_digest=answer_digest,
+                assessment_declared_subset_digest=declared_subset.digest,
+                assessment_visual_image_digests=visual_image_digests,
                 assessment_input_digest=assessment_input_digest,
                 assessment_output_digest=assessment_output_digest,
                 assessment_results=assessment_results,
@@ -674,6 +1595,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 evidence_lineage=declared_lineage,
                 assessment_state="unavailable",
                 assessment_reason_code="invalid_output",
+                assessment_version="provisional-declared-evidence-v1",
+                assessment_consistency="unavailable",
+                assessment_answer_digest=answer_digest,
+                assessment_declared_subset_digest=declared_subset.digest,
+                assessment_visual_image_digests=visual_image_digests,
                 assessment_input_digest=assessment_input_digest,
                 assessment_results=[],
                 idempotency_key=f"{execution_id}:governed-answer",

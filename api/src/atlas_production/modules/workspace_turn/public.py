@@ -56,6 +56,7 @@ from atlas_production.modules.conversation.public import (
     ConversationRetryLineageOwner,
     ConversationTurnMemberV1,
     ConversationV1,
+    ReasoningMode,
     ResponseLanguage,
     TurnAcceptedV1,
 )
@@ -94,6 +95,9 @@ from atlas_production.modules.turn_runtime.public import (
     ExecutionState,
     FailCarrierExecutionV1,
     LeasePolicyV1,
+    MessageParamValue,
+    ReasoningPhase,
+    ReasoningProgressStatus,
     RoutePolicyV1,
     RuntimeEventV1,
     StageAcceptanceResourceV1,
@@ -121,6 +125,7 @@ class WorkspaceTurnError(RuntimeError):
 class WorkspaceTurnCreateV1(_StrictModel):
     input_text: str = Field(min_length=1, max_length=50000)
     idempotency_key: Identity
+    reasoning_mode: ReasoningMode | None = None
 
 
 class WorkspaceTurnRetryV1(_StrictModel):
@@ -288,12 +293,29 @@ class WorkspaceDiscoveryTraceV1(_StrictModel):
     candidates: list[WorkspaceDiscoveryCandidateV1]
 
 
+class WorkspaceReasoningProgressV1(_StrictModel):
+    event_id: Identity
+    sequence: int = Field(ge=1)
+    phase: ReasoningPhase
+    status: ReasoningProgressStatus
+    cycle: int | None = Field(default=None, ge=1, le=4)
+    message_code: Identity
+    message_params: dict[Identity, MessageParamValue] = Field(
+        default_factory=dict, max_length=12
+    )
+    created_at: AwareDatetime
+
+
 class WorkspaceTurnProjectionV1(_StrictModel):
     turn_id: Identity
     execution_id: Identity
     ordinal: int = Field(ge=1)
     user_input: str = Field(min_length=1, max_length=50000)
     execution_status: ExecutionState
+    reasoning_mode: ReasoningMode = "standard"
+    reasoning_timeline: list[WorkspaceReasoningProgressV1] = Field(
+        default_factory=list
+    )
     retrieval_status: RetrievalStatusV1 | None = None
     evidence_review_status: EvidenceReviewStatusV2 | None = None
     evidence_review_reason_codes: list[EvidenceReviewReasonCodeV2] = Field(
@@ -335,6 +357,10 @@ class WorkspaceExecutionStatusV1(_StrictModel):
     conversation_id: Identity
     state: ExecutionState
     version: int = Field(ge=1)
+    reasoning_mode: ReasoningMode = "standard"
+    reasoning_timeline: list[WorkspaceReasoningProgressV1] = Field(
+        default_factory=list
+    )
     failure_code: str | None = None
     updated_at: AwareDatetime
 
@@ -516,6 +542,11 @@ class WorkspaceTurnApplication:
             "retry_turn" if retry_of is not None else "create_turn"
         )
         retry_of_turn_id = retry_of.turn_id if retry_of is not None else None
+        reasoning_mode: ReasoningMode = (
+            self._runtime.snapshot(retry_of.execution_id).reasoning_mode
+            if retry_of is not None
+            else command.reasoning_mode or conversation.reasoning_mode
+        )
         identity_key = ":".join(
             [conversation_id, operation, retry_of_turn_id or "none", command.idempotency_key]
         )
@@ -530,6 +561,7 @@ class WorkspaceTurnApplication:
                 or replay.conversation_id != conversation_id
                 or replay.turn_id != turn_id
                 or replay.input_digest != input_digest
+                or replay.reasoning_mode != reasoning_mode
             ):
                 raise WorkspaceTurnError(
                     "idempotency_conflict", "common.rejected", 409
@@ -574,6 +606,7 @@ class WorkspaceTurnApplication:
         route_policy = RoutePolicyV1(
             max_tool_invocations=runtime_policy.max_tool_executions,
             max_provider_invocations=runtime_policy.max_provider_invocations,
+            max_reasoning_revision_cycles=runtime_policy.max_reasoning_revision_cycles,
             max_catalog_pages=runtime_policy.max_catalog_pages,
             max_search_rounds=runtime_policy.max_search_rounds,
             max_unique_evidence=runtime_policy.max_unique_evidence,
@@ -598,6 +631,7 @@ class WorkspaceTurnApplication:
                     retry_of_turn_id=retry_of_turn_id,
                     input_digest=input_digest,
                     response_language=conversation.response_language,
+                    reasoning_mode=reasoning_mode,
                     applied_guidance_revision=answer_behavior.revision,
                     applied_guidance_digest=answer_behavior.guidance_digest,
                 )
@@ -623,6 +657,9 @@ class WorkspaceTurnApplication:
                         "membership", snapshot.actor_id, snapshot.execution_id
                     ),
                     operation=operation,
+                    reasoning_mode=(
+                        reasoning_mode if operation == "create_turn" else None
+                    ),
                 )
                 if retry_of_turn_id is None:
                     self._conversations.append_turn_member(
@@ -1106,6 +1143,7 @@ class WorkspaceTurnApplication:
             WorkspaceTurnCreateV1(
                 input_text=source_projection.original_user_input,
                 idempotency_key=command.idempotency_key,
+                reasoning_mode=source_snapshot.reasoning_mode,
             ),
             retry_of=source,
         )
@@ -1640,6 +1678,8 @@ class WorkspaceTurnApplication:
             ordinal=member.ordinal,
             user_input=user_input,
             execution_status=snapshot.state,
+            reasoning_mode=snapshot.reasoning_mode,
+            reasoning_timeline=self._reasoning_timeline(snapshot.execution_id),
             retrieval_status=retrieval_status,
             evidence_review_status=evidence_review_status,
             evidence_review_reason_codes=evidence_review_reason_codes,
@@ -1653,6 +1693,38 @@ class WorkspaceTurnApplication:
             failure_code=failure_code,
             created_at=member.created_at,
         )
+
+    def _reasoning_timeline(
+        self, execution_id: str
+    ) -> list[WorkspaceReasoningProgressV1]:
+        projected: list[WorkspaceReasoningProgressV1] = []
+        for event in self._runtime.events(execution_id):
+            if (
+                not isinstance(event, RuntimeEventV1)
+                or event.event_type != "reasoning_progressed"
+            ):
+                continue
+            if (
+                event.reasoning_phase is None
+                or event.progress_status is None
+                or event.message_code is None
+            ):
+                raise WorkspaceTurnError(
+                    "projection_incomplete", "common.rejected", 503
+                )
+            projected.append(
+                WorkspaceReasoningProgressV1(
+                    event_id=event.event_id,
+                    sequence=event.sequence,
+                    phase=event.reasoning_phase,
+                    status=event.progress_status,
+                    cycle=event.cycle,
+                    message_code=event.message_code,
+                    message_params=event.message_params,
+                    created_at=event.created_at,
+                )
+            )
+        return projected
 
     def _project_claimed_evidence(
         self,
@@ -1764,6 +1836,8 @@ class WorkspaceTurnApplication:
             conversation_id=snapshot.conversation_id,
             state=snapshot.state,
             version=snapshot.version,
+            reasoning_mode=snapshot.reasoning_mode,
+            reasoning_timeline=self._reasoning_timeline(snapshot.execution_id),
             failure_code=snapshot.terminal_failure_code,
             updated_at=snapshot.updated_at,
         )

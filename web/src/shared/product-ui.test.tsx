@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,11 +7,31 @@ import {
   resultStatusSemantic,
   LoadingState,
   StatusBadge,
+  TechnicalDetails,
 } from "./product-ui";
 
 const translate = (key: string) => key;
 
 describe("shared status semantics", () => {
+  it("keeps technical details collapsed behind a native keyboard-focusable button", () => {
+    render(
+      <TechnicalDetails label="Technical details">
+        <span>Internal trace</span>
+      </TechnicalDetails>,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Technical details" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Internal trace")).toBeNull();
+
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(trigger);
+
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Internal trace")).not.toBeNull();
+  });
+
   it("renders a concise accessible loading state without explanatory copy", () => {
     render(<LoadingState title="Loading users" />);
 

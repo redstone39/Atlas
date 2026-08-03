@@ -76,6 +76,7 @@ class Runtime:
         self.failed = []
         self.input_digests = {}
         self.staged = []
+        self.event_overrides = {}
 
     def allocate(self, command):
         previous_digest = self.input_digests.get(command.execution_id)
@@ -104,6 +105,7 @@ class Runtime:
                 route=command.route,
                 input_digest=command.input_digest,
                 response_language=command.response_language,
+                reasoning_mode=command.reasoning_mode,
                 applied_guidance_revision=command.applied_guidance_revision,
                 applied_guidance_digest=command.applied_guidance_digest,
                 lease=lease,
@@ -151,6 +153,8 @@ class Runtime:
         return None
 
     def events(self, execution_id):
+        if execution_id in self.event_overrides:
+            return self.event_overrides[execution_id]
         snapshot = self.executions[execution_id]
         return [RuntimeEventV1(
             event_id=f"event-{execution_id}-terminal",
@@ -179,17 +183,22 @@ class Conversations:
     def __init__(self):
         self.member = None
         self._retry_sources = {}
+        self.conversation = CONVERSATION
 
     def list_for_actor(self, _actor_id):
-        return [CONVERSATION]
+        return [self.conversation]
 
     def get(self, _conversation_id):
-        return CONVERSATION
+        return self.conversation
 
     def get_turn(self, turn_id):
         return self.member if self.member is not None and self.member.turn_id == turn_id else None
 
     def append_turn_member(self, *, actor_id, command):
+        if command.operation == "create_turn":
+            self.conversation = self.conversation.model_copy(
+                update={"reasoning_mode": command.reasoning_mode}
+            )
         if self.member is None:
             self.member = ConversationTurnMemberV1(
                 turn_id=command.turn_id,
@@ -362,7 +371,8 @@ class ModelRoutes:
                 max_tool_result_tokens_per_execution=64000,
                 max_total_tokens_per_conversation=1000000,
                 max_tool_executions=12,
-                max_provider_invocations=14,
+                max_provider_invocations=26,
+                max_reasoning_revision_cycles=2,
                 max_catalog_pages=5,
                 max_search_rounds=6,
                 max_unique_evidence=40,
@@ -600,7 +610,8 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
         "max_catalog_pages": 5,
         "max_search_rounds": 6,
         "max_unique_evidence": 40,
-        "max_provider_invocations": 14,
+        "max_provider_invocations": 26,
+        "max_reasoning_revision_cycles": 2,
         "context_token_budget": 272000,
         "tool_token_budget": 64000,
         "deadline_seconds": 240,
@@ -619,6 +630,73 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
     assert routes.calls == 1
     assert usage.calls == ["conversation-1"]
     assert contexts.projection_create_calls == 1
+
+
+def test_fresh_deep_turn_pins_mode_and_updates_conversation_default() -> None:
+    application, runtime, _source = _app(Carrier())
+    command = WorkspaceTurnCreateV1(
+        input_text="question",
+        idempotency_key="deep-key",
+        reasoning_mode="deep",
+    )
+
+    accepted = application.accept_turn(ACTOR, "conversation-1", command)
+
+    assert runtime.snapshot(accepted.execution_id).reasoning_mode == "deep"
+    assert application._conversations.conversation.reasoning_mode == "deep"
+    assert application.accept_turn(ACTOR, "conversation-1", command) == accepted
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.accept_turn(
+            ACTOR,
+            "conversation-1",
+            command.model_copy(update={"reasoning_mode": "standard"}),
+        )
+    assert error.value.error_code == "idempotency_conflict"
+
+
+def test_workspace_projects_only_safe_deep_reasoning_timeline() -> None:
+    application, runtime, _source = _app(Carrier())
+    accepted = application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(
+            input_text="question",
+            idempotency_key="deep-timeline",
+            reasoning_mode="deep",
+        ),
+    )
+    runtime.event_overrides[accepted.execution_id] = [
+        RuntimeEventV1(
+            event_id="reasoning-event-1",
+            execution_id=accepted.execution_id,
+            sequence=4,
+            event_type="reasoning_progressed",
+            state=ExecutionState.AWAITING_MODEL_ACTION,
+            reasoning_phase="planning",
+            progress_status="completed",
+            cycle=4,
+            message_code="reasoning.planning_completed",
+            message_params={"cycle": 4, "plan_items": 2},
+            created_at=NOW,
+        )
+    ]
+
+    status = application.execution_status(ACTOR, accepted.execution_id)
+    member = application._conversations.member
+    projection = application._project_turn(
+        ACTOR.actor_id, member, runtime.current, None
+    )
+
+    assert status.reasoning_mode == "deep"
+    assert status.reasoning_timeline == projection.reasoning_timeline
+    assert status.reasoning_timeline[0].cycle == 4
+    assert status.reasoning_timeline[0].message_params == {
+        "cycle": 4,
+        "plan_items": 2,
+    }
+    workspace_payload = projection.model_dump(mode="json")
+    assert "reasoning_trace" not in workspace_payload
+    assert "score" not in str(workspace_payload).casefold()
 
 
 def test_workspace_displays_and_retries_original_while_context_stores_rewrite() -> None:
@@ -662,6 +740,7 @@ def test_workspace_displays_and_retries_original_while_context_stores_rewrite() 
         WorkspaceTurnRetryV1(idempotency_key="retry-rewrite-boundary"),
     )
     assert captured["command"].input_text == "它跟上一份有什麼差異？"
+    assert captured["command"].reasoning_mode == "standard"
     assert captured["retry_of"] == member
 
 
@@ -823,6 +902,12 @@ def test_execution_acceptance_pins_guidance_and_exact_replay_does_not_reread() -
         ordinal=1,
         created_at=NOW,
     )
+    runtime.executions[retry_source.execution_id] = first.model_copy(
+        update={
+            "execution_id": retry_source.execution_id,
+            "turn_id": retry_source.turn_id,
+        }
+    )
     retried = application.accept_turn(
         ACTOR,
         "conversation-1",
@@ -841,7 +926,7 @@ def test_execution_acceptance_pins_guidance_and_exact_replay_does_not_reread() -
 
 def test_submit_and_explicit_retries_scope_same_key_to_fresh_execution_semantics() -> None:
     carrier = Carrier()
-    application, _runtime, _source = _app(carrier)
+    application, runtime, _source = _app(carrier)
     command = WorkspaceTurnCreateV1(input_text="question", idempotency_key="same-key")
     submitted = application.accept_turn(ACTOR, "conversation-1", command)
     source_a = ConversationTurnMemberV1(
@@ -851,6 +936,14 @@ def test_submit_and_explicit_retries_scope_same_key_to_fresh_execution_semantics
     source_b = source_a.model_copy(update={
         "turn_id": "source-turn-b", "execution_id": "source-execution-b", "ordinal": 2,
     })
+    submitted_snapshot = runtime.snapshot(submitted.execution_id)
+    for source in (source_a, source_b):
+        runtime.executions[source.execution_id] = submitted_snapshot.model_copy(
+            update={
+                "execution_id": source.execution_id,
+                "turn_id": source.turn_id,
+            }
+        )
 
     retried_a = application.accept_turn(
         ACTOR, "conversation-1", command, retry_of=source_a
@@ -878,6 +971,11 @@ def test_max_length_public_idempotency_key_uses_bounded_internal_owner_keys() ->
     source = ConversationTurnMemberV1(
         turn_id="max-key-source", conversation_id="conversation-1",
         execution_id="max-key-source-execution", role="user", ordinal=1, created_at=NOW,
+    )
+    runtime.executions[source.execution_id] = runtime.snapshot(
+        accepted.execution_id
+    ).model_copy(
+        update={"execution_id": source.execution_id, "turn_id": source.turn_id}
     )
     retried = application.accept_turn(
         ACTOR, "conversation-1", command, retry_of=source

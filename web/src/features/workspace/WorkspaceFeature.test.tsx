@@ -7,6 +7,7 @@ import i18n from "../../i18n";
 import { AnswerEvidenceSummary } from "./AnswerEvidenceSummary";
 import { ClaimedEvidenceTrace } from "./ClaimedEvidenceTrace";
 import { MessageSources } from "./WorkspaceFeature";
+import { ReasoningTimeline } from "./ReasoningTimeline";
 
 afterEach(async () => {
   cleanup();
@@ -14,29 +15,53 @@ afterEach(async () => {
 });
 
 describe("workspace answer evidence presentation", () => {
-  it.each([
-    ["evidence_aligned" as const, "Verification passed", "success"],
-    ["questionable" as const, "Verification not passed", "attention"],
-  ])("shows the authoritative %s label exactly once", (status, label, semantic) => {
-    render(<AnswerEvidenceSummary status={status} items={[]} onOpen={vi.fn()} />);
+  const reasoningProgress = [{
+    event_id: "reasoning-1",
+    sequence: 1,
+    phase: "planning" as const,
+    status: "completed" as const,
+    cycle: null,
+    message_code: "reasoning.planning_completed",
+    message_params: { plan_items: 2 },
+    created_at: "2026-08-01T00:00:00Z",
+  }];
 
-    const badges = screen.getAllByText(label);
-    expect(badges).toHaveLength(1);
-    expect(badges[0].closest('[data-slot="badge"]')).toHaveAttribute(
+  it("shows live safe reasoning progress and collapses completed timelines", () => {
+    const { rerender } = render(
+      <ReasoningTimeline items={reasoningProgress} live />,
+    );
+    expect(screen.getByText("Planning the work")).toBeInTheDocument();
+    expect(screen.queryByText(/score/i)).not.toBeInTheDocument();
+
+    rerender(<ReasoningTimeline items={reasoningProgress} />);
+    expect(screen.queryByText("Planning the work")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Process" }));
+    expect(screen.getByText("Planning the work")).toBeInTheDocument();
+  });
+
+  it("only shows a source warning when the answer needs review", () => {
+    const { rerender } = render(
+      <AnswerEvidenceSummary status="evidence_aligned" items={[]} onOpen={vi.fn()} />,
+    );
+    expect(screen.queryByText("Sources aligned")).not.toBeInTheDocument();
+
+    rerender(<AnswerEvidenceSummary status="questionable" items={[]} onOpen={vi.fn()} />);
+    const warning = screen.getByText("Check sources");
+    expect(warning.closest('[data-slot="badge"]')).toHaveAttribute(
       "data-status-semantic",
-      semantic,
+      "attention",
     );
   });
 
-  it("uses the exact Traditional Chinese answer-level labels", async () => {
+  it("uses the concise Traditional Chinese source warning", async () => {
     await i18n.changeLanguage("zh-TW");
     const { rerender } = render(
       <AnswerEvidenceSummary status="evidence_aligned" items={[]} onOpen={vi.fn()} />,
     );
-    expect(screen.getByText("驗證通過")).toBeInTheDocument();
+    expect(screen.queryByText("來源一致")).not.toBeInTheDocument();
 
     rerender(<AnswerEvidenceSummary status="questionable" items={[]} onOpen={vi.fn()} />);
-    expect(screen.getByText("未驗證通過")).toBeInTheDocument();
+    expect(screen.getByText("請確認來源")).toBeInTheDocument();
   });
 
   it("renders no answer-level status before a terminal projection supplies one", () => {

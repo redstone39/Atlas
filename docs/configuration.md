@@ -40,6 +40,23 @@ credentials must remain readable. Losing them makes those credentials
 unrecoverable. Provider API keys are entered through System Admin; do not add
 Provider-specific keys to `.env`.
 
+## Reasoning route policy
+
+Model routes carry the bounded runtime policy used by both standard and deep
+turns. `max_reasoning_revision_cycles` accepts `0..3` and defaults to `2`.
+Provider capacity must satisfy:
+
+```text
+max_provider_invocations >= max_tool_invocations
+  + 4 * max_reasoning_revision_cycles
+  + 6
+```
+
+This reserves capacity for planning, candidate generation, provisional evidence
+assessment, evaluation, bounded revision, and terminal governance. System Admin
+keeps these limits in the route's technical details; changing them affects new
+executions only.
+
 ## Runtime inputs
 
 - PostgreSQL: `ATLAS_PRODUCTION_DATABASE_URL`

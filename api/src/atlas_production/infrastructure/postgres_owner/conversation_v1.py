@@ -47,6 +47,7 @@ class ConversationRecord:
     title: str
     status: Literal["active", "archived"]
     response_language: Literal["zh-TW", "en"]
+    reasoning_mode: Literal["standard", "deep"]
     next_ordinal: int
     created_at: datetime
     updated_at: datetime
@@ -83,6 +84,7 @@ class AppendTurnMemberInput:
     idempotency_key: str
     operation: Literal["create_turn", "retry_turn"] = "create_turn"
     retry_of_turn_id: str | None = None
+    reasoning_mode: Literal["standard", "deep"] | None = None
 
 
 def _conversation(row: AtlasTurnConversationRow) -> ConversationRecord:
@@ -92,6 +94,7 @@ def _conversation(row: AtlasTurnConversationRow) -> ConversationRecord:
         title=row.title,
         status=row.status,  # type: ignore[arg-type]
         response_language=row.response_language,  # type: ignore[arg-type]
+        reasoning_mode=row.reasoning_mode,  # type: ignore[arg-type]
         next_ordinal=row.next_ordinal,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -141,6 +144,7 @@ class PostgresConversationV1Store:
                 title=command.title,
                 status="active",
                 response_language=command.response_language,
+                reasoning_mode="standard",
                 next_ordinal=1,
                 created_at=created_at,
                 updated_at=created_at,
@@ -168,6 +172,8 @@ class PostgresConversationV1Store:
     def append_turn_member(self, command: AppendTurnMemberInput) -> TurnMemberRecord:
         if command.expected_next_ordinal < 1:
             raise ValueError("expected_next_ordinal must be positive")
+        if (command.operation == "create_turn") != (command.reasoning_mode is not None):
+            raise ValueError("fresh membership requires exactly one reasoning mode")
         request_digest = _digest(asdict(command))
         scope_ref = f"conversation:{command.conversation_id}"
         with self._session_factory() as session, session.begin():
@@ -205,6 +211,11 @@ class PostgresConversationV1Store:
                 )
                 .values(
                     next_ordinal=command.expected_next_ordinal + 1,
+                    **(
+                        {"reasoning_mode": command.reasoning_mode}
+                        if command.operation == "create_turn"
+                        else {}
+                    ),
                     updated_at=_now(),
                 )
             ).rowcount

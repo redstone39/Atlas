@@ -2,6 +2,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { en } from "./locales/en";
+import { zhTW } from "./locales/zh-TW";
+
 const webRoot = process.cwd();
 const productionRoot = resolve(webRoot, "..");
 
@@ -15,6 +18,24 @@ function activeUiSourceFiles(directory: string): string[] {
 }
 
 describe("frontend compatibility convergence", () => {
+  it("keeps the simplified Workspace labels and source-warning contract", () => {
+    expect(zhTW["workspace.reasoningMode"]).toBe("回答方式");
+    expect(zhTW["workspace.reasoningModeStandard"]).toBe("一般");
+    expect(zhTW["workspace.reasoningModeDeep"]).toBe("深入");
+    expect(zhTW["workspace.needsHumanReview"]).toBe("請確認來源");
+    expect(en["workspace.reasoningMode"]).toBe("Answer style");
+    expect(en["workspace.reasoningModeStandard"]).toBe("General");
+    expect(en["workspace.reasoningModeDeep"]).toBe("In-depth");
+    expect(en["workspace.needsHumanReview"]).toBe("Check sources");
+
+    const evidenceSummary = readFileSync(
+      resolve(webRoot, "src/features/workspace/AnswerEvidenceSummary.tsx"),
+      "utf8",
+    );
+    expect(evidenceSummary).not.toContain('t("workspace.evidenceAligned")');
+    expect(evidenceSummary).toContain('t("workspace.needsHumanReview")');
+  });
+
   it("removes root facades and stale upper-layer navigation files", () => {
     for (const relative of [
       "src/api.ts",

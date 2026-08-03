@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from atlas_production.modules.conversation.public import ConversationV1
+from atlas_production.modules.conversation.public import ConversationV1, ReasoningMode
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
     ExecutionState,
+    ReasoningTraceV3,
     RuntimeEventV1,
 )
 from atlas_production.modules.workspace_turn.public import WorkspaceDiscoveryTraceV1
@@ -26,6 +27,8 @@ class RuntimeTraceDetail(_StrictModel):
     turn_id: str = Field(min_length=1, max_length=200)
     state: ExecutionState
     version: int = Field(ge=1)
+    reasoning_mode: ReasoningMode
+    reasoning_trace: ReasoningTraceV3 | None
     failure_code: str | None
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(

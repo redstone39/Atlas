@@ -79,6 +79,7 @@ import {
   localizedStatusLabel,
   PageHeader,
   StatusBadge,
+  TechnicalDetails,
   serverMessage,
 } from "../../shared/product-ui";
 import { modelRoutingApi } from "./api";
@@ -104,6 +105,7 @@ type RuntimePolicyDraft = Record<
   | "tokenizer_profile"
   | "max_tool_executions"
   | "max_provider_invocations"
+  | "max_reasoning_revision_cycles"
   | "max_catalog_pages"
   | "max_search_rounds"
   | "max_unique_evidence"
@@ -124,7 +126,8 @@ type RuntimePolicyDraft = Record<
 const createRuntimePolicyDraft: RuntimePolicyDraft = {
   tokenizer_profile: "cl100k_base",
   max_tool_executions: "12",
-  max_provider_invocations: "14",
+  max_provider_invocations: "26",
+  max_reasoning_revision_cycles: "2",
   max_catalog_pages: "5",
   max_search_rounds: "6",
   max_unique_evidence: "40",
@@ -146,6 +149,7 @@ function runtimePolicyDraft(policy: ModelRouteRuntimePolicy): RuntimePolicyDraft
     tokenizer_profile: policy.tokenizer_profile,
     max_tool_executions: String(policy.max_tool_executions),
     max_provider_invocations: String(policy.max_provider_invocations),
+    max_reasoning_revision_cycles: String(policy.max_reasoning_revision_cycles),
     max_catalog_pages: String(policy.max_catalog_pages),
     max_search_rounds: String(policy.max_search_rounds),
     max_unique_evidence: String(policy.max_unique_evidence),
@@ -183,14 +187,20 @@ function parseRuntimePolicy(draft: RuntimePolicyDraft): ModelRouteRuntimePolicyI
   const values = Object.fromEntries(
     numericKeys.map((key) => [key, Number(draft[key])]),
   ) as Record<(typeof numericKeys)[number], number>;
+  if (!draft.tokenizer_profile.trim()) return null;
+  if (numericKeys.some((key) => {
+    if (!draft[key].trim() || !Number.isInteger(values[key])) return true;
+    return key === "max_reasoning_revision_cycles"
+      ? values[key] < 0
+      : values[key] <= 0;
+  })) return null;
   if (
-    !draft.tokenizer_profile.trim() ||
-    numericKeys.some((key) => !draft[key].trim() || !Number.isInteger(values[key]) || values[key] <= 0)
+    values.max_reasoning_revision_cycles > 3 ||
+    values.max_provider_invocations <
+      values.max_tool_executions + 4 * values.max_reasoning_revision_cycles + 6
   ) return null;
-  if (values.max_provider_invocations < values.max_tool_executions + 2) return null;
   if (values.max_retrieval_repairs > 3 || values.max_schema_retries_per_turn > 3) return null;
   if (values.max_selected_anchor_pages_per_round > 20) return null;
-  if (values.max_provider_invocations < 14) return null;
   if (
     values.max_input_tokens_per_invocation + values.max_output_tokens_per_invocation >
     values.context_window_tokens
@@ -205,7 +215,7 @@ function parseRuntimePolicy(draft: RuntimePolicyDraft): ModelRouteRuntimePolicyI
     values.turn_timeout_seconds < values.tool_execution_timeout_seconds
   ) return null;
   return {
-    schema_version: "model-route-runtime-policy-v4",
+    schema_version: "model-route-runtime-policy-v7",
     tokenizer_profile: draft.tokenizer_profile.trim(),
     ...values,
   };
@@ -216,11 +226,15 @@ function PolicyNumberField({
   label,
   value,
   onChange,
+  min = 1,
+  max,
 }: {
   id: keyof RuntimePolicyDraft;
   label: string;
   value: string;
   onChange: (value: string) => void;
+  min?: number;
+  max?: number;
 }) {
   return (
     <Field>
@@ -229,7 +243,8 @@ function PolicyNumberField({
         id={id}
         type="number"
         inputMode="numeric"
-        min={1}
+        min={min}
+        max={max}
         step={1}
         required
         value={value}
@@ -765,10 +780,8 @@ export function ModelRoutingFeature({
                           <TableHead>{t("admin.modelName")}</TableHead>
                           <TableHead>{t("models.connection")}</TableHead>
                           <TableHead>{t("users.status")}</TableHead>
-                          <TableHead>{t("models.runtimePolicy")}</TableHead>
-                          <TableHead>{t("models.executionLimits")}</TableHead>
-                          <TableHead>{t("models.conversationTokenCap")}</TableHead>
                           <TableHead>{t("models.default")}</TableHead>
+                          <TableHead>{t("common.technicalDetails")}</TableHead>
                           <TableHead>{t("users.action")}</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -777,9 +790,6 @@ export function ModelRoutingFeature({
                           <TableRow key={route.route_id}>
                             <TableCell>
                               <div className="font-medium">{route.display_name}</div>
-                              <div className="font-mono text-xs text-muted-foreground">
-                                {route.route_id}
-                              </div>
                             </TableCell>
                             <TableCell>
                               <div>{route.model_name}</div>
@@ -799,30 +809,36 @@ export function ModelRoutingFeature({
                               />
                             </TableCell>
                             <TableCell>
-                              <div className="flex flex-col gap-1">
-                                <Badge variant="outline">
-                                  {t("models.policyRevision", { revision: route.runtime_policy.revision })}
-                                </Badge>
-                                <span className="text-xs text-muted-foreground">
-                                  {t("models.policyReady")}
-                                </span>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              {t("models.toolProviderLimits", {
-                                tools: route.runtime_policy.max_tool_executions,
-                                providers: route.runtime_policy.max_provider_invocations,
-                              })}
-                            </TableCell>
-                            <TableCell>
-                              {route.runtime_policy.max_total_tokens_per_conversation.toLocaleString(i18n.language)}
-                            </TableCell>
-                            <TableCell>
                               {route.is_default || route.route_id === defaultRouteId ? (
                                 <StatusBadge semantic="success" label={t("models.default")} />
                               ) : (
                                 <Badge variant="outline">{t("models.notDefault")}</Badge>
                               )}
+                            </TableCell>
+                            <TableCell>
+                              <TechnicalDetails label={t("common.viewDetails")}>
+                                <dl className="grid min-w-64 gap-2 rounded-md bg-muted/40 p-3 text-xs">
+                                  <div>
+                                    <dt className="text-muted-foreground">{t("admin.routeId")}</dt>
+                                    <dd className="break-all font-mono">{route.route_id}</dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground">{t("models.runtimePolicy")}</dt>
+                                    <dd>{t("models.policyRevision", { revision: route.runtime_policy.revision })}</dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground">{t("models.executionLimits")}</dt>
+                                    <dd>{t("models.toolProviderLimits", {
+                                      tools: route.runtime_policy.max_tool_executions,
+                                      providers: route.runtime_policy.max_provider_invocations,
+                                    })}</dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground">{t("models.conversationTokenCap")}</dt>
+                                    <dd>{route.runtime_policy.max_total_tokens_per_conversation.toLocaleString(i18n.language)}</dd>
+                                  </div>
+                                </dl>
+                              </TechnicalDetails>
                             </TableCell>
                             <TableCell>
                               <div className="flex flex-wrap gap-2">
@@ -1194,9 +1210,10 @@ export function ModelRoutingFeature({
                 onCheckedChange={setModelSupportsVision}
               />
             </Field>
+            <TechnicalDetails label={t("common.advancedSettings")}>
+              <div className="flex flex-col gap-5 rounded-md border p-4">
             <FieldSet>
               <FieldLegend>{t("models.execution")}</FieldLegend>
-              <FieldDescription>{t("models.executionDescription")}</FieldDescription>
               {runtimePolicyTemplateRouteName ? (
                 <FieldDescription>
                   {t("models.runtimePolicyTemplate", {
@@ -1239,6 +1256,17 @@ export function ModelRoutingFeature({
                   label={t("models.maxProviderInvocations")}
                   value={runtimePolicy.max_provider_invocations}
                   onChange={(value) => setRuntimePolicy((current) => ({ ...current, max_provider_invocations: value }))}
+                />
+                <PolicyNumberField
+                  id="max_reasoning_revision_cycles"
+                  label={t("models.maxReasoningRevisionCycles")}
+                  value={runtimePolicy.max_reasoning_revision_cycles}
+                  min={0}
+                  max={3}
+                  onChange={(value) => setRuntimePolicy((current) => ({
+                    ...current,
+                    max_reasoning_revision_cycles: value,
+                  }))}
                 />
                 <PolicyNumberField
                   id="max_catalog_pages"
@@ -1337,6 +1365,8 @@ export function ModelRoutingFeature({
               </FieldGroup>
               {runtimePolicyInvalid ? <FieldError>{t("models.runtimePolicyInvalid")}</FieldError> : null}
             </FieldSet>
+              </div>
+            </TechnicalDetails>
           </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={closeModelDialog}>{t("admin.cancel")}</Button>

@@ -31,6 +31,12 @@ Atlas is **not Release Ready or Internet Ready**. It does not claim:
 Keep the default Compose ports bound to loopback. Do not expose this snapshot to
 the public Internet without a separate security and operations review.
 
+Replacing an earlier snapshot requires a fresh application data set. Stop the
+earlier stack and remove its Compose volumes before starting this version. Atlas
+does not migrate identities, conversations, routing configuration, processing
+state, or other application data between snapshot versions. Preserve uploaded
+source material outside disposable volumes when it must be loaded again.
+
 ## Runtime components
 
 - `web/`: React, TypeScript, and Vite user interface.
@@ -48,6 +54,18 @@ semantic candidate index, and local or SMB storage contains governed artifact
 bytes.
 
 See [Architecture](docs/architecture.md) for the trust and failure boundaries.
+
+## Workspace reasoning modes
+
+Workspace turns support `standard` and `deep` reasoning modes. Standard keeps
+the normal governed answer flow. Deep runs a bounded plan, research, evaluation,
+and revision loop under the selected model route's tool, Provider, token, and
+deadline limits.
+
+Workspace shows only durable, allowlisted progress phases. System Admin can
+inspect the bounded Atlas-owned plan/evaluation trace for incident review. These
+surfaces do not expose Provider reasoning or raw chain-of-thought, and their
+process status and scores are not truth, accuracy, or confidence guarantees.
 
 ## Local quick start
 

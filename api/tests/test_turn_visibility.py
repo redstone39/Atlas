@@ -337,6 +337,11 @@ class _Results:
             declared_evidence_mappings=mappings,
             assessment_state="unavailable",
             assessment_reason_code="provider_failed",
+            assessment_version="provisional-declared-evidence-v1",
+            assessment_consistency="unavailable",
+            assessment_answer_digest="a" * 64,
+            assessment_declared_subset_digest="b" * 64,
+            assessment_visual_image_digests=[],
             assessment_results=[],
             segments=[
                 {

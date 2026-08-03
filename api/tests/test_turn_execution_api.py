@@ -174,9 +174,21 @@ class _WorkspaceTurns:
                 created_at=NOW,
             ),
             RuntimeEventV1(
-                event_id="event-2",
+                event_id="event-reasoning",
                 execution_id=execution_id,
                 sequence=2,
+                event_type="reasoning_progressed",
+                state=ExecutionState.AWAITING_MODEL_ACTION,
+                reasoning_phase="planning",
+                progress_status="completed",
+                message_code="reasoning.planning_completed",
+                message_params={"plan_items": 2},
+                created_at=NOW,
+            ),
+            RuntimeEventV1(
+                event_id="event-2",
+                execution_id=execution_id,
+                sequence=3,
                 event_type="terminal_failed",
                 state=ExecutionState.TERMINAL_FAILED,
                 failure_code="execution_carrier_lost",
@@ -213,6 +225,8 @@ def test_new_turn_api_returns_execution_identity_and_durable_sse_replay() -> Non
     assert replay.status_code == 200
     assert "id: event-2" in replay.text
     assert "event: terminal_failed" in replay.text
+    assert "event: reasoning_progressed" in replay.text
+    assert '"reasoning_phase": "planning"' in replay.text
     assert "event-1" not in replay.text
 
 

@@ -13,10 +13,11 @@ function successfulFetch() {
 }
 
 const runtimePolicy = {
-  schema_version: "model-route-runtime-policy-v4" as const,
+  schema_version: "model-route-runtime-policy-v7" as const,
   tokenizer_profile: "cl100k_base",
   max_tool_executions: 3,
-  max_provider_invocations: 14,
+  max_provider_invocations: 20,
+  max_reasoning_revision_cycles: 2,
   max_catalog_pages: 5,
   max_search_rounds: 6,
   max_unique_evidence: 40,

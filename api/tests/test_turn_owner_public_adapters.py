@@ -73,6 +73,7 @@ class _ConversationStore:
             command.title,
             "active",
             command.response_language,
+            "standard",
             1,
             NOW,
             NOW,
@@ -161,6 +162,7 @@ def test_conversation_public_adapter_hides_ordinal_and_replays_exact_identity(mo
         execution_id="execution-1",
         role="user",
         idempotency_key="turn-key",
+        reasoning_mode="deep",
     )
     first = adapter.append_turn_member(actor_id="actor-1", command=append)
     assert adapter.append_turn_member(actor_id="actor-1", command=append) == first

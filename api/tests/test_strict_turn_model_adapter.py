@@ -35,9 +35,17 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_execution.public import (
     AnswerBehaviorInputV1,
+    DeepReasoningContractError,
+    FinalizeAnswerV1,
     ModelContractViolationV1,
+    ProvisionalEvidenceEvaluationInputV1,
     TurnModelHistorySummaryV3,
     TurnModelRecentExchangeV3,
+)
+from atlas_production.modules.turn_runtime.public import (
+    ProcessScoreV1,
+    ReasoningEvaluationV1,
+    ReasoningPlanV2,
 )
 
 from tests.test_turn_model_loop import Inputs, Runtime, search
@@ -135,6 +143,462 @@ def _nested_keys(value) -> set[str]:
     if isinstance(value, list):
         return set().union(*(_nested_keys(item) for item in value))
     return set()
+
+
+def _completed(output: dict) -> ProviderCompleted:
+    return ProviderCompleted(
+        provider_request_id="reasoning-request",
+        model_ref="model-1",
+        finish_reason="stop",
+        usage={"input_tokens": 11, "output_tokens": 7},
+        output=output,
+        assistant_message=ProviderAssistantMessage(content="{}"),
+    )
+
+
+def _process_score() -> dict:
+    return {
+        "rubric_version": "atlas-process-rubric-v1",
+        "plan_coverage": 2,
+        "evidence_handling": 1,
+        "conflict_handling": 1,
+        "gap_resolution": 1,
+        "revision_completion": 1,
+        "total": 6,
+    }
+
+
+def _provider_process_score() -> dict:
+    score = _process_score()
+    score.pop("rubric_version")
+    score.pop("total")
+    return score
+
+
+def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> None:
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "next_objective": "Review the request.",
+                    "completion_condition": "The request is covered.",
+                    "item_summaries": ["Review the request."],
+                }
+            ),
+            _completed(
+                {
+                    "verdict": "revise_only",
+                    "summary": "Address the remaining scope.",
+                    "rubric_dimensions": _provider_process_score(),
+                }
+            ),
+            _completed(
+                {
+                    "next_objective": "Close the evidence gap.",
+                    "completion_condition": "The gap is resolved or disclosed.",
+                    "completed_item_ids": ["g1-item-01"],
+                    "skipped_item_ids": [],
+                    "new_item_summaries": ["Find the missing evidence."],
+                }
+            ),
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+
+    plan_result = model.plan(model_input, repair=False)
+    evaluation_result = model.evaluate(
+        model_input.model_copy(update={"reasoning_plan": plan_result.plan}),
+        plan=plan_result.plan,
+        proposal=FinalizeAnswerV1(
+            action="finalize_answer",
+            segments=[{"segment_id": "s1", "text": "Candidate"}],
+            claimed_evidence_handles=[],
+        ),
+        observations=[],
+        cycle=1,
+        provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
+            check_ordinal=1,
+            consistency="aligned",
+            reason_code="aligned",
+        ),
+    )
+    replan_result = model.replan(
+        model_input.model_copy(update={"reasoning_plan": plan_result.plan}),
+        plan=plan_result.plan,
+        evaluation=evaluation_result.evaluation.model_copy(
+            update={"verdict": "research_then_revise"}
+        ),
+        repair=False,
+    )
+
+    assert plan_result.input_tokens == 11
+    assert evaluation_result.evaluation.score.total == 7
+    assert evaluation_result.evaluation.score.revision_completion == 2
+    assert evaluation_result.evaluation.finding_codes == [
+        "evidence_gap",
+        "conflict_handling_gap",
+        "gap_resolution_gap",
+    ]
+    assert evaluation_result.evaluation.score.rubric_version == (
+        "atlas-process-rubric-v1"
+    )
+    assert evaluation_result.evaluation.cycle == 1
+    assert [schema.name for schema in routing.schemas] == [
+        "atlas_initial_plan_decision_v1",
+        "atlas_process_evaluation_decision_v2",
+        "atlas_replan_decision_v1",
+    ]
+    assert set(routing.schemas[0].schema["properties"]) == {
+        "next_objective",
+        "completion_condition",
+        "item_summaries",
+    }
+    assert set(routing.schemas[2].schema["properties"]) == {
+        "next_objective",
+        "completion_condition",
+        "completed_item_ids",
+        "skipped_item_ids",
+        "new_item_summaries",
+    }
+    plan_contract = json.loads(routing.requests[0].messages[0].content)
+    assert plan_contract["atlas_deep_reasoning_contract"][
+        "provider_reasoning_forbidden"
+    ] is True
+    assert "accuracy" not in routing.schemas[1].schema["properties"]
+    assert set(routing.schemas[1].schema["properties"]) == {
+        "verdict",
+        "summary",
+        "rubric_dimensions",
+    }
+    rubric_schema = routing.schemas[1].schema["$defs"][
+        "_ProviderProcessRubricDecisionV1"
+    ]
+    assert "total" not in rubric_schema["properties"]
+    for field_name in rubric_schema["properties"]:
+        assert rubric_schema["properties"][field_name]["enum"] == [0, 1, 2]
+    evaluation_payload = json.loads(routing.requests[1].messages[1].content)
+    assert "1 to 240 Unicode characters" in evaluation_payload["instruction"]
+    assert "Do not restate the candidate" in evaluation_payload["instruction"]
+    assert "Runtime derives finding codes" in evaluation_payload["instruction"]
+    replan_payload = json.loads(routing.requests[2].messages[1].content)
+    assert replan_result.plan.generation == 2
+    assert replan_result.plan.parent_generation == 1
+    assert [item.status for item in replan_result.plan.items] == [
+        "completed",
+        "pending",
+    ]
+    assert "candidate" not in replan_payload
+    assert "tool_observations" not in replan_payload
+    assert "kh_document_A" not in json.dumps(replan_payload)
+    assert "evidence" not in json.dumps(replan_payload["current_plan"])
+
+
+def test_process_evaluator_schema_excludes_accept_for_non_aligned_gate() -> None:
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "verdict": "accept",
+                    "summary": "No remediation selected.",
+                    "rubric_dimensions": _provider_process_score(),
+                }
+            )
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    plan = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review evidence.",
+        completion_condition="Candidate is remediated.",
+        items=[
+            {
+                "item_id": "plan-1",
+                "summary": "Review evidence.",
+                "status": "pending",
+            }
+        ],
+    )
+
+    with pytest.raises(DeepReasoningContractError):
+        model.evaluate(
+            model_input.model_copy(update={"reasoning_plan": plan}),
+            plan=plan,
+            proposal=FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "Candidate"}],
+                claimed_evidence_handles=["kh_evidence_A"],
+            ),
+            observations=[],
+            cycle=1,
+            provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
+                check_ordinal=1,
+                consistency="conflict",
+                reason_code="declared_evidence_conflict",
+            ),
+        )
+
+    assert routing.schemas[0].schema["properties"]["verdict"]["enum"] == [
+        "revise_only",
+        "research_then_revise",
+    ]
+
+
+def test_process_evaluator_retains_revision_judgment_after_initial_cycle() -> None:
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "verdict": "revise_only",
+                    "summary": "Complete the requested revision.",
+                    "rubric_dimensions": _provider_process_score(),
+                }
+            )
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    plan = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review the request.",
+        completion_condition="The request is covered.",
+        items=[
+            {
+                "item_id": "plan-1",
+                "summary": "Review the request.",
+                "status": "pending",
+            }
+        ],
+    )
+
+    result = model.evaluate(
+        model_input.model_copy(update={"reasoning_plan": plan}),
+        plan=plan,
+        proposal=FinalizeAnswerV1(
+            action="finalize_answer",
+            segments=[{"segment_id": "s1", "text": "Candidate"}],
+            claimed_evidence_handles=[],
+        ),
+        observations=[],
+        cycle=2,
+        provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
+            check_ordinal=2,
+            consistency="aligned",
+            reason_code="aligned",
+        ),
+    )
+
+    assert result.evaluation.score is not None
+    assert result.evaluation.score.revision_completion == 1
+    assert result.evaluation.finding_codes[-1] == "revision_incomplete"
+
+
+@pytest.mark.parametrize(
+    ("rubric_dimensions", "safe_code"),
+    [
+        (
+            {
+                "plan_coverage": 2,
+                "evidence_handling": 1,
+                "conflict_handling": 1,
+                "gap_resolution": 1,
+            },
+            "deep_reasoning_evaluation_semantic_shape_invalid",
+        ),
+        (
+            {
+                "plan_coverage": 3,
+                "evidence_handling": 1,
+                "conflict_handling": 1,
+                "gap_resolution": 1,
+                "revision_completion": 1,
+            },
+            "deep_reasoning_evaluation_semantic_shape_invalid",
+        ),
+    ],
+)
+def test_process_evaluator_invalid_semantics_have_safe_category(
+    rubric_dimensions, safe_code
+) -> None:
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "verdict": "revise_only",
+                    "summary": "Revise the candidate.",
+                    "rubric_dimensions": rubric_dimensions,
+                }
+            )
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    plan = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review evidence.",
+        completion_condition="Candidate is remediated.",
+        items=[
+            {
+                "item_id": "plan-1",
+                "summary": "Review evidence.",
+                "status": "pending",
+            }
+        ],
+    )
+
+    with pytest.raises(DeepReasoningContractError) as error:
+        model.evaluate(
+            model_input.model_copy(update={"reasoning_plan": plan}),
+            plan=plan,
+            proposal=FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "Candidate"}],
+                claimed_evidence_handles=[],
+            ),
+            observations=[],
+            cycle=1,
+            provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
+                check_ordinal=1,
+                consistency="aligned",
+                reason_code="aligned",
+            ),
+        )
+
+    assert error.value.safe_code == safe_code
+
+
+def test_invalid_deep_plan_is_a_repairable_contract_error() -> None:
+    routing = CapturingRouting([_completed({"items": [], "raw_reasoning": "x"})])
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+
+    with pytest.raises(DeepReasoningContractError) as error:
+        model.plan(model_input, repair=False)
+
+    assert error.value.safe_code == "deep_reasoning_plan_invalid"
+
+
+def test_initial_planner_runtime_owns_ids_status_and_bounds() -> None:
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "next_objective": "目" * 200,
+                    "completion_condition": "完成" * 100,
+                    "item_summaries": ["", *[f"步驟 {index} " + "說" * 130 for index in range(10)]],
+                }
+            )
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+
+    plan = model.plan(model_input, repair=False).plan
+
+    assert plan.generation == 1
+    assert plan.parent_generation is None
+    assert len(plan.next_objective) == 160
+    assert len(plan.completion_condition) == 160
+    assert len(plan.items) == 8
+    assert [item.item_id for item in plan.items] == [
+        f"g1-item-{ordinal:02d}" for ordinal in range(1, 9)
+    ]
+    assert all(item.status == "pending" for item in plan.items)
+    assert all(len(item.summary) <= 120 for item in plan.items)
+
+
+def test_replanner_runtime_retains_unmentioned_pending_and_rejects_unknown_ids() -> None:
+    plan = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review.",
+        completion_condition="Done.",
+        items=[
+            {"item_id": "g1-item-01", "summary": "First", "status": "pending"},
+            {"item_id": "g1-item-02", "summary": "Second", "status": "pending"},
+            {"item_id": "g1-item-03", "summary": "Closed", "status": "completed"},
+        ],
+    )
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="research_then_revise",
+        finding_codes=["evidence_gap"],
+        summary="Find support.",
+        score=ProcessScoreV1.model_validate(_process_score()),
+    )
+    routing = CapturingRouting(
+        [
+            _completed(
+                {
+                    "next_objective": "Find support.",
+                    "completion_condition": "Support is found or disclosed.",
+                    "completed_item_ids": ["g1-item-01"],
+                    "skipped_item_ids": [],
+                    "new_item_summaries": ["Inspect another source."],
+                }
+            ),
+            _completed(
+                {
+                    "next_objective": "Invalid.",
+                    "completion_condition": "Invalid.",
+                    "completed_item_ids": ["missing-item"],
+                    "skipped_item_ids": [],
+                    "new_item_summaries": [],
+                }
+            ),
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+
+    replacement = model.replan(
+        model_input,
+        plan=plan,
+        evaluation=evaluation,
+        repair=False,
+    ).plan
+
+    assert [(item.item_id, item.status) for item in replacement.items] == [
+        ("g1-item-01", "completed"),
+        ("g1-item-02", "pending"),
+        ("g1-item-03", "completed"),
+        ("g2-item-01", "pending"),
+    ]
+    assert routing.schemas[0].schema["properties"]["completed_item_ids"]["items"]["enum"] == [
+        "g1-item-01",
+        "g1-item-02",
+    ]
+
+    with pytest.raises(DeepReasoningContractError) as error:
+        model.replan(
+            model_input,
+            plan=plan,
+            evaluation=evaluation,
+            repair=True,
+        )
+
+    assert error.value.safe_code == "deep_reasoning_replan_invalid"
+
+
+def test_revision_feedback_is_structured_and_contains_no_accuracy_claim() -> None:
+    routing = CapturingRouting([])
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    session = StrictProviderTurnModel(
+        routing, record_invocations=False
+    ).open_session(model_input)
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="revise_only",
+        finding_codes=["coverage_gap"],
+        summary="Address the remaining scope.",
+        score=ProcessScoreV1.model_validate(_process_score()),
+    )
+
+    session.accept_reasoning_feedback(evaluation)
+
+    payload = json.loads(session._messages[-1].content)
+    assert payload["atlas_process_evaluation"]["verdict"] == "revise_only"
+    assert "accuracy" not in json.dumps(payload)
 
 
 def test_history_is_untrusted_and_below_system_authority() -> None:

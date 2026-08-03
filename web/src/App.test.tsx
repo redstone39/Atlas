@@ -295,9 +295,9 @@ describe("Atlas production web", () => {
 
     render(<App />);
 
-    expect(screen.getByRole("status", { name: "Loading Atlas Production" }))
+    expect(screen.getByRole("status", { name: "Loading Atlas" }))
       .toHaveAttribute("aria-busy", "true");
-    expect(screen.queryByRole("heading", { name: "Atlas Production" }))
+    expect(screen.queryByRole("heading", { name: "Atlas" }))
       .not.toBeInTheDocument();
   });
 
@@ -331,7 +331,7 @@ describe("Atlas production web", () => {
       return normalFetch(input, init);
     });
     render(<App />);
-    await screen.findByRole("heading", { name: "Atlas Production" });
+    await screen.findByRole("heading", { name: "Atlas" });
     fireEvent.change(screen.getByLabelText("Email"), {
       target: { value: "admin@example.test" },
     });
@@ -349,7 +349,7 @@ describe("Atlas production web", () => {
     mockApi(unauthenticated, incompleteReadiness);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Atlas Production" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Atlas" })).toBeInTheDocument();
     expect(screen.getByLabelText("Email")).toHaveValue("");
     expect(screen.getByLabelText("Password")).toHaveValue("");
     const signIn = screen.getByRole("button", { name: /sign in/i });
@@ -375,7 +375,7 @@ describe("Atlas production web", () => {
     fireEvent.click(screen.getByText("繁中"));
 
     expect(await screen.findByRole("button", { name: "登入" })).toBeInTheDocument();
-    expect(screen.getByText("本機開發身分")).toBeInTheDocument();
+    expect(screen.getByText("內部知識工作台")).toBeInTheDocument();
   });
 
   it("/ routes authenticated users into the workspace", async () => {
@@ -404,7 +404,7 @@ describe("Atlas production web", () => {
       "For example: summarize a document or compare information across related sources.",
     );
     await waitFor(() => expect(composer).toHaveFocus());
-    expect(composer.parentElement).toHaveClass("items-center");
+    expect(composer.parentElement).toHaveAttribute("data-slot", "message-composer");
     expect(screen.queryByText("Finish workspace setup")).not.toBeInTheDocument();
     expect(screen.queryByText("Knowledge status")).not.toBeInTheDocument();
     expect(screen.queryByText("Safety checks")).not.toBeInTheDocument();
@@ -624,7 +624,7 @@ describe("Atlas production web", () => {
     mockApi(unauthenticated, incompleteReadiness);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Atlas Production" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Atlas" })).toBeInTheDocument();
     await waitFor(() => expect(window.location.pathname).toBe("/login"));
   });
 
@@ -635,6 +635,14 @@ describe("Atlas production web", () => {
 
     const ask = await screen.findByRole("button", { name: /^send$/i });
     expect(ask).toBeDisabled();
+    const composer = ask.closest<HTMLElement>('[data-slot="message-composer"]');
+    expect(composer).not.toBeNull();
+    expect(within(composer!).getByLabelText("Message")).toBeInTheDocument();
+    expect(
+      within(composer!).getByRole("radiogroup", { name: "Answer style" }),
+    ).toBeInTheDocument();
+    expect(within(composer!).getByRole("button", { name: /^send$/i }))
+      .toBe(ask);
 
     fireEvent.change(screen.getByLabelText("Message"), {
       target: { value: "What is the controlled impedance target for the PCIe reference lane?" },
@@ -650,10 +658,10 @@ describe("Atlas production web", () => {
     });
     expect(
       screen.getByRole("region", {
-        name: "Answer verification and cited documents",
+        name: "Answer sources",
       }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Verification passed")).toBeInTheDocument();
+    expect(screen.queryByText("Sources aligned")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Open evidence/i })).not.toBeInTheDocument();
 
     expect(screen.queryByText("Safety checks")).not.toBeInTheDocument();
@@ -700,6 +708,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("In-depth", { selector: "button" }));
     fireEvent.change(screen.getByLabelText("Message"), {
       target: { value: "What is the controlled impedance target for the PCIe reference lane?" },
     });
@@ -719,6 +728,13 @@ describe("Atlas production web", () => {
     expect(Object.keys(body)).toEqual(["title", "response_language"]);
     expect(body.title).toBe("What is the controlled impedance target for the PCIe reference l");
     expect(body.response_language).toBe("en");
+    const createTurnCall = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input).endsWith("/turns") && init?.method === "POST",
+    );
+    expect(JSON.parse(String(createTurnCall![1]!.body))).toEqual(
+      expect.objectContaining({ reasoning_mode: "deep" }),
+    );
     expect(window.location.pathname).toBe(
       "/workspace/conversations/conv-supported-001",
     );
@@ -928,7 +944,7 @@ describe("Atlas production web", () => {
     expect(screen.queryByText("Message failed")).not.toBeInTheDocument();
   });
 
-  it("reconnects a nonterminal conversation route and replaces its turn", async () => {
+  it("shows live progress before a reconnected nonterminal turn completes", async () => {
     window.history.pushState(
       {},
       "",
@@ -951,6 +967,8 @@ describe("Atlas production web", () => {
       model_claimed_evidence: [],
     };
     let detailReads = 0;
+    let emitStreamingSegment: (() => void) | undefined;
+    let completeRuntimeStream: (() => void) | undefined;
     global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       if (
@@ -963,9 +981,58 @@ describe("Atlas production web", () => {
         );
       }
       if (url.pathname.endsWith(`/${answeredTurn.execution_id}/events`)) {
-        return Promise.resolve(
-          runtimeEventStream(answeredTurn.execution_id, "terminal_completed"),
-        );
+        const encoder = new TextEncoder();
+        return Promise.resolve(new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(encoder.encode(
+                `id: evt-planning\nevent: reasoning_progressed\ndata: ${JSON.stringify({
+                  event_id: "evt-planning",
+                  execution_id: answeredTurn.execution_id,
+                  sequence: 7,
+                  event_type: "reasoning_progressed",
+                  state: "awaiting_model_action",
+                  reasoning_phase: "planning",
+                  progress_status: "started",
+                  cycle: null,
+                  message_code: "reasoning.planning_started",
+                  message_params: {},
+                  created_at: "2026-07-20T00:00:00Z",
+                })}\n\n`,
+              ));
+              emitStreamingSegment = () => {
+                controller.enqueue(encoder.encode(
+                  `id: evt-segment\nevent: segment_delta\ndata: ${JSON.stringify({
+                    event_id: "evt-segment",
+                    execution_id: answeredTurn.execution_id,
+                    sequence: 7,
+                    event_type: "segment_delta",
+                    state: "awaiting_model_action",
+                    segment: {
+                      ...answeredTurn.response_segments[0],
+                      text: "Partial answer received after reconnect.",
+                    },
+                    created_at: "2026-07-20T00:00:01Z",
+                  })}\n\n`,
+                ));
+              };
+              completeRuntimeStream = () => {
+                controller.enqueue(encoder.encode(
+                  `id: evt-terminal\nevent: terminal_completed\ndata: ${JSON.stringify({
+                    event_id: "evt-terminal",
+                    execution_id: answeredTurn.execution_id,
+                    sequence: 8,
+                    event_type: "terminal_completed",
+                    state: "terminal_completed",
+                    created_at: "2026-07-20T00:00:01Z",
+                  })}\n\n`,
+                ));
+                controller.close();
+              };
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ));
       }
       if (url.pathname.endsWith(`/${answeredTurn.execution_id}`)) {
         return jsonResponse({
@@ -982,6 +1049,22 @@ describe("Atlas production web", () => {
     });
 
     render(<App />);
+
+    expect(await screen.findAllByText("Planning the work")).toHaveLength(2);
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+    expect(detailReads).toBe(1);
+    expect(screen.queryByText(
+      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+    )).not.toBeInTheDocument();
+
+    act(() => emitStreamingSegment?.());
+    expect(await screen.findByText(
+      "Partial answer received after reconnect.",
+    )).toBeInTheDocument();
+    expect(screen.getByText("Planning the work")).toBeInTheDocument();
+    expect(detailReads).toBe(1);
+
+    act(() => completeRuntimeStream?.());
 
     expect(await screen.findByText(
       "The PCIe reference lane controlled impedance target is 85 ohms differential.",
@@ -1138,10 +1221,10 @@ describe("Atlas production web", () => {
     ).not.toHaveLength(0);
     expect(
       (await screen.findAllByRole("region", {
-        name: "Answer verification and cited documents",
+        name: "Answer sources",
       })).length,
     ).toBeGreaterThan(0);
-    expect((await screen.findAllByText("Verification passed")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Sources aligned")).not.toBeInTheDocument();
     expect(screen.queryByText("Evidence cited in this response")).not.toBeInTheDocument();
     expect(container.querySelector("[data-claim-id]")).toBeNull();
     expect(screen.queryByText(/citation-binding|cit-ev-doc/)).not.toBeInTheDocument();
@@ -1194,7 +1277,7 @@ describe("Atlas production web", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
 
-    expect(await screen.findByText("Verification not passed")).toBeInTheDocument();
+    expect(await screen.findByText("Check sources")).toBeInTheDocument();
     expect(screen.queryByText("Evidence supported")).not.toBeInTheDocument();
     expect(screen.queryByText("Evidence cited in this response")).not.toBeInTheDocument();
   });
@@ -1247,7 +1330,7 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("list")).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getByText("Verification passed")).toBeInTheDocument();
+    expect(screen.queryByText("Sources aligned")).not.toBeInTheDocument();
   });
 
   it("/workspace integrates the answer verdict with compact cited-document labels", async () => {
@@ -1313,7 +1396,7 @@ describe("Atlas production web", () => {
 
     expect(
       await screen.findByRole("region", {
-        name: "Answer verification and cited documents",
+        name: "Answer sources",
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("Workspace Evidence.pdf · Page 4")).toBeInTheDocument();
@@ -1400,7 +1483,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
-    const evidenceStatus = (await screen.findByText("Verification not passed"))
+    const evidenceStatus = (await screen.findByText("Check sources"))
       .closest('[data-slot="badge"]');
     expect(evidenceStatus).toHaveAttribute("data-status-semantic", "attention");
     expect(screen.queryByText("mixed verified and unverified sources")).not.toBeInTheDocument();
@@ -1475,14 +1558,14 @@ describe("Atlas production web", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
     expect(await screen.findByText(
-      "Verification not passed",
+      "Check sources",
     )).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Message"), {
       target: { value: "Run degraded validation" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
     await waitFor(() => expect(screen.getAllByText(
-      "Verification not passed",
+      "Check sources",
     ).length).toBeGreaterThanOrEqual(2));
   });
 
@@ -1794,7 +1877,7 @@ describe("Atlas production web", () => {
       .toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Account menu" })).toHaveLength(1);
     fireEvent.click((await openAccountMenu()).signOut);
-    expect(await screen.findByRole("heading", { name: "Atlas Production" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Atlas" })).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(
       "/api/v1/auth/session",
       expect.objectContaining({ method: "DELETE" }),
@@ -2127,7 +2210,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Ops" })).toBeInTheDocument();
-    expect(await screen.findByText("Prepare project evidence")).toBeInTheDocument();
+    expect(await screen.findByText("Add documents")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /open documents/i }));
     await waitFor(() => expect(window.location.pathname).toBe("/admin/document-library"));
     expect(await screen.findByRole("heading", { name: "Document Library" })).toBeInTheDocument();
@@ -2410,13 +2493,15 @@ describe("Atlas production web", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /add model/i }));
     dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Advanced settings" }));
     expect(within(dialog).getByText(
       "Copied from the current tested default route: Primary provider. Review it for this model before saving.",
     )).toBeInTheDocument();
     expectModelRuntimePolicyDraft(dialog, {
       "Tokenizer profile": "cl100k_base",
       "Maximum tool executions": 3,
-      "Maximum provider invocations": 14,
+      "Maximum provider invocations": 20,
+      "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
       "Maximum unique evidence items": 40,
@@ -2504,6 +2589,7 @@ describe("Atlas production web", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /add model/i }));
     dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Advanced settings" }));
     expect(within(dialog).getByLabelText("Route name")).toHaveValue("");
     expect(within(dialog).getByLabelText("Model or deployment name")).toHaveValue("");
     expect(within(dialog).getByText(
@@ -2512,7 +2598,8 @@ describe("Atlas production web", () => {
     expectModelRuntimePolicyDraft(dialog, {
       "Tokenizer profile": "o200k_base",
       "Maximum tool executions": 2,
-      "Maximum provider invocations": 14,
+      "Maximum provider invocations": 20,
+      "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
       "Maximum unique evidence items": 40,
@@ -2580,13 +2667,17 @@ describe("Atlas production web", () => {
     expect(await screen.findByText("No models yet")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
     const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Advanced settings" }));
 
     expect(
       within(dialog).queryByText(/Copied from the current tested default route:/),
     ).not.toBeInTheDocument();
     expect(within(dialog).getByLabelText("Tokenizer profile")).toHaveValue("cl100k_base");
     expect(within(dialog).getByLabelText("Maximum tool executions")).toHaveValue(12);
-    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(14);
+    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(26);
+    expect(
+      within(dialog).getByLabelText("Maximum deep-reasoning revision cycles"),
+    ).toHaveValue(2);
     expect(within(dialog).getByLabelText("Maximum catalog pages")).toHaveValue(5);
     expect(within(dialog).getByLabelText("Maximum search rounds")).toHaveValue(6);
     expect(within(dialog).getByLabelText("Maximum unique evidence items")).toHaveValue(40);
@@ -2638,6 +2729,7 @@ describe("Atlas production web", () => {
     const profilesTab = await screen.findByRole("tab", { name: "Profiles" });
     fireEvent.mouseDown(profilesTab, { button: 0 });
     fireEvent.click(profilesTab);
+    fireEvent.click(await screen.findByRole("button", { name: "Advanced settings" }));
     expect(await screen.findByLabelText("Maximum regions per plan")).toHaveValue(100);
     expect(requestCounts).toEqual({ plugins: 1, profiles: 1, runs: 0 });
     expect(screen.getByLabelText("Maximum modules per region")).toHaveValue(4);
@@ -2654,6 +2746,7 @@ describe("Atlas production web", () => {
     fireEvent.click(profilesTab);
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await screen.findByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced settings" }));
     expect(screen.getByLabelText("Maximum regions per plan")).toHaveValue(25);
   });
 
@@ -2757,6 +2850,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "View details" }));
     expect(await screen.findByText(/enterprise-signing-key/)).toBeInTheDocument();
     expect(screen.getByText(/Apache-2.0/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Validate" }));
@@ -2798,6 +2892,7 @@ describe("Atlas production web", () => {
     const profilesTab = await screen.findByRole("tab", { name: "Profiles" });
     fireEvent.mouseDown(profilesTab, { button: 0 });
     fireEvent.click(profilesTab);
+    fireEvent.click(await screen.findByRole("button", { name: "Advanced settings" }));
     const first = await screen.findByLabelText("Eligible com.example.table 1.0.0");
     const second = screen.getByLabelText("Eligible com.example.table 2.0.0");
     fireEvent.click(first);
@@ -3742,6 +3837,17 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(await screen.findByText("Runtime budget")).toBeInTheDocument();
+    expect(screen.getByText("Atlas structured reasoning record")).toBeInTheDocument();
+    expect(screen.getByText(/not accuracy, confidence, or factual guarantees/i))
+      .toBeInTheDocument();
+    expect(screen.getByText("provider_unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Plan generation 2")).toBeInTheDocument();
+    expect(screen.getByText("Provisional declared-evidence checks")).toBeInTheDocument();
+    expect(screen.getByText(/Check 1 · normal · insufficient · revised/)).toBeInTheDocument();
+    expect(screen.getByText(/Evaluation 1 · reason declared_evidence_insufficient/)).toBeInTheDocument();
+    expect(screen.getAllByText(/research_then_revise/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/tool ordinals 2–3/)).toBeInTheDocument();
+    expect(screen.queryByText(/accuracy score/i)).not.toBeInTheDocument();
     expect(screen.getByText("Answer guidance revision").parentElement).toHaveTextContent("3");
     expect(screen.getByText("Answer guidance digest")).toBeInTheDocument();
     expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
@@ -3848,6 +3954,8 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Source check details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Evidence details" }));
     expect(
       await screen.findByRole("region", {
         name: "Model-declared evidence",
@@ -3855,7 +3963,7 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("kh_visual_admin_claim")).toBeInTheDocument();
     expect(screen.getByText("visual-evidence-admin-001")).toBeInTheDocument();
-    expect(screen.getByText("Verification passed")).toBeInTheDocument();
+    expect(screen.getByText("Sources aligned")).toBeInTheDocument();
     expect(screen.getByTestId("evidence-review-assessment")).toHaveTextContent(
       "completed",
     );
@@ -3936,6 +4044,9 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
+    (await screen.findAllByRole("button", { name: "Technical details" })).forEach((button) => {
+      fireEvent.click(button);
+    });
     const lineagePanels = await screen.findAllByTestId("assistant-attempt-lineage");
     expect(lineagePanels).toHaveLength(3);
 
@@ -4660,7 +4771,7 @@ describe("Atlas production web", () => {
 
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
     expect(await screen.findByText("No documents available")).toBeInTheDocument();
-    expect(screen.getByText(/account is active/i)).toBeInTheDocument();
+    expect(screen.getByText("There are no documents available to you yet.")).toBeInTheDocument();
     expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
   });
 

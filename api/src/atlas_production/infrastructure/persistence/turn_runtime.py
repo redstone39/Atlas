@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import OrmBase
@@ -24,6 +25,10 @@ class AtlasTurnExecutionRow(OrmBase):
     actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
     input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     response_language: Mapped[str] = mapped_column(String(10), nullable=False)
+    reasoning_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    reasoning_trace: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     applied_guidance_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False
     )
@@ -46,6 +51,9 @@ class AtlasTurnExecutionRow(OrmBase):
     max_search_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
     max_unique_evidence: Mapped[int] = mapped_column(Integer, nullable=False)
     max_provider_invocations: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_reasoning_revision_cycles: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
     context_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     deadline_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -70,6 +78,17 @@ class AtlasTurnExecutionRow(OrmBase):
             name="ck_atlas_turn_execution_response_language",
         ),
         CheckConstraint(
+            "reasoning_mode IN ('standard','deep')",
+            name="ck_atlas_turn_execution_reasoning_mode",
+        ),
+        CheckConstraint(
+            "(reasoning_mode = 'standard' AND reasoning_trace IS NULL) OR "
+            "(reasoning_mode = 'deep' AND "
+            "(reasoning_trace IS NULL OR (jsonb_typeof(reasoning_trace) = 'object' AND "
+            "octet_length(reasoning_trace::text) <= 32768)))",
+            name="ck_atlas_turn_execution_reasoning_trace",
+        ),
+        CheckConstraint(
             "(applied_guidance_revision = 0 AND applied_guidance_digest IS NULL) OR "
             "(applied_guidance_revision >= 1 AND "
             "applied_guidance_digest ~ '^[0-9a-f]{64}$')",
@@ -92,7 +111,9 @@ class AtlasTurnExecutionRow(OrmBase):
             name="ck_atlas_turn_execution_nonnegative_policy",
         ),
         CheckConstraint(
-            "max_provider_invocations >= max_tool_invocations + 2",
+            "max_reasoning_revision_cycles BETWEEN 0 AND 3 AND "
+            "max_provider_invocations >= max_tool_invocations + "
+            "4 * max_reasoning_revision_cycles + 6",
             name="ck_atlas_turn_execution_provider_budget",
         ),
         CheckConstraint(
@@ -248,13 +269,48 @@ class AtlasTurnRuntimeEventRow(OrmBase):
     invocation_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reasoning_phase: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    progress_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cycle: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message_code: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    message_params: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         CheckConstraint("sequence >= 1", name="ck_atlas_turn_runtime_event_sequence"),
         CheckConstraint(f"state IN ({EXECUTION_STATES})", name="ck_atlas_turn_runtime_event_state"),
-        CheckConstraint("event_type IN ('execution_allocated','execution_accepted','context_ready','model_action_requested','tool_started','tool_completed','governance_started','terminal_completed','terminal_failed')", name="ck_atlas_turn_runtime_event_type"),
+        CheckConstraint("event_type IN ('execution_allocated','execution_accepted','context_ready','model_action_requested','reasoning_progressed','tool_started','tool_completed','governance_started','terminal_completed','terminal_failed')", name="ck_atlas_turn_runtime_event_type"),
         CheckConstraint("invocation_ordinal IS NULL OR invocation_ordinal >= 1", name="ck_atlas_turn_runtime_event_invocation_ordinal"),
+        CheckConstraint(
+            "(event_type = 'reasoning_progressed' AND reasoning_phase IS NOT NULL "
+            "AND progress_status IS NOT NULL AND message_code IS NOT NULL) OR "
+            "(event_type <> 'reasoning_progressed' AND reasoning_phase IS NULL "
+            "AND progress_status IS NULL AND cycle IS NULL AND message_code IS NULL "
+            "AND message_params = '{}'::jsonb)",
+            name="ck_atlas_turn_runtime_event_reasoning_shape",
+        ),
+        CheckConstraint(
+            "reasoning_phase IS NULL OR reasoning_phase IN "
+            "('understanding','planning','researching','drafting','evaluating','revising',"
+            "'governing','finalizing','completed','failed')",
+            name="ck_atlas_turn_runtime_event_reasoning_phase",
+        ),
+        CheckConstraint(
+            "progress_status IS NULL OR progress_status IN "
+            "('started','completed','degraded','failed')",
+            name="ck_atlas_turn_runtime_event_progress_status",
+        ),
+        CheckConstraint(
+            "cycle IS NULL OR cycle BETWEEN 1 AND 4",
+            name="ck_atlas_turn_runtime_event_cycle",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(message_params) = 'object' AND "
+            "octet_length(message_params::text) <= 8192",
+            name="ck_atlas_turn_runtime_event_message_params_bound",
+        ),
         UniqueConstraint("execution_id", "sequence", name="uq_atlas_turn_runtime_event_sequence"),
     )
 

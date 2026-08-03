@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 from sqlalchemy import delete, func, select
 
@@ -116,15 +119,16 @@ def test_v2_persists_ordered_answer_results_and_digests(
     postgres_runtime: PostgresRuntime,
 ) -> None:
     store = PostgresResultGovernanceV1Store(postgres_runtime.session_factory)
+    finalized_answer = FinalizedAnswerV1(
+        segments=[
+            {"segment_id": "answer-1", "text": "First answer."},
+            {"segment_id": "answer-2", "text": "Second answer."},
+        ],
+    )
     command = MaterializeGovernedAnswerDraftV2(
         draft_ref=f"answer-v2-{PREFIX}",
         execution_id=f"execution-v2-{PREFIX}",
-        finalized_answer=FinalizedAnswerV1(
-            segments=[
-                {"segment_id": "answer-1", "text": "First answer."},
-                {"segment_id": "answer-2", "text": "Second answer."},
-            ],
-        ),
+        finalized_answer=finalized_answer,
         retrieval_status="evidence_found",
         declared_evidence_mappings=[
             DeclaredEvidenceMappingV1(
@@ -146,6 +150,18 @@ def test_v2_persists_ordered_answer_results_and_digests(
         ],
         assessment_state="completed",
         assessment_reason_code="completed",
+        assessment_version="provisional-declared-evidence-v1",
+        assessment_consistency="insufficient",
+        assessment_answer_digest=hashlib.sha256(
+            json.dumps(
+                finalized_answer.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        assessment_declared_subset_digest="d" * 64,
+        assessment_visual_image_digests=[],
         assessment_input_digest="b" * 64,
         assessment_output_digest="c" * 64,
         assessment_results=[
@@ -157,7 +173,10 @@ def test_v2_persists_ordered_answer_results_and_digests(
 
     answer = store.materialize_v2(command)
     assert answer.evidence_review_status == "questionable"
-    assert answer.evidence_review_reason_codes == ["answer_item_failed"]
+    assert answer.evidence_review_reason_codes == [
+        "declared_evidence_not_aligned",
+        "answer_item_failed",
+    ]
     assert answer.assessment_results == command.assessment_results
     assert store.materialize_v2(command) == answer
     assert store.read_v2(answer.draft_ref) == answer
@@ -171,6 +190,7 @@ def test_v2_persists_ordered_answer_results_and_digests(
         ]
         assert row.payload["assessment_input_digest"] == "b" * 64
         assert row.payload["assessment_output_digest"] == "c" * 64
+        assert row.payload["assessment_consistency"] == "insufficient"
 
 
 def test_terminal_drafts_exact_replay_conflict_release_and_safe_lineage(

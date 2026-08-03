@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 Identity = Annotated[str, Field(min_length=1, max_length=200)]
 ResponseLanguage = Literal["zh-TW", "en"]
+ReasoningMode = Literal["standard", "deep"]
 
 
 class _StrictModel(BaseModel):
@@ -25,6 +26,7 @@ class ConversationV1(_StrictModel):
     title: str = Field(min_length=1, max_length=200)
     status: Literal["active", "archived"]
     response_language: ResponseLanguage
+    reasoning_mode: ReasoningMode = "standard"
     created_at: AwareDatetime
     updated_at: AwareDatetime
 
@@ -45,6 +47,13 @@ class AppendTurnMemberV1(_StrictModel):
     role: Literal["user", "assistant"]
     idempotency_key: Identity
     operation: Literal["create_turn", "retry_turn"] = "create_turn"
+    reasoning_mode: ReasoningMode | None = None
+
+    @model_validator(mode="after")
+    def require_mode_only_for_fresh_turn(self) -> "AppendTurnMemberV1":
+        if (self.operation == "create_turn") != (self.reasoning_mode is not None):
+            raise ValueError("fresh turn membership requires exactly one reasoning mode")
+        return self
 
 
 class CreateTurnV1(_StrictModel):
@@ -106,5 +115,6 @@ __all__ = [
     "CreateTurnV1",
     "RetryTurnV1",
     "ResponseLanguage",
+    "ReasoningMode",
     "TurnAcceptedV1",
 ]

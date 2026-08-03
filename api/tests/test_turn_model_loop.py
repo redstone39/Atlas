@@ -9,6 +9,9 @@ import pytest
 import tiktoken
 
 from atlas_production.infrastructure.strict_turn_model_adapter import StrictProviderTurnModel
+from atlas_production.infrastructure.strict_posthoc_claim_evaluator import (
+    ClaimAssessmentUnavailable,
+)
 from atlas_production.infrastructure.turn_model_input_adapter import (
     PublicOwnerTurnModelInputSource,
 )
@@ -62,6 +65,9 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_execution.public import (
     AnswerBehaviorInputV1,
+    DeepReasoningContractError,
+    DeepReasoningEvaluationResultV1,
+    DeepReasoningPlanResultV1,
     FinalizeAnswerV1,
     ModelActionResultV1,
     ModelContractViolationV1,
@@ -72,6 +78,10 @@ from atlas_production.modules.turn_runtime.public import (
     ExecutionLeaseV1,
     ExecutionSnapshotV1,
     ExecutionState,
+    ProcessScoreV1,
+    ReasoningEvaluationV1,
+    ReasoningPlanItemV2,
+    ReasoningPlanV2,
     RoutePolicyV1,
 )
 from tests.turn_runtime_fixtures import route_snapshot
@@ -97,11 +107,17 @@ def _budget(**changes) -> BudgetSnapshotV1:
 
 
 class Runtime:
-    def __init__(self, *, policy: RoutePolicyV1 | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        policy: RoutePolicyV1 | None = None,
+        reasoning_mode: str = "standard",
+    ) -> None:
         self.calls: list[str] = []
         self.model_action_repairs: list[bool] = []
         self.reservations = []
         self.document_candidate_handles: set[str] = set()
+        self.reasoning_events = []
         self.snapshot_value = ExecutionSnapshotV1(
             execution_id="exec-1", turn_id="turn-1", conversation_id="conversation-1",
             actor_id="actor-1", state="context_ready", version=3,
@@ -109,6 +125,7 @@ class Runtime:
             route=route_snapshot(),
             input_digest="0" * 64,
             response_language="zh-TW",
+            reasoning_mode=reasoning_mode,
             applied_guidance_revision=0,
             applied_guidance_digest=None,
             lease=ExecutionLeaseV1(
@@ -142,6 +159,7 @@ class Runtime:
             assert self.snapshot_value.state in {
                 ExecutionState.CONTEXT_READY,
                 ExecutionState.TOOL_COMPLETED,
+                ExecutionState.AWAITING_MODEL_ACTION,
             }
         if (
             command.context_tokens
@@ -153,6 +171,17 @@ class Runtime:
             "context_tokens": self.snapshot_value.budget.context_tokens + command.context_tokens,
         })
         return self._move("awaiting_model_action", budget=b)
+
+    def record_reasoning_progress(self, command):
+        self.calls.append(f"reasoning:{command.phase}:{command.progress_status}")
+        self.reasoning_events.append(command)
+        self.snapshot_value = self.snapshot_value.model_copy(
+            update={
+                "version": self.snapshot_value.version + 1,
+                "reasoning_trace": command.trace,
+            }
+        )
+        return self.snapshot_value
 
     def begin_tool(self, command):
         self.calls.append(f"begin:{command.tool_name}")
@@ -239,12 +268,15 @@ class ScriptSession:
         self.fail = fail
         self.discarded = False
         self.visual_images = []
+        self.reasoning_feedback = []
 
     def next_action(self, model_input, *, finalize_only):
         self.finalize_only_values.append(finalize_only)
         if self.fail:
             raise RuntimeError("provider unavailable")
         action = self.actions.pop(0)
+        if isinstance(action, Exception):
+            raise action
         if isinstance(action, ModelContractViolationV1):
             return action
         return ModelActionResultV1(action=action)
@@ -266,6 +298,12 @@ class ScriptSession:
     def accept_contract_repair(self, violation):
         self.observations.append(violation.model_dump(mode="json"))
 
+    def accept_reasoning_feedback(self, evaluation, *, plan=None):
+        self.reasoning_feedback.append((evaluation, plan))
+
+    def accept_reasoning_limit(self, evaluation):
+        self.reasoning_feedback.append((evaluation, "limit"))
+
     def discard(self):
         self.discarded = True
 
@@ -276,6 +314,77 @@ class ScriptModel:
 
     def open_session(self, model_input):
         return self.session
+
+
+class ScriptReasoningModel:
+    def __init__(
+        self,
+        *,
+        evaluations=(),
+        planner_failures=0,
+        replanner_failures=0,
+    ):
+        self.plan_calls = []
+        self.evaluation_calls = []
+        self.evaluations = list(evaluations)
+        self.planner_failures = planner_failures
+        self.replanner_failures = replanner_failures
+        self.replan_calls = []
+
+    def estimate_plan_request_tokens(self, model_input, *, repair):
+        return 10
+
+    def plan(self, model_input, *, repair):
+        self.plan_calls.append(repair)
+        if len(self.plan_calls) <= self.planner_failures:
+            raise DeepReasoningContractError("deep_reasoning_plan_invalid")
+        return DeepReasoningPlanResultV1(
+            plan=ReasoningPlanV2(
+                generation=1,
+                next_objective="Review the request and evidence.",
+                completion_condition="A supported candidate is ready.",
+                items=[
+                    ReasoningPlanItemV2(
+                        item_id="plan-1", summary="Review the request and evidence."
+                    )
+                ]
+            ),
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+    def estimate_evaluation_request_tokens(self, *args, **kwargs):
+        return 10
+
+    def estimate_replan_request_tokens(self, *args, **kwargs):
+        return 10
+
+    def replan(self, model_input, *, plan, evaluation, repair):
+        self.replan_calls.append(repair)
+        if len(self.replan_calls) <= self.replanner_failures:
+            raise DeepReasoningContractError("deep_reasoning_replan_invalid")
+        return DeepReasoningPlanResultV1(
+            plan=ReasoningPlanV2(
+                generation=plan.generation + 1,
+                parent_generation=plan.generation,
+                next_objective="Close the evidence gap.",
+                completion_condition="The requested evidence is available or disclosed as missing.",
+                items=[item.model_copy() for item in plan.items],
+            ),
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+    def evaluate(self, model_input, **kwargs):
+        self.evaluation_calls.append(kwargs["cycle"])
+        outcome = self.evaluations.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return DeepReasoningEvaluationResultV1(
+            evaluation=outcome,
+            input_tokens=10,
+            output_tokens=5,
+        )
 
 
 class Retrieval:
@@ -684,18 +793,57 @@ class Retrieval:
 
 
 class Evaluator:
-    def __init__(self, results=None):
+    def __init__(self, results=None, outcomes=()):
         self.calls = 0
         self.results = (
             [PostHocAnswerAssessmentV2(id="s1", status="success")]
             if results is None
             else list(results)
         )
+        self.outcomes = list(outcomes)
 
     def assess(self, **kwargs):
         self.calls += 1
+        outcome = self.outcomes.pop(0) if self.outcomes else None
+        if isinstance(outcome, Exception):
+            raise outcome
+        answer = kwargs["finalized_answer"]
+        subset = kwargs["declared_evidence_subset"]
+        consistency = (
+            outcome
+            if isinstance(outcome, str)
+            else "insufficient"
+            if any(result.status == "failure" for result in self.results)
+            else "aligned"
+        )
+        results = (
+            [PostHocAnswerAssessmentV2(id="s1", status="failure")]
+            if isinstance(outcome, str)
+            and consistency in {"conflict", "insufficient"}
+            else self.results
+        )
         return PostHocAnswerAssessmentResultV2(
-            results=self.results,
+            state="completed",
+            consistency=consistency,
+            reason_code=(
+                f"declared_evidence_{consistency}"
+                if consistency != "aligned"
+                else "aligned"
+            ),
+            answer_digest=hashlib.sha256(
+                json.dumps(
+                    answer.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    default=str,
+                ).encode()
+            ).hexdigest(),
+            declared_subset_digest=subset.digest,
+            visual_image_digests=[
+                image.image_digest for image in subset.visual_images
+            ],
+            results=results,
             assessment_input_digest="1" * 64,
             assessment_output_digest="2" * 64,
         )
@@ -713,6 +861,15 @@ class Governance:
             declared_evidence_mappings=command.declared_evidence_mappings,
             assessment_state=command.assessment_state,
             assessment_reason_code=command.assessment_reason_code,
+            assessment_version=command.assessment_version,
+            assessment_consistency=command.assessment_consistency,
+            assessment_answer_digest=command.assessment_answer_digest,
+            assessment_declared_subset_digest=(
+                command.assessment_declared_subset_digest
+            ),
+            assessment_visual_image_digests=(
+                command.assessment_visual_image_digests
+            ),
             assessment_input_digest=command.assessment_input_digest,
             assessment_output_digest=command.assessment_output_digest,
             assessment_results=command.assessment_results,
@@ -755,16 +912,53 @@ def finalize(claimed_evidence_handles=()):
     }], claimed_evidence_handles=list(claimed_evidence_handles))
 
 
-def _orchestrator(actions, *, policy=None, model_fail=False, results=None):
-    runtime = Runtime(policy=policy); retrieval = Retrieval(); order = []
+def process_evaluation(cycle, verdict):
+    return ReasoningEvaluationV1(
+        cycle=cycle,
+        verdict=verdict,
+        finding_codes=[] if verdict == "accept" else ["coverage_gap"],
+        summary="Process review completed.",
+        score=ProcessScoreV1(
+            plan_coverage=2,
+            evidence_handling=1,
+            conflict_handling=1,
+            gap_resolution=1,
+            revision_completion=1,
+            total=6,
+        ),
+    )
+
+
+def _orchestrator(
+    actions,
+    *,
+    policy=None,
+    model_fail=False,
+    results=None,
+    reasoning_mode="standard",
+    reasoning_evaluations=(),
+    planner_failures=0,
+    replanner_failures=0,
+    assessment_outcomes=(),
+):
+    runtime = Runtime(policy=policy, reasoning_mode=reasoning_mode)
+    retrieval = Retrieval()
+    order = []
     model = ScriptModel(actions, fail=model_fail)
-    evaluator = Evaluator(results)
+    reasoning_model = ScriptReasoningModel(
+        evaluations=reasoning_evaluations,
+        planner_failures=planner_failures,
+        replanner_failures=replanner_failures,
+    )
+    evaluator = Evaluator(results, assessment_outcomes)
     orchestrator = StatelessTurnExecutionOrchestrator(
         runtime=runtime, model=model, model_inputs=Inputs(), retrieval=retrieval,
         result_governance=Governance(order), citation=Citation(order), audit=Audit(order),
         evaluator=evaluator,
+        reasoning_model=reasoning_model,
     )
     orchestrator.test_evaluator = evaluator
+    orchestrator.test_reasoning_model = reasoning_model
     return orchestrator, runtime, retrieval, model, order
 
 
@@ -811,6 +1005,343 @@ def test_repeated_interleaved_multicall_and_terminal_materialization_order():
     )
     assert runtime.calls[-1] == "commit_terminal"
     assert model.session.discarded is True
+
+
+def test_standard_mode_does_not_call_planner_or_process_evaluator() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator([finalize()])
+
+    orchestrator.run("exec-1")
+
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert orchestrator.test_reasoning_model.plan_calls == []
+    assert orchestrator.test_reasoning_model.evaluation_calls == []
+    assert runtime.reasoning_events == []
+
+
+def test_deep_mode_plans_evaluates_and_persists_completed_trace() -> None:
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.status == "completed"
+    assert trace.termination_reason == "completed"
+    assert len(trace.plans[0].items) == 1
+    assert len(trace.evaluations) == 1
+    assert trace.evaluations[0].score.total == 6
+    assert trace.corrections == []
+    assert model.session.reasoning_feedback == []
+    assert runtime.snapshot_value.budget.provider_invocations == 3
+
+
+def test_deep_conflict_revises_rechecks_and_reuses_only_latest_assessment() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A"]),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "revised answer"}],
+                claimed_evidence_handles=["kh_evidence_A"],
+            ),
+        ],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "revise_only"),
+            process_evaluation(2, "accept"),
+        ],
+        assessment_outcomes=["conflict", "aligned"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None
+    assert [check.consistency for check in trace.provisional_evidence_checks] == [
+        "conflict",
+        "aligned",
+    ]
+    assert [
+        check.candidate_disposition for check in trace.provisional_evidence_checks
+    ] == ["revised", "accepted"]
+    assert trace.evaluations[0].finding_codes[-1] == "declared_evidence_conflict"
+    assert orchestrator.test_evaluator.calls == 2
+    assert orchestrator._result_governance.command.assessment_consistency == "aligned"
+
+
+def test_deep_partial_unresolved_is_insufficient_until_revised() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A", "kh_missing"]),
+            finalize(["kh_evidence_A"]),
+        ],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "revise_only"),
+            process_evaluation(2, "accept"),
+        ],
+        assessment_outcomes=["aligned", "aligned"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert trace is not None
+    assert trace.provisional_evidence_checks[0].consistency == "insufficient"
+    assert trace.provisional_evidence_checks[0].reason_code == (
+        "partially_unresolved_declared_evidence"
+    )
+    assert trace.evaluations[0].finding_codes[-1] == (
+        "declared_evidence_insufficient"
+    )
+    assert trace.provisional_evidence_checks[1].consistency == "aligned"
+
+
+def test_deep_empty_declaration_skips_gate_provider_but_still_evaluates() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert trace is not None
+    assert orchestrator.test_evaluator.calls == 0
+    assert trace.provisional_evidence_checks[0].consistency == "not_applicable"
+    assert orchestrator._result_governance.command.assessment_consistency == (
+        "not_applicable"
+    )
+
+
+def test_deep_gate_unavailable_is_not_retried_and_governs_questionable() -> None:
+    unavailable = ClaimAssessmentUnavailable(
+        "provider unavailable", reason_code="provider_failed"
+    )
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [search("A"), finalize(["kh_evidence_A"])],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        assessment_outcomes=[unavailable],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert trace is not None and trace.status == "degraded"
+    assert trace.termination_reason == "provisional_evidence_unavailable"
+    assert orchestrator.test_evaluator.calls == 1
+    assert orchestrator._result_governance.command.assessment_state == "unavailable"
+    assert orchestrator._result_governance.command.assessment_consistency == (
+        "unavailable"
+    )
+
+
+def test_deep_limit_final_candidate_is_gated_without_another_process_evaluation() -> None:
+    policy = RoutePolicyV1(max_reasoning_revision_cycles=0)
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A"]),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "limited final"}],
+                claimed_evidence_handles=["kh_evidence_A"],
+            ),
+        ],
+        policy=policy,
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "revise_only")],
+        assessment_outcomes=["insufficient", "aligned"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert trace is not None
+    assert len(trace.evaluations) == 1
+    assert len(trace.provisional_evidence_checks) == 2
+    assert trace.provisional_evidence_checks[1].candidate_kind == "limit_final"
+    assert trace.provisional_evidence_checks[1].linked_evaluation_cycle is None
+    assert trace.provisional_evidence_checks[1].candidate_disposition == (
+        "limit_finalized"
+    )
+    assert orchestrator.test_evaluator.calls == 2
+
+
+def test_deep_research_correction_replans_opens_tools_and_evaluates_new_candidate() -> None:
+    orchestrator, runtime, retrieval, model, _order = _orchestrator(
+        [finalize(), search("missing evidence"), finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "research_then_revise"),
+            process_evaluation(2, "accept"),
+        ],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.termination_reason == "completed"
+    assert [plan.generation for plan in trace.plans] == [1, 2]
+    assert len(trace.evaluations) == 2
+    assert len(trace.corrections) == 1
+    correction = trace.corrections[0]
+    assert correction.kind == "research_then_revise"
+    assert correction.plan_generation == 2
+    assert (correction.tool_invocation_start, correction.tool_invocation_end) == (1, 1)
+    assert correction.result_evaluation == 2
+    assert retrieval.invocations == ["search_knowledge"]
+    assert model.session.reasoning_feedback[0][1].generation == 2
+
+
+def test_deep_research_correction_cannot_finalize_without_a_tool_invocation() -> None:
+    orchestrator, runtime, retrieval, _model, _order = _orchestrator(
+        [finalize(), finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "research_then_revise")],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert trace is not None and trace.termination_reason == "execution_failed"
+    assert [plan.generation for plan in trace.plans] == [1, 2]
+    assert [evaluation.cycle for evaluation in trace.evaluations] == [1]
+    assert trace.corrections == []
+    assert retrieval.invocations == []
+    assert runtime.calls[-1] == "fail:contract_violation"
+
+
+def test_deep_mode_runs_bounded_revisions_then_governs_latest_candidate() -> None:
+    policy = RoutePolicyV1(max_reasoning_revision_cycles=2)
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [
+            finalize(),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "revised once"}],
+                claimed_evidence_handles=[],
+            ),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "limited final"}],
+                claimed_evidence_handles=[],
+            ),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "revised twice"}],
+                claimed_evidence_handles=[],
+            ),
+        ],
+        policy=policy,
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "revise_only"),
+            process_evaluation(2, "revise_only"),
+            process_evaluation(3, "revise_only"),
+        ],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.termination_reason == "correction_limit_reached"
+    assert trace.status == "degraded"
+    assert len(trace.evaluations) == 3
+    assert len(trace.corrections) == 2
+    assert trace.limit_finalization is not None
+    assert len(model.session.reasoning_feedback) == 3
+    assert orchestrator._result_governance.command.finalized_answer.segments[0].text == (
+        "revised twice"
+    )
+
+
+def test_deep_revision_is_completed_only_after_revised_candidate_arrives() -> None:
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize(), RuntimeError("provider unavailable during revision")],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "revise_only")],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert trace is not None and trace.termination_reason == "execution_failed"
+    assert trace.corrections == []
+    revising_events = [
+        event for event in runtime.reasoning_events if event.phase == "revising"
+    ]
+    assert [(event.progress_status, event.cycle) for event in revising_events] == [
+        ("started", 1)
+    ]
+    assert len(model.session.reasoning_feedback) == 1
+
+
+def test_deep_evaluator_unavailable_delivers_unscored_degraded_answer() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[RuntimeError("evaluator unavailable")],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.status == "degraded"
+    assert trace.termination_reason == "evaluator_unavailable"
+    assert trace.evaluations[0].verdict == "unavailable"
+    assert trace.evaluations[0].score is None
+
+
+def test_deep_planner_failure_after_one_schema_repair_fails_closed() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        planner_failures=2,
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert trace is not None and trace.status == "failed"
+    assert trace.termination_reason == "planner_failed"
+    assert orchestrator.test_reasoning_model.plan_calls == [False, True]
+
+
+def test_deep_planner_and_replanner_share_one_schema_repair() -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "research_then_revise")],
+        planner_failures=1,
+        replanner_failures=1,
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert trace is not None and trace.status == "failed"
+    assert trace.termination_reason == "replanner_failed"
+    assert orchestrator.test_reasoning_model.plan_calls == [False, True]
+    assert orchestrator.test_reasoning_model.replan_calls == [False]
+    assert [plan.generation for plan in trace.plans] == [1]
+    assert trace.corrections == []
 
 
 def test_two_searches_can_materialize_forty_unique_evidence_items() -> None:
@@ -1177,7 +1708,11 @@ def test_chinese_and_english_discovery_tokens_accumulate_from_actual_results() -
 
 
 def test_finalize_only_budget_gate_and_fabricated_handle_fails_before_backend():
-    policy = RoutePolicyV1(max_tool_invocations=0, max_provider_invocations=2)
+    policy = RoutePolicyV1(
+        max_tool_invocations=0,
+        max_provider_invocations=6,
+        max_reasoning_revision_cycles=0,
+    )
     orchestrator, runtime, _, model, _ = _orchestrator([finalize()], policy=policy)
     orchestrator.run("exec-1")
     assert model.session.finalize_only_values == [True]

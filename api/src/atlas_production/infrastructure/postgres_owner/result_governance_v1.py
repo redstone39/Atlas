@@ -80,6 +80,11 @@ def _semantic_payload_v2(
         ],
         "assessment_state": command.assessment_state,
         "assessment_reason_code": command.assessment_reason_code,
+        "assessment_version": command.assessment_version,
+        "assessment_consistency": command.assessment_consistency,
+        "assessment_answer_digest": command.assessment_answer_digest,
+        "assessment_declared_subset_digest": command.assessment_declared_subset_digest,
+        "assessment_visual_image_digests": command.assessment_visual_image_digests,
         "assessment_input_digest": command.assessment_input_digest,
         "assessment_output_digest": command.assessment_output_digest,
         "assessment_results": [
@@ -209,6 +214,8 @@ def _governed_segments_v2(
         reason_codes.append("empty_declaration")
     if command.assessment_state != "completed":
         reason_codes.append("assessment_not_completed")
+    if command.assessment_consistency != "aligned":
+        reason_codes.append("declared_evidence_not_aligned")
     if any(
         item.status == "failure" for item in command.assessment_results
     ):
@@ -327,6 +334,11 @@ class PostgresResultGovernanceV1Store:
                 declared_evidence_mappings=command.declared_evidence_mappings,
                 assessment_state=command.assessment_state,
                 assessment_reason_code=command.assessment_reason_code,
+                assessment_version=command.assessment_version,
+                assessment_consistency=command.assessment_consistency,
+                assessment_answer_digest=command.assessment_answer_digest,
+                assessment_declared_subset_digest=command.assessment_declared_subset_digest,
+                assessment_visual_image_digests=command.assessment_visual_image_digests,
                 assessment_input_digest=command.assessment_input_digest,
                 assessment_output_digest=command.assessment_output_digest,
                 assessment_results=command.assessment_results,

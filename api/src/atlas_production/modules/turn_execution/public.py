@@ -20,6 +20,8 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
+    ReasoningEvaluationV1,
+    ReasoningPlanV2,
     RoutePolicyV1,
     TurnRouteSnapshotV2,
 )
@@ -381,6 +383,83 @@ class TurnModelInputV3(_StrictModel):
         default_factory=TurnModelBehaviorContractV1
     )
     previous_observation: KnowledgeToolObservationV1 | None = None
+    reasoning_plan: ReasoningPlanV2 | None = None
+
+
+class DeepReasoningPlanResultV1(_StrictModel):
+    plan: ReasoningPlanV2
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
+class DeepReasoningContractError(RuntimeError):
+    def __init__(self, safe_code: str) -> None:
+        super().__init__(safe_code)
+        self.safe_code = safe_code
+
+
+class DeepReasoningEvaluationResultV1(_StrictModel):
+    evaluation: ReasoningEvaluationV1
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
+class ProvisionalEvidenceEvaluationInputV1(_StrictModel):
+    check_ordinal: int = Field(ge=1, le=5)
+    consistency: Literal[
+        "aligned", "conflict", "insufficient", "not_applicable", "unavailable"
+    ]
+    reason_code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+
+
+class DeepReasoningModel(Protocol):
+    def estimate_plan_request_tokens(
+        self, model_input: TurnModelInputV3, *, repair: bool
+    ) -> int: ...
+
+    def plan(
+        self, model_input: TurnModelInputV3, *, repair: bool
+    ) -> DeepReasoningPlanResultV1: ...
+
+    def estimate_replan_request_tokens(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        evaluation: ReasoningEvaluationV1,
+        repair: bool,
+    ) -> int: ...
+
+    def replan(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        evaluation: ReasoningEvaluationV1,
+        repair: bool,
+    ) -> DeepReasoningPlanResultV1: ...
+
+    def estimate_evaluation_request_tokens(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        proposal: FinalizeAnswerV1,
+        observations: list[KnowledgeToolObservationV1],
+        cycle: int,
+        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
+    ) -> int: ...
+
+    def evaluate(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        proposal: FinalizeAnswerV1,
+        observations: list[KnowledgeToolObservationV1],
+        cycle: int,
+        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
+    ) -> DeepReasoningEvaluationResultV1: ...
 
 
 def turn_action_schema(*, finalize_only: bool = False) -> dict:
@@ -421,6 +500,15 @@ class StrictTurnModelSession(Protocol):
 
     def accept_contract_repair(self, violation: ModelContractViolationV1) -> None: ...
 
+    def accept_reasoning_feedback(
+        self,
+        evaluation: ReasoningEvaluationV1,
+        *,
+        plan: ReasoningPlanV2 | None = None,
+    ) -> None: ...
+
+    def accept_reasoning_limit(self, evaluation: ReasoningEvaluationV1) -> None: ...
+
     def discard(self) -> None: ...
 
 
@@ -444,10 +532,15 @@ __all__ = [
     "AnswerBehaviorStatus",
     "AnswerBehaviorUpdateRequest",
     "FinalizeAnswerV1",
+    "DeepReasoningEvaluationResultV1",
+    "DeepReasoningContractError",
+    "DeepReasoningModel",
+    "DeepReasoningPlanResultV1",
     "FinalizeActionEnvelopeV1",
     "ModelActionResultV1",
     "ModelContractViolationV1",
     "ModelStepResultV1",
+    "ProvisionalEvidenceEvaluationInputV1",
     "StrictTurnModel",
     "StrictTurnModelSession",
     "TurnExecutionOrchestrator",

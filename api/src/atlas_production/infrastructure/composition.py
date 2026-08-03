@@ -392,6 +392,7 @@ def build_api_composition(
         citation=strict_citations,
         audit=strict_audit,
         evaluator=StrictPostHocClaimEvaluator(model_routing),
+        reasoning_model=strict_turn_model,
     )
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
     conversations = PostgresConversationV1Adapter(session_factory)

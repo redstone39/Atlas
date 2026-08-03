@@ -34,10 +34,11 @@ class ProviderConnectionSecretRecord:
 
 @dataclass(frozen=True)
 class ModelRouteRuntimePolicyInput:
-    schema_version: Literal["model-route-runtime-policy-v4"]
+    schema_version: Literal["model-route-runtime-policy-v7"]
     tokenizer_profile: str
     max_tool_executions: int
     max_provider_invocations: int
+    max_reasoning_revision_cycles: int
     max_catalog_pages: int
     max_search_rounds: int
     max_unique_evidence: int
@@ -54,7 +55,7 @@ class ModelRouteRuntimePolicyInput:
     max_total_tokens_per_conversation: int
 
     def __post_init__(self) -> None:
-        if self.schema_version != "model-route-runtime-policy-v4":
+        if self.schema_version != "model-route-runtime-policy-v7":
             raise ValueError("invalid runtime policy schema")
         if not self.tokenizer_profile.strip():
             raise ValueError("tokenizer profile is required")
@@ -82,18 +83,27 @@ class ModelRouteRuntimePolicyInput:
         )
         if any(isinstance(value, bool) or value <= 0 for value in numeric_values):
             raise ValueError("runtime policy numeric values must be positive")
-        if self.max_provider_invocations < self.max_tool_executions + 2:
-            raise ValueError("provider invocation limit must cover tools, final answer, and claim validation")
+        if (
+            isinstance(self.max_reasoning_revision_cycles, bool)
+            or self.max_reasoning_revision_cycles < 0
+            or self.max_reasoning_revision_cycles > 3
+        ):
+            raise ValueError("reasoning revision cycle limit must be between zero and three")
+        required_provider_invocations = (
+            self.max_tool_executions
+            + 4 * self.max_reasoning_revision_cycles
+            + 6
+        )
+        if self.max_provider_invocations < required_provider_invocations:
+            raise ValueError(
+                "provider invocation limit must cover tools, planning, evaluation, revisions, and terminal actions"
+            )
         if self.max_retrieval_repairs > 3:
             raise ValueError("retrieval repair limit cannot exceed three")
         if self.max_schema_retries_per_turn > 3:
             raise ValueError("schema retry limit cannot exceed three")
         if self.max_selected_anchor_pages_per_round > 20:
             raise ValueError("selected anchor page limit cannot exceed twenty")
-        if self.max_provider_invocations < 14:
-            raise ValueError(
-                "provider invocation limit must reserve the complete retrieval journey"
-            )
         if (
             self.max_input_tokens_per_invocation
             + self.max_output_tokens_per_invocation

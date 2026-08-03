@@ -68,11 +68,11 @@ export function LoginFeature({
             <Badge variant="outline">{t("login.badge")}</Badge>
             <LanguageSwitch />
           </div>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2">
             <h1 className="text-3xl font-semibold tracking-normal md:text-4xl">
               {t("login.title")}
             </h1>
-            <p className="max-w-2xl text-base leading-7 text-muted-foreground">
+            <p className="max-w-xl text-base text-muted-foreground">
               {t("login.description")}
             </p>
           </div>

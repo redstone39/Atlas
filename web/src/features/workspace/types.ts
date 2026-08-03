@@ -50,6 +50,7 @@ export interface ConversationSummary {
   title: string;
   status: "active" | "archived";
   response_language: "zh-TW" | "en";
+  reasoning_mode: ReasoningMode;
   created_at: string;
   updated_at: string;
   last_turn_status: string | null;
@@ -66,6 +67,8 @@ export interface ConversationTurn {
   input_text: string | null;
   answer_text: string | null;
   execution_status: "submitted" | "processing" | "completed" | "failed_closed";
+  reasoning_mode: ReasoningMode;
+  reasoning_timeline: ReasoningProgress[];
   response_kind: "answer" | "dialogue" | "clarification" | "grounded_answer" | "external_unverified" | "mixed_answer" | "unknown" | "refused";
   verification_status: VerificationStatus | null;
   evidence_review_status: EvidenceReviewStatus | null;
@@ -96,6 +99,7 @@ export interface ConversationDetail {
   title: string;
   status: "active" | "archived";
   response_language: "zh-TW" | "en";
+  reasoning_mode: ReasoningMode;
   created_at: string;
   updated_at: string;
   turns: ConversationTurn[];
@@ -108,6 +112,8 @@ export interface ConversationTurnResult {
   source_turn_id: string;
   execution_id: string;
   execution_status: ConversationTurn["execution_status"];
+  reasoning_mode: ReasoningMode;
+  reasoning_timeline: ReasoningProgress[];
   response_kind: ConversationTurn["response_kind"];
   verification_status: VerificationStatus | null;
   evidence_review_status: EvidenceReviewStatus | null;
@@ -142,6 +148,37 @@ export type ExecutionState =
   | "materializing_terminal"
   | "terminal_completed"
   | "terminal_failed";
+
+export type ReasoningMode = "standard" | "deep";
+
+export type ReasoningPhase =
+  | "understanding"
+  | "planning"
+  | "researching"
+  | "drafting"
+  | "evaluating"
+  | "revising"
+  | "governing"
+  | "finalizing"
+  | "completed"
+  | "failed";
+
+export type ReasoningProgressStatus =
+  | "started"
+  | "completed"
+  | "degraded"
+  | "failed";
+
+export interface ReasoningProgress {
+  event_id: string;
+  sequence: number;
+  phase: ReasoningPhase;
+  status: ReasoningProgressStatus;
+  cycle: number | null;
+  message_code: string;
+  message_params: MessageParams;
+  created_at: string;
+}
 
 export type RetrievalStatus =
   | "not_used"
@@ -180,6 +217,7 @@ export interface WorkspaceConversationDto {
   title: string;
   status: "active" | "archived";
   response_language: "zh-TW" | "en";
+  reasoning_mode: ReasoningMode;
   created_at: string;
   updated_at: string;
 }
@@ -245,6 +283,8 @@ export interface WorkspaceTurnProjectionDto {
   ordinal: number;
   user_input: string;
   execution_status: ExecutionState;
+  reasoning_mode: ReasoningMode;
+  reasoning_timeline: ReasoningProgress[];
   retrieval_status: RetrievalStatus | null;
   evidence_review_status: EvidenceReviewStatus | null;
   evidence_review_reason_codes: EvidenceReviewReasonCode[];
@@ -282,6 +322,8 @@ export interface WorkspaceExecutionStatusDto {
   conversation_id: string;
   state: ExecutionState;
   version: number;
+  reasoning_mode: ReasoningMode;
+  reasoning_timeline: ReasoningProgress[];
   failure_code: string | null;
   updated_at: string;
 }
@@ -309,7 +351,7 @@ export interface ResponseClaim {
 }
 
 export type RuntimeProgressPhase =
-  | "understanding"
+  | ReasoningPhase
   | "searching_knowledge"
   | "executing_tools"
   | "generating"
@@ -327,6 +369,9 @@ export interface RuntimeStreamEvent {
   result_ref?: string | null;
   created_at?: string;
   phase?: RuntimeProgressPhase;
+  reasoning_phase?: ReasoningPhase | null;
+  progress_status?: ReasoningProgressStatus | null;
+  cycle?: number | null;
   turn?: ConversationTurnResult;
   failure_code?: string;
   message_code?: string;

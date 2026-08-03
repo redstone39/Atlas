@@ -112,6 +112,8 @@ class ConversationAuditService:
             turn_id=snapshot.turn_id,
             state=snapshot.state,
             version=snapshot.version,
+            reasoning_mode=snapshot.reasoning_mode,
+            reasoning_trace=snapshot.reasoning_trace,
             failure_code=snapshot.terminal_failure_code,
             applied_guidance_revision=snapshot.applied_guidance_revision,
             applied_guidance_digest=snapshot.applied_guidance_digest,

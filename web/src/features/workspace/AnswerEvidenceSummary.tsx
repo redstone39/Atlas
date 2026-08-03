@@ -25,16 +25,6 @@ export function AnswerEvidenceSummary({
   const { t } = useTranslation();
   if (!status) return null;
 
-  const presentation = {
-    evidence_aligned: {
-      semantic: "success" as const,
-      label: t("workspace.evidenceAligned"),
-    },
-    questionable: {
-      semantic: "attention" as const,
-      label: t("workspace.needsHumanReview"),
-    },
-  }[status];
   const sources = visibleSources(items ?? [], t);
 
   return (
@@ -42,11 +32,13 @@ export function AnswerEvidenceSummary({
       aria-label={t("workspace.answerEvidenceSummary")}
       className="flex flex-col gap-2"
     >
-      <StatusBadge
-        semantic={presentation.semantic}
-        label={presentation.label}
-        className="w-fit"
-      />
+      {status === "questionable" && (
+        <StatusBadge
+          semantic="attention"
+          label={t("workspace.needsHumanReview")}
+          className="w-fit"
+        />
+      )}
       {sources.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <div className="text-xs font-medium text-muted-foreground">

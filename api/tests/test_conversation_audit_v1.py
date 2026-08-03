@@ -24,6 +24,8 @@ from atlas_production.modules.turn_runtime.public import (
     ExecutionState,
     RoutePolicyV1,
     RuntimeEventV1,
+    ReasoningEvaluationV1,
+    ReasoningTraceV3,
 )
 from atlas_production.modules.workspace_turn.public import (
     WorkspaceConversationDetailV1,
@@ -79,6 +81,21 @@ def snapshot() -> ExecutionSnapshotV1:
         route=route_snapshot(),
         input_digest="0" * 64,
         response_language="zh-TW",
+        reasoning_mode="deep",
+        reasoning_trace=ReasoningTraceV3(
+            trace_revision=2,
+            trace_digest="b" * 64,
+            parent_trace_digest="a" * 64,
+            status="degraded",
+            evaluations=[
+                ReasoningEvaluationV1(
+                    cycle=1,
+                    verdict="unavailable",
+                    unavailable_reason="provider_unavailable",
+                )
+            ],
+            termination_reason="evaluator_unavailable",
+        ),
         applied_guidance_revision=0,
         applied_guidance_digest=None,
         lease=lease,
@@ -214,6 +231,10 @@ def test_admin_runtime_returns_strict_snapshot_and_durable_events() -> None:
     assert result.failure_code == "execution_carrier_lost"
     assert result.applied_guidance_revision == 0
     assert result.applied_guidance_digest is None
+    assert result.reasoning_mode == "deep"
+    assert result.reasoning_trace is not None
+    assert result.reasoning_trace.evaluations[0].score is None
+    assert result.reasoning_trace.termination_reason == "evaluator_unavailable"
     assert "response_language" not in result.model_dump()
     assert "custom_guidance" not in result.model_dump()
     assert result.budget.tool_invocations == 2

@@ -171,7 +171,7 @@ def test_conversation_create_replay_and_ordered_membership_cas(
 
     append = AppendTurnMemberInput(
         create.conversation_id, create.actor_id, f"turn-{PREFIX}-1", f"execution-{PREFIX}-1",
-        "user", 1, "turn-key-1",
+        "user", 1, "turn-key-1", reasoning_mode="deep",
     )
     member = store.append_turn_member(append)
     assert store.append_turn_member(append) == member
@@ -179,7 +179,7 @@ def test_conversation_create_replay_and_ordered_membership_cas(
         store.append_turn_member(
             AppendTurnMemberInput(
                 create.conversation_id, create.actor_id, f"turn-{PREFIX}-2", f"execution-{PREFIX}-2",
-                "assistant", 1, "turn-key-2",
+                "assistant", 1, "turn-key-2", reasoning_mode="standard",
             )
         )
     assert [row.ordinal for row in store.candidate_turns(create.conversation_id)] == [1]

@@ -41,6 +41,8 @@ from atlas_production.modules.turn_runtime.public import (
     FailCarrierExecutionV1,
     FinalizeExpiredExecutionV1,
     PrepareTerminalV1,
+    ReasoningTraceV3,
+    RecordReasoningProgressV1,
     ReleaseIntentV1,
     RenewExecutionLeaseV1,
     RequestModelActionV1,
@@ -124,12 +126,11 @@ def _policy_model(row: AtlasTurnExecutionRow) -> RoutePolicyV1:
         max_search_rounds=row.max_search_rounds,
         max_unique_evidence=row.max_unique_evidence,
         max_provider_invocations=row.max_provider_invocations,
+        max_reasoning_revision_cycles=row.max_reasoning_revision_cycles,
         context_token_budget=row.context_token_budget,
         tool_token_budget=row.tool_token_budget,
         deadline_seconds=row.deadline_seconds,
     )
-
-
 def _route_model(row: AtlasTurnExecutionRow) -> TurnRouteSnapshotV2:
     return TurnRouteSnapshotV2(
         route_id=row.route_id,
@@ -167,6 +168,11 @@ def _event_model(row: AtlasTurnRuntimeEventRow) -> RuntimeEventV1:
         invocation_ordinal=row.invocation_ordinal,
         result_ref=row.result_ref,
         failure_code=row.failure_code,
+        reasoning_phase=row.reasoning_phase,
+        progress_status=row.progress_status,
+        cycle=row.cycle,
+        message_code=row.message_code,
+        message_params=row.message_params,
         created_at=row.created_at,
     )
 
@@ -251,6 +257,12 @@ class PostgresTurnRuntimeOwner:
             route=_route_model(execution),
             input_digest=execution.input_digest,
             response_language=execution.response_language,
+            reasoning_mode=execution.reasoning_mode,
+            reasoning_trace=(
+                None
+                if execution.reasoning_trace is None
+                else ReasoningTraceV3.model_validate(execution.reasoning_trace)
+            ),
             applied_guidance_revision=execution.applied_guidance_revision,
             applied_guidance_digest=execution.applied_guidance_digest,
             lease=_lease_model(lease),
@@ -276,6 +288,11 @@ class PostgresTurnRuntimeOwner:
         invocation_ordinal: int | None = None,
         result_ref: str | None = None,
         failure_code: str | None = None,
+        reasoning_phase: str | None = None,
+        progress_status: str | None = None,
+        cycle: int | None = None,
+        message_code: str | None = None,
+        message_params: dict[str, str | int | bool | None] | None = None,
     ) -> None:
         session.add(
             AtlasTurnRuntimeEventRow(
@@ -287,6 +304,11 @@ class PostgresTurnRuntimeOwner:
                 invocation_ordinal=invocation_ordinal,
                 result_ref=result_ref,
                 failure_code=failure_code,
+                reasoning_phase=reasoning_phase,
+                progress_status=progress_status,
+                cycle=cycle,
+                message_code=message_code,
+                message_params=message_params or {},
                 created_at=func.clock_timestamp(),
             )
         )
@@ -447,6 +469,8 @@ class PostgresTurnRuntimeOwner:
                     actor_id=command.actor_id,
                     input_digest=command.input_digest,
                     response_language=command.response_language,
+                    reasoning_mode=command.reasoning_mode,
+                    reasoning_trace=None,
                     applied_guidance_revision=command.applied_guidance_revision,
                     applied_guidance_digest=command.applied_guidance_digest,
                     state=ExecutionState.ALLOCATED.value,
@@ -520,6 +544,55 @@ class PostgresTurnRuntimeOwner:
                 sequence=1,
                 event_type="execution_allocated",
                 state=ExecutionState.ALLOCATED.value,
+            )
+            session.flush()
+            return self._snapshot(session, command.execution_id)
+
+    def record_reasoning_progress(
+        self, command: RecordReasoningProgressV1
+    ) -> ExecutionSnapshotV1:
+        with self._session_factory() as session, session.begin():
+            current = session.get(AtlasTurnExecutionRow, command.execution_id)
+            if current is None or current.reasoning_mode != "deep":
+                raise TurnRuntimeCurrentnessConflict(
+                    "reasoning progress requires a deep execution"
+                )
+            if current.reasoning_trace is not None:
+                prior = ReasoningTraceV3.model_validate(current.reasoning_trace)
+                if (
+                    command.trace.trace_revision != prior.trace_revision + 1
+                    or command.trace.parent_trace_digest != prior.trace_digest
+                ):
+                    raise TurnRuntimeReplayConflict(
+                        "reasoning trace lineage is not contiguous"
+                    )
+            elif (
+                command.trace.trace_revision != 1
+                or command.trace.parent_trace_digest is not None
+            ):
+                raise TurnRuntimeReplayConflict(
+                    "initial reasoning trace lineage is invalid"
+                )
+            changed = self._cas_execution(
+                session,
+                execution_id=command.execution_id,
+                expected_version=command.expected_version,
+                fencing_token=command.fencing_token,
+                from_states=(current.state,),
+                to_state=current.state,
+                values={"reasoning_trace": command.trace.model_dump(mode="json")},
+            )
+            self._append_event(
+                session,
+                execution_id=command.execution_id,
+                sequence=changed.version,
+                event_type="reasoning_progressed",
+                state=changed.state,
+                reasoning_phase=command.phase,
+                progress_status=command.progress_status,
+                cycle=command.cycle,
+                message_code=command.message_code,
+                message_params=command.message_params,
             )
             session.flush()
             return self._snapshot(session, command.execution_id)
@@ -646,12 +719,9 @@ class PostgresTurnRuntimeOwner:
                 expected_version=command.expected_version,
                 fencing_token=command.fencing_token,
                 from_states=(
-                    (ExecutionState.AWAITING_MODEL_ACTION.value,)
-                    if command.contract_repair
-                    else (
-                        ExecutionState.CONTEXT_READY.value,
-                        ExecutionState.TOOL_COMPLETED.value,
-                    )
+                    ExecutionState.CONTEXT_READY.value,
+                    ExecutionState.TOOL_COMPLETED.value,
+                    ExecutionState.AWAITING_MODEL_ACTION.value,
                 ),
                 to_state=ExecutionState.AWAITING_MODEL_ACTION.value,
             )

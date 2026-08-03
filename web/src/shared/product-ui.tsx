@@ -1,8 +1,9 @@
-import { type ComponentType, type KeyboardEvent, type ReactNode } from "react";
+import { type ComponentType, type KeyboardEvent, type ReactNode, useState } from "react";
 import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  ChevronDown,
   CircleHelp,
   CircleOff,
   Clock3,
@@ -25,6 +26,11 @@ import {
 } from "../components/ui/alert-dialog";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../components/ui/collapsible";
 import {
   Empty,
   EmptyDescription,
@@ -406,6 +412,37 @@ export function PageHeader({ title, description }: { title: string; description?
       <h1 className="text-2xl font-semibold tracking-normal">{title}</h1>
       {description && <p className="text-sm text-muted-foreground">{description}</p>}
     </header>
+  );
+}
+
+export function TechnicalDetails({
+  children,
+  label,
+  className,
+}: {
+  children: ReactNode;
+  label: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      data-slot="technical-details"
+      className={className}
+    >
+      <CollapsibleTrigger asChild>
+        <Button type="button" variant="ghost" size="sm" className="w-fit">
+          {label}
+          <ChevronDown
+            data-icon="inline-end"
+            className={cn("transition-transform", open && "rotate-180")}
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="pt-2">{children}</CollapsibleContent>
+    </Collapsible>
   );
 }
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -34,6 +36,27 @@ RetrievalStatusV1 = Literal[
 VerificationStatusV1 = Literal["verified", "partially_verified", "unverified"]
 EvidenceReviewStatusV2 = Literal["evidence_aligned", "questionable"]
 AssessmentStateV2 = Literal["completed", "unavailable", "not_attempted"]
+DeclaredEvidenceConsistencyV1 = Literal[
+    "aligned", "conflict", "insufficient", "not_applicable", "unavailable"
+]
+ProvisionalEvidenceReasonCodeV1 = Literal[
+    "aligned",
+    "declared_evidence_conflict",
+    "declared_evidence_insufficient",
+    "empty_declaration",
+    "no_resolved_declared_evidence",
+    "partially_unresolved_declared_evidence",
+    "deadline_elapsed",
+    "route_unavailable",
+    "provider_contract_unavailable",
+    "physical_limit_rejected",
+    "tokenizer_unavailable",
+    "provider_timeout",
+    "provider_failed",
+    "provider_refused",
+    "provider_incomplete",
+    "invalid_output",
+]
 AssessmentReasonCodeV2 = Literal[
     "completed",
     "empty_declaration",
@@ -53,6 +76,7 @@ EvidenceReviewReasonCodeV2 = Literal[
     "evidence_aligned",
     "empty_declaration",
     "assessment_not_completed",
+    "declared_evidence_not_aligned",
     "answer_item_failed",
 ]
 
@@ -115,13 +139,61 @@ class PostHocAnswerAssessmentV2(_StrictTurnDraftModel):
 
 
 class PostHocAnswerAssessmentEnvelopeV2(_StrictTurnDraftModel):
+    consistency: Literal["aligned", "conflict", "insufficient"]
     results: list[PostHocAnswerAssessmentV2] = Field(min_length=1, max_length=100)
 
+    @model_validator(mode="after")
+    def require_consistency_result_shape(self) -> "PostHocAnswerAssessmentEnvelopeV2":
+        if self.consistency == "aligned" and any(
+            result.status != "success" for result in self.results
+        ):
+            raise ValueError("aligned provider output requires all answer items to succeed")
+        if self.consistency == "conflict" and all(
+            result.status == "success" for result in self.results
+        ):
+            raise ValueError("conflict provider output requires a failed answer item")
+        return self
 
-class PostHocAnswerAssessmentResultV2(_StrictTurnDraftModel):
-    results: list[PostHocAnswerAssessmentV2] = Field(min_length=1, max_length=100)
-    assessment_input_digest: Digest
-    assessment_output_digest: Digest
+
+class ProvisionalEvidenceAssessmentV1(_StrictTurnDraftModel):
+    assessment_version: Literal["provisional-declared-evidence-v1"] = (
+        "provisional-declared-evidence-v1"
+    )
+    state: AssessmentStateV2
+    consistency: DeclaredEvidenceConsistencyV1
+    reason_code: ProvisionalEvidenceReasonCodeV1
+    answer_digest: Digest
+    declared_subset_digest: Digest
+    visual_image_digests: list[Digest] = Field(max_length=40)
+    results: list[PostHocAnswerAssessmentV2] = Field(default_factory=list, max_length=100)
+    assessment_input_digest: Digest | None = None
+    assessment_output_digest: Digest | None = None
+
+    @model_validator(mode="after")
+    def require_consistent_assessment(self) -> "ProvisionalEvidenceAssessmentV1":
+        if self.state == "completed":
+            if self.consistency not in {"aligned", "conflict", "insufficient"}:
+                raise ValueError("completed assessment requires a provider consistency")
+            if self.assessment_input_digest is None or self.assessment_output_digest is None:
+                raise ValueError("completed assessment requires input/output digests")
+            if self.consistency == "aligned" and any(
+                result.status != "success" for result in self.results
+            ):
+                raise ValueError("aligned assessment requires all answer items to succeed")
+        elif self.state == "not_attempted":
+            if self.consistency not in {"not_applicable", "insufficient"}:
+                raise ValueError("not-attempted assessment has an invalid consistency")
+            if self.results or self.assessment_input_digest or self.assessment_output_digest:
+                raise ValueError("not-attempted assessment cannot carry provider output")
+        else:
+            if self.consistency != "unavailable":
+                raise ValueError("unavailable assessment requires unavailable consistency")
+            if self.results or self.assessment_output_digest is not None:
+                raise ValueError("unavailable assessment cannot carry provider results")
+        return self
+
+
+PostHocAnswerAssessmentResultV2 = ProvisionalEvidenceAssessmentV1
 
 
 class PostHocClaimEvaluator(Protocol):
@@ -145,6 +217,7 @@ class PostHocAnswerEvaluatorV2(Protocol):
         declared_evidence_subset: DeclaredEvidenceSubsetV1,
         deadline_at: datetime,
         route: TurnRouteSnapshotV2,
+        assessment_ordinal: int = 1,
     ) -> PostHocAnswerAssessmentResultV2: ...
 
 
@@ -228,6 +301,11 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
     evidence_lineage: list[ExecutionEvidenceLineageV1] = Field(max_length=40)
     assessment_state: AssessmentStateV2
     assessment_reason_code: AssessmentReasonCodeV2
+    assessment_version: Literal["provisional-declared-evidence-v1"]
+    assessment_consistency: DeclaredEvidenceConsistencyV1
+    assessment_answer_digest: Digest
+    assessment_declared_subset_digest: Digest
+    assessment_visual_image_digests: list[Digest] = Field(max_length=40)
     assessment_input_digest: Digest | None = None
     assessment_output_digest: Digest | None = None
     assessment_results: list[PostHocAnswerAssessmentV2] = Field(max_length=100)
@@ -235,6 +313,16 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
 
     @model_validator(mode="after")
     def require_soft_review_consistency(self) -> "MaterializeGovernedAnswerDraftV2":
+        expected_answer_digest = hashlib.sha256(
+            json.dumps(
+                self.finalized_answer.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.assessment_answer_digest != expected_answer_digest:
+            raise ValueError("assessment answer digest does not bind finalized answer")
         handles = [item.evidence_handle for item in self.evidence_lineage]
         if len(handles) != len(set(handles)):
             raise ValueError("declared evidence lineage handles must be unique")
@@ -280,6 +368,17 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
             not in {"empty_declaration", "no_resolved_declared_evidence"}
         ):
             raise ValueError("not-attempted assessment reason is invalid")
+        expected_consistency = {
+            "completed": {"aligned", "conflict", "insufficient"},
+            "not_attempted": {"not_applicable", "insufficient"},
+            "unavailable": {"unavailable"},
+        }[self.assessment_state]
+        if self.assessment_consistency not in expected_consistency:
+            raise ValueError("assessment state and consistency disagree")
+        if self.assessment_consistency == "aligned" and any(
+            result.status != "success" for result in self.assessment_results
+        ):
+            raise ValueError("aligned assessment requires all answer items to succeed")
         return self
 
 
@@ -302,6 +401,11 @@ class GovernedAnswerDraftV2(_StrictTurnDraftModel):
     )
     assessment_state: AssessmentStateV2
     assessment_reason_code: AssessmentReasonCodeV2
+    assessment_version: Literal["provisional-declared-evidence-v1"]
+    assessment_consistency: DeclaredEvidenceConsistencyV1
+    assessment_answer_digest: Digest
+    assessment_declared_subset_digest: Digest
+    assessment_visual_image_digests: list[Digest] = Field(max_length=40)
     assessment_input_digest: Digest | None = None
     assessment_output_digest: Digest | None = None
     assessment_results: list[PostHocAnswerAssessmentV2] = Field(max_length=100)
@@ -349,6 +453,7 @@ __all__ = [
     "ExecutionEvidenceLineageV1",
     "AssessmentReasonCodeV2",
     "AssessmentStateV2",
+    "DeclaredEvidenceConsistencyV1",
     "EvidenceReviewReasonCodeV2",
     "EvidenceReviewStatusV2",
     "FinalizedAnswerSegmentV1",
@@ -367,6 +472,8 @@ __all__ = [
     "PostHocClaimAssessmentEnvelopeV1",
     "PostHocAnswerAssessmentEnvelopeV2",
     "PostHocAnswerAssessmentResultV2",
+    "ProvisionalEvidenceAssessmentV1",
+    "ProvisionalEvidenceReasonCodeV1",
     "PostHocAnswerAssessmentV2",
     "PostHocClaimAssessmentV1",
     "PostHocClaimEvaluator",

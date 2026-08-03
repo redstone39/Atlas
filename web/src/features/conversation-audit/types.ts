@@ -3,6 +3,9 @@ import type { MessageReference } from "../../shared/user-messages";
 import type {
   ConversationSummary,
   ExecutionState,
+  ReasoningMode,
+  ReasoningPhase,
+  ReasoningProgressStatus,
   WorkspaceConversationDetailDto,
   WorkspaceConversationDto,
 } from "../workspace";
@@ -56,6 +59,11 @@ export interface RuntimeEvent {
   invocation_ordinal: number | null;
   result_ref: string | null;
   failure_code: string | null;
+  reasoning_phase: ReasoningPhase | null;
+  progress_status: ReasoningProgressStatus | null;
+  cycle: number | null;
+  message_code: string | null;
+  message_params: Record<string, string | number | boolean | null>;
   created_at: string;
 }
 
@@ -111,6 +119,8 @@ export interface RuntimeTraceDetail {
   turn_id: string;
   state: ExecutionState;
   version: number;
+  reasoning_mode: ReasoningMode;
+  reasoning_trace: ReasoningTrace | null;
   failure_code: string | null;
   applied_guidance_revision: number;
   applied_guidance_digest: string | null;
@@ -119,4 +129,92 @@ export interface RuntimeTraceDetail {
   events: RuntimeEvent[];
   created_at: string;
   updated_at: string;
+}
+
+export interface ReasoningPlanItem {
+  item_id: string;
+  summary: string;
+  status: "pending" | "completed" | "skipped";
+}
+
+export interface ProcessScore {
+  rubric_version: "atlas-process-rubric-v1";
+  plan_coverage: number;
+  evidence_handling: number;
+  conflict_handling: number;
+  gap_resolution: number;
+  revision_completion: number;
+  total: number;
+}
+
+export interface ReasoningEvaluation {
+  cycle: number;
+  verdict: "accept" | "revise_only" | "research_then_revise" | "unavailable";
+  finding_codes: string[];
+  summary: string | null;
+  score: ProcessScore | null;
+  unavailable_reason:
+    | "provider_unavailable"
+    | "budget_exhausted"
+    | "deadline_exceeded"
+    | null;
+}
+
+export interface ReasoningCorrection {
+  cycle: number;
+  kind: "revise_only" | "research_then_revise";
+  triggering_evaluation: number;
+  plan_generation: number | null;
+  tool_invocation_start: number | null;
+  tool_invocation_end: number | null;
+  result_evaluation: number;
+  addressed_finding_codes: string[];
+  summary: string;
+}
+
+export interface ReasoningTrace {
+  schema_version: "atlas-reasoning-trace-v3";
+  trace_revision: number;
+  trace_digest: string;
+  parent_trace_digest: string | null;
+  mode: "deep";
+  status: "planning" | "running" | "completed" | "degraded" | "failed";
+  plans: Array<{
+    schema_version: "atlas-reasoning-plan-v2";
+    generation: number;
+    parent_generation: number | null;
+    next_objective: string;
+    completion_condition: string;
+    items: ReasoningPlanItem[];
+  }>;
+  evaluations: ReasoningEvaluation[];
+  corrections: ReasoningCorrection[];
+  provisional_evidence_checks: Array<{
+    ordinal: number;
+    candidate_kind: "normal" | "limit_final";
+    linked_evaluation_cycle: number | null;
+    consistency: "aligned" | "conflict" | "insufficient" | "not_applicable" | "unavailable";
+    reason_code: string;
+    candidate_disposition: "pending" | "accepted" | "revised" | "degraded" | "limit_finalized";
+    answer_digest: string;
+    declared_subset_digest: string;
+    assessment_input_digest: string | null;
+    assessment_output_digest: string | null;
+    visual_image_digests: string[];
+  }>;
+  limit_finalization: {
+    triggering_evaluation: number;
+    summary: string;
+  } | null;
+  termination_reason:
+    | "completed"
+    | "planner_failed"
+    | "replanner_failed"
+    | "evaluator_unavailable"
+    | "provisional_evidence_unavailable"
+    | "correction_limit_reached"
+    | "budget_exhausted"
+    | "deadline_exceeded"
+    | "execution_failed"
+    | null;
 }

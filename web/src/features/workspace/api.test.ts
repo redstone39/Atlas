@@ -17,6 +17,7 @@ const conversation = {
   title: "Question",
   status: "active",
   response_language: "en",
+  reasoning_mode: "standard",
   created_at: "2026-07-20T00:00:00+00:00",
   updated_at: "2026-07-20T00:00:01+00:00",
 } as const;
@@ -36,6 +37,17 @@ const projection: WorkspaceTurnProjectionDto = {
   ordinal: 1,
   user_input: "What changed?",
   execution_status: "terminal_completed",
+  reasoning_mode: "deep",
+  reasoning_timeline: [{
+    event_id: "event-reasoning",
+    sequence: 2,
+    phase: "planning",
+    status: "completed",
+    cycle: null,
+    message_code: "reasoning.planning_completed",
+    message_params: { plan_items: 2 },
+    created_at: "2026-07-20T00:00:01+00:00",
+  }],
   retrieval_status: "evidence_found",
   evidence_review_status: "evidence_aligned",
   evidence_review_reason_codes: ["evidence_aligned"],
@@ -89,6 +101,8 @@ const terminalStatus = {
   conversation_id: "conv-a",
   state: "terminal_completed",
   version: 8,
+  reasoning_mode: "deep",
+  reasoning_timeline: projection.reasoning_timeline,
   failure_code: null,
   updated_at: "2026-07-20T00:00:02+00:00",
 };
@@ -115,9 +129,13 @@ function terminalReplay() {
     "event: execution_accepted",
     'data: {"event_id":"event-1","execution_id":"execution-a","sequence":1,"event_type":"execution_accepted","state":"accepted","created_at":"2026-07-20T00:00:00+00:00"}',
     "",
+    "id: event-reasoning",
+    "event: reasoning_progressed",
+    'data: {"event_id":"event-reasoning","execution_id":"execution-a","sequence":2,"event_type":"reasoning_progressed","state":"awaiting_model_action","reasoning_phase":"planning","progress_status":"completed","cycle":null,"message_code":"reasoning.planning_completed","message_params":{"plan_items":2},"created_at":"2026-07-20T00:00:01+00:00"}',
+    "",
     "id: event-2",
     "event: terminal_completed",
-    'data: {"event_id":"event-2","execution_id":"execution-a","sequence":2,"event_type":"terminal_completed","state":"terminal_completed","created_at":"2026-07-20T00:00:02+00:00"}',
+    'data: {"event_id":"event-2","execution_id":"execution-a","sequence":3,"event_type":"terminal_completed","state":"terminal_completed","created_at":"2026-07-20T00:00:02+00:00"}',
     "",
   ].join("\r\n");
 }
@@ -274,6 +292,7 @@ describe("workspace execution API contract", () => {
       "conv-a",
       "What changed?",
       "key-a",
+      "deep",
       (event, type) => observed.push([type, event.execution_id]),
       controller.signal,
     );
@@ -293,9 +312,12 @@ describe("workspace execution API contract", () => {
       citation_ids: [],
     });
     expect(result.model_claimed_evidence).toEqual(projection.model_claimed_evidence);
+    expect(result.reasoning_mode).toBe("deep");
+    expect(result.reasoning_timeline).toEqual(projection.reasoning_timeline);
     expect(observed).toEqual([
       ["turn_accepted", "execution-a"],
       ["execution_accepted", "execution-a"],
+      ["reasoning_progressed", "execution-a"],
       ["terminal_completed", "execution-a"],
     ]);
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
@@ -307,6 +329,11 @@ describe("workspace execution API contract", () => {
     expect(fetchMock.mock.calls.every((call) =>
       call[1]?.signal === controller.signal
     )).toBe(true);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      input_text: "What changed?",
+      idempotency_key: "key-a",
+      reasoning_mode: "deep",
+    });
   });
 
   it.each([
@@ -486,7 +513,12 @@ describe("workspace execution API contract", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      workspaceApi.streamConversationTurn("conv-a", "Question", "failed-key"),
+      workspaceApi.streamConversationTurn(
+        "conv-a",
+        "Question",
+        "failed-key",
+        "standard",
+      ),
     ).resolves.toMatchObject({
       execution_status: "failed_closed",
       response_kind: "refused",

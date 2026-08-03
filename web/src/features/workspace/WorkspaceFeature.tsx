@@ -4,8 +4,17 @@ import {
   PanelLeft,
   Search,
   SendHorizontal,
+  Sparkles,
 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type KeyboardEvent,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -40,6 +49,7 @@ import {
 } from "../../components/ui/sheet";
 import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "../../components/ui/toggle-group";
 import {
   LoadingState,
   StatusBadge,
@@ -57,6 +67,7 @@ import {
   type EvidenceViewerWatermark,
 } from "./EvidenceViewerDialog";
 import { workspaceApi, type DeclaredEvidencePreview } from "./api";
+import { ReasoningTimeline } from "./ReasoningTimeline";
 import type {
   CitationCard,
   ConversationDetail,
@@ -64,6 +75,9 @@ import type {
   ConversationTurn,
   ConversationTurnResult,
   ResponseSegment,
+  ReasoningMode,
+  ReasoningProgress,
+  RuntimeStreamEvent,
   WorkspaceFeatureProps,
 } from "./types";
 
@@ -72,6 +86,7 @@ type TurnContext = {
   idempotencyKey: string;
   conversationId?: string;
   executionId?: string;
+  reasoningMode: ReasoningMode;
 };
 
 type RuntimeStreamPayload = {
@@ -105,6 +120,9 @@ export function WorkspaceFeature({
   const [reconnectingExecutionId, setReconnectingExecutionId] =
     useState<string | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState("");
+  const [reasoningMode, setReasoningMode] = useState<ReasoningMode>("standard");
+  const [liveReasoningTimeline, setLiveReasoningTimeline] =
+    useState<ReasoningProgress[]>([]);
   const [streamingSegments, setStreamingSegments] = useState<ResponseSegment[]>([]);
   const [queryError, setQueryError] = useState("");
   const [historyExpanded, setHistoryExpanded] = useState(true);
@@ -214,6 +232,7 @@ export function WorkspaceFeature({
     }
     if (controller.signal.aborted) return;
     setActiveConversation(detail);
+    setReasoningMode(detail.reasoning_mode ?? "standard");
     setTurns(detail.turns);
     setQueryError("");
     setStreamingSegments([]);
@@ -246,14 +265,37 @@ export function WorkspaceFeature({
         selectedConversationId,
         executionId,
         (event, eventType) => {
-          if (eventType === "runtime_progress") {
-            setRuntimeProgress(event.phase ?? "understanding");
+          if (controller.signal.aborted) return;
+          const progress = captureRuntimeProgress(
+            event,
+            eventType,
+            setRuntimeProgress,
+            setLiveReasoningTimeline,
+          );
+          if (progress) {
+            setTurns((current) => current.map((turn) =>
+              turn.role === "assistant" && turn.execution_id === executionId
+                ? {
+                    ...turn,
+                    reasoning_timeline: mergeReasoningProgress(
+                      turn.reasoning_timeline,
+                      progress,
+                    ),
+                  }
+                : turn,
+            ));
           }
           if (eventType === "segment_delta" && (event as RuntimeStreamPayload).segment) {
+            const segment = (event as RuntimeStreamPayload).segment!;
             setStreamingSegments((current) => [
               ...current,
-              (event as RuntimeStreamPayload).segment!,
+              segment,
             ]);
+            setTurns((current) => current.map((turn) =>
+              turn.role === "assistant" && turn.execution_id === executionId
+                ? mergeStreamingSegment(turn, segment)
+                : turn,
+            ));
           }
         },
         controller.signal,
@@ -289,6 +331,7 @@ export function WorkspaceFeature({
         setLoading(false);
         setRuntimeProgress("");
         setStreamingSegments([]);
+        setLiveReasoningTimeline([]);
       }
     }
   }
@@ -298,6 +341,7 @@ export function WorkspaceFeature({
     setActiveConversation(null);
     setTurns([]);
     setReconnectingExecutionId(null);
+    setReasoningMode("standard");
     setQueryError("");
     setConversationReloadKey((current) => current + 1);
   }
@@ -373,6 +417,7 @@ export function WorkspaceFeature({
     setLoading(false);
     setRuntimeProgress("");
     setStreamingSegments([]);
+    setLiveReasoningTimeline([]);
   }
 
   async function ensureConversation(submittedQuery: string, signal: AbortSignal) {
@@ -392,6 +437,7 @@ export function WorkspaceFeature({
         title: detail.title,
         status: detail.status,
         response_language: detail.response_language,
+        reasoning_mode: detail.reasoning_mode ?? "standard",
         created_at: detail.created_at,
         updated_at: detail.updated_at,
         last_turn_status: null,
@@ -402,11 +448,17 @@ export function WorkspaceFeature({
     return detail;
   }
 
-  async function askQuestion(nextQuery = query, existingKey?: string) {
+  async function askQuestion(
+    nextQuery = query,
+    existingKey?: string,
+    existingReasoningMode?: ReasoningMode,
+  ) {
     const submittedQuery = nextQuery.trim();
+    const submittedReasoningMode = existingReasoningMode ?? reasoningMode;
     const submittedContext: TurnContext = {
       query: submittedQuery,
       idempotencyKey: existingKey ?? createIdempotencyKey(),
+      reasoningMode: submittedReasoningMode,
     };
     liveTurnRequestRef.current?.abort();
     const controller = new AbortController();
@@ -429,6 +481,8 @@ export function WorkspaceFeature({
         input_text: submittedQuery,
         answer_text: null,
         execution_status: "completed",
+        reasoning_mode: submittedReasoningMode,
+        reasoning_timeline: [],
         response_kind: "dialogue",
         verification_status: null,
         evidence_review_status: null,
@@ -458,6 +512,7 @@ export function WorkspaceFeature({
         conversation.conversation_id,
         submittedQuery,
         submittedContext.idempotencyKey,
+        submittedReasoningMode,
         (event, eventType) => {
           if (controller.signal.aborted) return;
           if (eventType === "turn_accepted") {
@@ -471,8 +526,12 @@ export function WorkspaceFeature({
                   : conversationItem,
               ),
             );
+            setActiveConversation((current) => current
+              ? { ...current, reasoning_mode: submittedReasoningMode }
+              : current);
+            setReasoningMode(submittedReasoningMode);
           }
-          if (eventType === "runtime_progress") setRuntimeProgress(event.phase ?? "understanding");
+          captureRuntimeProgress(event, eventType, setRuntimeProgress, setLiveReasoningTimeline);
           if (eventType === "segment_delta" && (event as RuntimeStreamPayload).segment) {
             setStreamingSegments((current) => [...current, (event as RuntimeStreamPayload).segment!]);
           }
@@ -520,6 +579,7 @@ export function WorkspaceFeature({
         setLoading(false);
         setRuntimeProgress("");
         setStreamingSegments([]);
+        setLiveReasoningTimeline([]);
       }
     }
   }
@@ -538,7 +598,7 @@ export function WorkspaceFeature({
         createIdempotencyKey(),
         (event, eventType) => {
           if (controller.signal.aborted) return;
-          if (eventType === "runtime_progress") setRuntimeProgress(event.phase ?? "understanding");
+          captureRuntimeProgress(event, eventType, setRuntimeProgress, setLiveReasoningTimeline);
           if (eventType === "segment_delta" && (event as RuntimeStreamPayload).segment) setStreamingSegments((current) => [...current, (event as RuntimeStreamPayload).segment!]);
         },
         controller.signal,
@@ -554,6 +614,7 @@ export function WorkspaceFeature({
         setLoading(false);
         setRuntimeProgress("");
         setStreamingSegments([]);
+        setLiveReasoningTimeline([]);
       }
     }
   }
@@ -764,6 +825,7 @@ export function WorkspaceFeature({
                 onOpenDeclaredEvidence={openDeclaredEvidence}
                 onRetry={retryFailedTurn}
                 runtimeProgress={runtimeProgress}
+                liveReasoningTimeline={liveReasoningTimeline}
                 streamingSegments={streamingSegments}
               />
             )}
@@ -791,7 +853,11 @@ export function WorkspaceFeature({
                         className="w-fit"
                         onClick={() =>
                           retryContext
-                            ? askQuestion(retryContext.query, retryContext.idempotencyKey)
+                            ? askQuestion(
+                                retryContext.query,
+                                retryContext.idempotencyKey,
+                                retryContext.reasoningMode,
+                              )
                             : retryConversationRecovery()
                         }
                         disabled={loading}
@@ -803,12 +869,15 @@ export function WorkspaceFeature({
                 </AlertDescription>
               </Alert>
             )}
-            <FieldGroup className="gap-3">
+            <FieldGroup>
               <Field>
                 <FieldLabel htmlFor="message" className="sr-only">
                   {t("workspace.message")}
                 </FieldLabel>
-                <div className="flex items-center gap-2">
+                <div
+                  data-slot="message-composer"
+                  className="overflow-hidden rounded-2xl border border-border/80 bg-card shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/15"
+                >
                   <Textarea
                     ref={composerRef}
                     id="message"
@@ -820,25 +889,61 @@ export function WorkspaceFeature({
                     placeholder={t("workspace.supportedQuestion")}
                     aria-describedby="message-help"
                     disabled={initialLoading || Boolean(reconnectingExecutionId)}
-                    className="max-h-36 min-h-11 resize-none py-2.5"
+                    className="max-h-44 min-h-24 resize-none rounded-none border-0 bg-transparent px-4 py-3.5 shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent"
                   />
-                  <p id="message-help" className="sr-only">
-                    {t("workspace.messageHelp")}
-                  </p>
-                  <Button
-                    className="shrink-0"
-                    onClick={() => askQuestion()}
-                    disabled={!canAsk}
-                    aria-label={t("workspace.send")}
-                    title={t("workspace.send")}
-                  >
-                    {loading ? (
-                      <Spinner data-icon="inline-start" />
-                    ) : (
-                      <SendHorizontal data-icon="inline-start" />
-                    )}
-                    {t("workspace.send")}
-                  </Button>
+                  <div className="flex min-h-13 items-center gap-2 border-t border-border/60 bg-muted/25 px-2.5 py-2 sm:px-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="hidden items-center gap-1.5 pl-1 text-xs font-medium text-muted-foreground sm:flex">
+                        <Sparkles className="size-3.5" aria-hidden="true" />
+                        {t("workspace.reasoningMode")}
+                      </span>
+                      <ToggleGroup
+                        type="single"
+                        variant="outline"
+                        size="sm"
+                        value={reasoningMode}
+                        onValueChange={(value) => {
+                          if (value === "standard" || value === "deep") {
+                            setReasoningMode(value);
+                          }
+                        }}
+                        disabled={loading || initialLoading || Boolean(reconnectingExecutionId)}
+                        aria-label={t("workspace.reasoningMode")}
+                        className="rounded-lg bg-background/80"
+                      >
+                        <ToggleGroupItem
+                          value="standard"
+                          aria-label={t("workspace.reasoningModeOption.standard")}
+                        >
+                          {t("workspace.reasoningModeStandard")}
+                        </ToggleGroupItem>
+                        <ToggleGroupItem
+                          value="deep"
+                          aria-label={t("workspace.reasoningModeOption.deep")}
+                        >
+                          {t("workspace.reasoningModeDeep")}
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                    </div>
+                    <p id="message-help" className="sr-only">
+                      {t("workspace.messageHelp")}
+                    </p>
+                    <Button
+                      type="button"
+                      className="ml-auto shrink-0 rounded-xl px-3 sm:px-4"
+                      onClick={() => askQuestion()}
+                      disabled={!canAsk}
+                      aria-label={t("workspace.send")}
+                      title={t("workspace.send")}
+                    >
+                      {loading ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SendHorizontal data-icon="inline-start" />
+                      )}
+                      <span className="hidden sm:inline">{t("workspace.send")}</span>
+                    </Button>
+                  </div>
                 </div>
               </Field>
             </FieldGroup>
@@ -986,6 +1091,7 @@ function ConversationThread({
   onOpenDeclaredEvidence,
   onRetry,
   runtimeProgress,
+  liveReasoningTimeline,
   streamingSegments,
 }: {
   turns: ConversationTurn[];
@@ -994,6 +1100,7 @@ function ConversationThread({
   onOpenDeclaredEvidence: (turnId: string, protectedOpenRef: string) => void;
   onRetry: (turn: ConversationTurn) => void;
   runtimeProgress: string;
+  liveReasoningTimeline: ReasoningProgress[];
   streamingSegments: ResponseSegment[];
 }) {
   const { t } = useTranslation();
@@ -1036,6 +1143,22 @@ function ConversationThread({
                           {turn.role === "user" ? turn.input_text : (
                             turn.content_state === "access_required" ? (
                               <span>{t("workspace.accessRequired")}</span>
+                            ) : turn.execution_status === "processing" ? (
+                              <div className="flex flex-col gap-3">
+                                {turn.response_segments.length > 0 ? (
+                                  <AnswerMarkdown content={answerMarkdownText(turn)} />
+                                ) : (
+                                  <span className="flex items-center gap-2">
+                                    <Spinner />
+                                    {processingRuntimePhase(turn, runtimeProgress)
+                                      ? t("workspace.runtimeProgress", {
+                                          phase: t(`workspace.runtimePhase.${processingRuntimePhase(turn, runtimeProgress)}`),
+                                        })
+                                      : t("workspace.loadingDescription")}
+                                  </span>
+                                )}
+                                <ReasoningTimeline items={turn.reasoning_timeline} live />
+                              </div>
                             ) : turn.response_segments.length > 0 ? (
                               <div className="flex flex-col gap-3">
                                 <AnswerMarkdown content={answerMarkdownText(turn)} />
@@ -1045,9 +1168,13 @@ function ConversationThread({
                                   onOpen={(protectedOpenRef) =>
                                     onOpenDeclaredEvidence(turn.turn_id, protectedOpenRef)}
                                 />
+                                <ReasoningTimeline items={turn.reasoning_timeline} />
                               </div>
                             ) : turn.answer_text ? (
-                              <AnswerMarkdown content={turn.answer_text} />
+                              <div className="flex flex-col gap-3">
+                                <AnswerMarkdown content={turn.answer_text} />
+                                <ReasoningTimeline items={turn.reasoning_timeline} />
+                              </div>
                             ) : messageText(turn, t)
                           )}
                         </BubbleContent>
@@ -1092,7 +1219,10 @@ function ConversationThread({
                               content={streamingSegments.map((segment) => segment.text).join("\n")}
                             />
                           ) : (
-                            <span className="flex items-center gap-2"><Spinner />{runtimeProgress ? t("workspace.runtimeProgress", { phase: t(`workspace.runtimePhase.${runtimeProgress}`) }) : t("workspace.loadingDescription")}</span>
+                            <div className="flex flex-col gap-3">
+                              <span className="flex items-center gap-2"><Spinner />{runtimeProgress ? t("workspace.runtimeProgress", { phase: t(`workspace.runtimePhase.${runtimeProgress}`) }) : t("workspace.loadingDescription")}</span>
+                              <ReasoningTimeline items={liveReasoningTimeline} live />
+                            </div>
                           )}
                         </BubbleContent>
                       </Bubble>
@@ -1111,6 +1241,10 @@ function ConversationThread({
 function answerMarkdownText(turn: ConversationTurn) {
   return turn.answer_text
     ?? turn.response_segments.map((segment) => segment.text).join("\n");
+}
+
+function processingRuntimePhase(turn: ConversationTurn, runtimeProgress: string) {
+  return turn.reasoning_timeline.at(-1)?.phase ?? runtimeProgress;
 }
 
 export function MessageSources({
@@ -1260,6 +1394,64 @@ function resultToTurn(result: ConversationTurnResult): ConversationTurn {
     ...result,
     role: "assistant",
     input_text: null,
+  };
+}
+
+function captureRuntimeProgress(
+  event: RuntimeStreamEvent,
+  eventType: string,
+  setRuntimeProgress: Dispatch<SetStateAction<string>>,
+  setTimeline: Dispatch<SetStateAction<ReasoningProgress[]>>,
+): ReasoningProgress | null {
+  if (event.phase) setRuntimeProgress(event.phase);
+  if (
+    eventType !== "reasoning_progressed" ||
+    !event.event_id ||
+    !event.reasoning_phase ||
+    !event.progress_status ||
+    !event.created_at ||
+    !event.message_code
+  ) return null;
+  const progress: ReasoningProgress = {
+    event_id: event.event_id,
+    sequence: event.sequence,
+    phase: event.reasoning_phase,
+    status: event.progress_status,
+    cycle: event.cycle ?? null,
+    message_code: event.message_code,
+    message_params: event.message_params ?? {},
+    created_at: event.created_at,
+  };
+  setTimeline((current) => mergeReasoningProgress(current, progress));
+  return progress;
+}
+
+function mergeReasoningProgress(
+  current: ReasoningProgress[],
+  progress: ReasoningProgress,
+) {
+  return [
+    ...current.filter((item) => item.event_id !== progress.event_id),
+    progress,
+  ].sort((left, right) => left.sequence - right.sequence);
+}
+
+function mergeStreamingSegment(
+  turn: ConversationTurn,
+  segment: ResponseSegment,
+): ConversationTurn {
+  const replacesExisting = turn.response_segments.some(
+    (current) => current.segment_id === segment.segment_id,
+  );
+  const responseSegments = replacesExisting
+    ? turn.response_segments.map((current) =>
+        current.segment_id === segment.segment_id ? segment : current,
+      )
+    : [...turn.response_segments, segment];
+  return {
+    ...turn,
+    answer_text: responseSegments.map((current) => current.text).join("\n"),
+    response_segments: responseSegments,
   };
 }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import json
 from threading import Barrier
 
 import pytest
@@ -11,6 +12,7 @@ from atlas_production.infrastructure.persistence.turn_runtime import (
     AtlasTurnAcceptanceResourceRow,
     AtlasTurnExecutionLeaseRow,
     AtlasTurnExecutionRow,
+    AtlasTurnRuntimeEventRow,
     AtlasTurnReleaseIntentRow,
     AtlasTurnTerminalIntentRow,
     AtlasTurnTerminalOutcomeRow,
@@ -24,6 +26,9 @@ from atlas_production.infrastructure.postgres_owner.turn_runtime import (
     TurnRuntimeTerminalConflict,
 )
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+from atlas_production.infrastructure.turn_execution_orchestrator import (
+    _next_reasoning_trace,
+)
 from atlas_production.modules.turn_runtime.public import (
     AcceptExecutionV1,
     AllocateExecutionV1,
@@ -38,6 +43,11 @@ from atlas_production.modules.turn_runtime.public import (
     FinalizeExpiredExecutionV1,
     LeasePolicyV1,
     PrepareTerminalV1,
+    ReasoningEvaluationV1,
+    ReasoningCorrectionV2,
+    ReasoningPlanItemV2,
+    ReasoningPlanV2,
+    RecordReasoningProgressV1,
     RenewExecutionLeaseV1,
     RequestModelActionV1,
     RoutePolicyV1,
@@ -110,8 +120,15 @@ def _allocate(
     *,
     max_tools: int = 2,
     max_catalog_pages: int = 2,
+    reasoning_mode: str = "standard",
+    max_reasoning_revision_cycles: int | None = None,
 ) -> object:
     execution_id = f"{PREFIX}{suffix}"
+    revision_cycles = (
+        max_reasoning_revision_cycles
+        if max_reasoning_revision_cycles is not None
+        else (1 if reasoning_mode == "deep" else 0)
+    )
     return owner.allocate(
         AllocateExecutionV1(
             execution_id=execution_id,
@@ -124,7 +141,10 @@ def _allocate(
                 max_catalog_pages=max_catalog_pages,
                 max_search_rounds=2,
                 max_unique_evidence=2,
-                max_provider_invocations=max_tools + 2,
+                max_provider_invocations=(
+                    max_tools + 4 * revision_cycles + 6
+                ),
+                max_reasoning_revision_cycles=revision_cycles,
                 context_token_budget=20,
                 tool_token_budget=20,
                 deadline_seconds=120,
@@ -136,10 +156,269 @@ def _allocate(
             retry_of_turn_id=None,
             input_digest="0" * 64,
             response_language="zh-TW",
+            reasoning_mode=reasoning_mode,
             applied_guidance_revision=0,
             applied_guidance_digest=None,
         )
     )
+
+
+def test_reasoning_revision_started_trace_and_event_commit_atomically(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "reasoning-revision-started", reasoning_mode="deep"),
+    )
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="revise_only",
+        finding_codes=["coverage_gap"],
+        summary="A revision is required.",
+        score={
+            "plan_coverage": 1,
+            "evidence_handling": 1,
+            "conflict_handling": 1,
+            "gap_resolution": 1,
+            "revision_completion": 0,
+            "total": 4,
+        },
+    )
+    trace = _next_reasoning_trace(
+        None,
+        status="running",
+        plans=[ReasoningPlanV2(
+            generation=1,
+            next_objective="Review evidence.",
+            completion_condition="Evidence reviewed.",
+            items=[ReasoningPlanItemV2(item_id="plan-1", summary="Review evidence.")],
+        )],
+        evaluations=[evaluation],
+        corrections=[],
+    )
+
+    progressed = owner.record_reasoning_progress(
+        RecordReasoningProgressV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            trace=trace,
+            phase="revising",
+            progress_status="started",
+            cycle=1,
+            message_code="reasoning.revision_requested",
+            message_params={"cycle": 1},
+        )
+    )
+
+    with postgres_runtime.session_factory() as session:
+        row = session.get(AtlasTurnExecutionRow, snapshot.execution_id)
+        event = session.scalar(
+            select(AtlasTurnRuntimeEventRow).where(
+                AtlasTurnRuntimeEventRow.execution_id == snapshot.execution_id,
+                AtlasTurnRuntimeEventRow.sequence == progressed.version,
+            )
+        )
+    assert row is not None and event is not None
+    assert row.reasoning_trace == trace.model_dump(mode="json")
+    assert row.reasoning_trace["corrections"] == []
+    assert event.reasoning_phase == "revising"
+    assert event.progress_status == "started"
+    assert event.cycle == 1
+
+
+def test_fourth_evaluation_progress_persists_at_max_three_revisions(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(
+            owner,
+            "reasoning-fourth-evaluation",
+            reasoning_mode="deep",
+            max_reasoning_revision_cycles=3,
+        ),
+    )
+    evaluations = [
+        ReasoningEvaluationV1(
+            cycle=cycle,
+            verdict="revise_only",
+            finding_codes=["coverage_gap"],
+            summary="A revision is required.",
+            score={
+                "plan_coverage": 1,
+                "evidence_handling": 1,
+                "conflict_handling": 1,
+                "gap_resolution": 1,
+                "revision_completion": 0,
+                "total": 4,
+            },
+        )
+        for cycle in range(1, 5)
+    ]
+    trace = _next_reasoning_trace(
+        None,
+        status="running",
+        plans=[
+            ReasoningPlanV2(
+                generation=1,
+                next_objective="Review evidence.",
+                completion_condition="Evidence reviewed.",
+                items=[
+                    ReasoningPlanItemV2(
+                        item_id="plan-1",
+                        summary="Review evidence.",
+                    )
+                ],
+            )
+        ],
+        evaluations=evaluations,
+        corrections=[],
+    )
+
+    progressed = owner.record_reasoning_progress(
+        RecordReasoningProgressV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            trace=trace,
+            phase="evaluating",
+            progress_status="completed",
+            cycle=4,
+            message_code="reasoning.evaluation_completed",
+            message_params={"cycle": 4},
+        )
+    )
+
+    with postgres_runtime.session_factory() as session:
+        event = session.scalar(
+            select(AtlasTurnRuntimeEventRow).where(
+                AtlasTurnRuntimeEventRow.execution_id == snapshot.execution_id,
+                AtlasTurnRuntimeEventRow.sequence == progressed.version,
+            )
+        )
+    assert event is not None
+    assert event.reasoning_phase == "evaluating"
+    assert event.progress_status == "completed"
+    assert event.cycle == 4
+
+
+def test_reasoning_trace_v2_generations_and_standard_null_persist_atomically(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    standard = _allocate(owner, "reasoning-standard-null")
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "reasoning-v2-generations", reasoning_mode="deep"),
+    )
+    first = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review the available evidence.",
+        completion_condition="The evidence gap is identified.",
+        items=[ReasoningPlanItemV2(item_id="plan-1", summary="Review evidence.")],
+    )
+    second = ReasoningPlanV2(
+        generation=2,
+        parent_generation=1,
+        next_objective="Research the identified evidence gap.",
+        completion_condition="The gap is resolved or disclosed.",
+        items=[
+            ReasoningPlanItemV2(
+                item_id="plan-1",
+                summary="Review evidence.",
+                status="completed",
+            )
+        ],
+    )
+    evaluations = [
+        ReasoningEvaluationV1(
+            cycle=1,
+            verdict="research_then_revise",
+            finding_codes=["coverage_gap"],
+            summary="More evidence is required.",
+            score={
+                "plan_coverage": 1,
+                "evidence_handling": 1,
+                "conflict_handling": 1,
+                "gap_resolution": 0,
+                "revision_completion": 1,
+                "total": 4,
+            },
+        ),
+        ReasoningEvaluationV1(
+            cycle=2,
+            verdict="accept",
+            summary="The revised candidate closes the gap.",
+            score={
+                "plan_coverage": 2,
+                "evidence_handling": 2,
+                "conflict_handling": 1,
+                "gap_resolution": 2,
+                "revision_completion": 2,
+                "total": 9,
+            },
+        ),
+    ]
+    trace = _next_reasoning_trace(
+        None,
+        status="completed",
+        plans=[first, second],
+        evaluations=evaluations,
+        corrections=[
+            ReasoningCorrectionV2(
+                cycle=1,
+                kind="research_then_revise",
+                triggering_evaluation=1,
+                plan_generation=2,
+                tool_invocation_start=1,
+                tool_invocation_end=2,
+                result_evaluation=2,
+                addressed_finding_codes=["coverage_gap"],
+                summary="Researched the missing evidence and revised the candidate.",
+            )
+        ],
+        termination_reason="completed",
+    )
+
+    progressed = owner.record_reasoning_progress(
+        RecordReasoningProgressV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            trace=trace,
+            phase="evaluating",
+            progress_status="completed",
+            cycle=2,
+            message_code="reasoning.evaluation_completed",
+            message_params={"cycle": 2},
+        )
+    )
+
+    with postgres_runtime.session_factory() as session:
+        standard_row = session.get(AtlasTurnExecutionRow, standard.execution_id)
+        row = session.get(AtlasTurnExecutionRow, snapshot.execution_id)
+        event = session.scalar(
+            select(AtlasTurnRuntimeEventRow).where(
+                AtlasTurnRuntimeEventRow.execution_id == snapshot.execution_id,
+                AtlasTurnRuntimeEventRow.sequence == progressed.version,
+            )
+        )
+    expected = trace.model_dump(mode="json")
+    assert standard_row is not None and standard_row.reasoning_trace is None
+    assert row is not None and row.reasoning_trace == expected
+    assert event is not None
+    assert (event.reasoning_phase, event.progress_status, event.cycle) == (
+        "evaluating",
+        "completed",
+        2,
+    )
+    assert [plan["generation"] for plan in row.reasoning_trace["plans"]] == [1, 2]
+    assert len(
+        json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ) <= 32768
 
 
 def _accept_and_bind(owner: PostgresTurnRuntimeOwner, snapshot: object):
@@ -256,7 +535,11 @@ def test_allocation_exact_replay_conflict_and_competing_cas(
         conversation_id=first.conversation_id,
         actor_id=first.actor_id,
         holder_id="other-holder",
-        route_policy=RoutePolicyV1(max_tool_invocations=2, max_provider_invocations=4),
+        route_policy=RoutePolicyV1(
+            max_tool_invocations=2,
+            max_provider_invocations=8,
+            max_reasoning_revision_cycles=0,
+        ),
         route=route_snapshot(),
         lease_policy=LeasePolicyV1(ttl_seconds=30),
         idempotency_key="allocate-allocation",

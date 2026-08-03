@@ -40,6 +40,23 @@ docker compose -f docker-compose.p1.yml up -d
 The initializer observes non-empty Identity state and does not require or alter
 the original credentials.
 
+## Replace an earlier snapshot
+
+Snapshot versions do not support in-place application-data migration. To run a
+new snapshot, stop the earlier stack and remove its disposable volumes before
+building and starting the new version:
+
+```sh
+cd infra
+docker compose -f docker-compose.p1.yml down -v
+docker compose -f docker-compose.p1.yml up --build -d
+```
+
+`down -v` permanently deletes PostgreSQL, Redis, Qdrant, and other named-volume
+state for this Compose project. Preserve any operator-managed source material
+that must be uploaded again. Do not point the new snapshot at an earlier Atlas
+database or at artifact storage still owned by another deployment.
+
 ## Reset
 
 ```sh

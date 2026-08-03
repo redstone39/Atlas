@@ -16,6 +16,7 @@ import type {
   WorkspaceAnswerSegmentDto,
   WorkspaceTurnProjectionDto,
   WorkspaceTagScopeResult,
+  ReasoningMode,
 } from "./types";
 
 export type DeclaredEvidencePreview =
@@ -118,6 +119,7 @@ export const workspaceApi = {
     conversationId: string,
     inputText: string,
     idempotencyKey: string,
+    reasoningMode: ReasoningMode,
     signal?: AbortSignal,
   ) =>
     requestJson<TurnAcceptedDto>(
@@ -125,13 +127,18 @@ export const workspaceApi = {
       {
         method: "POST",
         signal,
-        body: JSON.stringify({ input_text: inputText, idempotency_key: idempotencyKey }),
+        body: JSON.stringify({
+          input_text: inputText,
+          idempotency_key: idempotencyKey,
+          reasoning_mode: reasoningMode,
+        }),
       },
     ),
   streamConversationTurn: async (
     conversationId: string,
     inputText: string,
     idempotencyKey: string,
+    reasoningMode: ReasoningMode,
     onEvent?: (event: RuntimeStreamEvent, eventType: string) => void,
     signal?: AbortSignal,
   ) => {
@@ -139,6 +146,7 @@ export const workspaceApi = {
       conversationId,
       inputText,
       idempotencyKey,
+      reasoningMode,
       signal,
     );
     if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
@@ -241,7 +249,9 @@ async function readRuntimeEvents(
     const event: RuntimeStreamEvent = {
       ...raw,
       execution_id: raw.execution_id || accepted.execution_id,
-      phase: progressPhase(eventType),
+      phase: eventType === "reasoning_progressed" && raw.reasoning_phase
+        ? raw.reasoning_phase
+        : progressPhase(eventType),
       retryable: eventType === "terminal_failed",
     };
     lastEventId = wireEventId || event.event_id || lastEventId;
@@ -277,6 +287,7 @@ export function conversationSummary(
 ): ConversationListResult["conversations"][number] {
   return {
     ...value,
+    reasoning_mode: value.reasoning_mode ?? "standard",
     last_turn_status:
       "last_turn_status" in value ? value.last_turn_status : null,
   };
@@ -285,6 +296,7 @@ export function conversationSummary(
 export function conversationDetail(value: WorkspaceConversationDetailDto): ConversationDetail {
   return {
     ...value.conversation,
+    reasoning_mode: value.conversation.reasoning_mode ?? "standard",
     turns: value.turns.flatMap((turn) => {
       const assistant = assistantTurn(turn, value.conversation.conversation_id);
       return [
@@ -303,6 +315,8 @@ function userTurn(turn: WorkspaceTurnProjectionDto, conversationId: string): Con
     input_text: turn.user_input,
     answer_text: null,
     execution_status: "completed",
+    reasoning_mode: turn.reasoning_mode ?? "standard",
+    reasoning_timeline: [],
     response_kind: "dialogue",
     verification_status: null,
     evidence_review_status: null,
@@ -350,6 +364,8 @@ function assistantTurn(turn: WorkspaceTurnProjectionDto, conversationId: string)
     source_turn_id: turn.turn_id,
     execution_id: turn.execution_id,
     execution_status: failed ? "failed_closed" : complete ? "completed" : "processing",
+    reasoning_mode: turn.reasoning_mode ?? "standard",
+    reasoning_timeline: turn.reasoning_timeline ?? [],
     response_kind: failed
       ? "refused"
       : complete && segments.length === 0
