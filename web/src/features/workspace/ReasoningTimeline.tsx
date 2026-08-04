@@ -2,7 +2,6 @@ import { BrainCircuit, ChevronDown } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
   Collapsible,
@@ -25,32 +24,28 @@ export function ReasoningTimeline({
   if (items.length === 0) return null;
 
   const content = (
-    <ol className="flex flex-col gap-2" aria-label={t("workspace.reasoningTimeline")}>
+    <ol className="flex flex-col gap-1.5" aria-label={t("workspace.reasoningTimeline")}>
       {items.map((item, index) => (
         <li
           key={item.event_id}
-          className="flex items-start gap-2 rounded-md border bg-muted/30 p-2 text-sm"
+          data-slot="reasoning-progress"
+          className="flex items-start gap-2 py-0.5 text-xs text-muted-foreground"
         >
           {live && index === items.length - 1 && item.status === "started" ? (
-            <Spinner className="mt-0.5" aria-hidden="true" />
+            <Spinner className="mt-0.5 size-3.5 opacity-60" aria-hidden="true" />
           ) : (
-            <BrainCircuit className="mt-0.5" aria-hidden="true" />
+            <BrainCircuit className="mt-0.5 size-3.5 opacity-50" aria-hidden="true" />
           )}
           <span className="min-w-0 flex-1">
-            <span className="font-medium">
+            <span>
               {t(`workspace.reasoningPhase.${item.phase}`)}
             </span>
             {item.cycle ? (
-              <span className="ml-2 text-xs text-muted-foreground">
+              <span className="ml-2 opacity-70">
                 {t("workspace.reasoningCycle", { cycle: item.cycle })}
               </span>
             ) : null}
           </span>
-          <Badge
-            variant={item.status === "failed" ? "destructive" : "outline"}
-          >
-            {t(`workspace.reasoningStatus.${item.status}`)}
-          </Badge>
         </li>
       ))}
     </ol>
@@ -58,8 +53,8 @@ export function ReasoningTimeline({
 
   if (live) {
     return (
-      <section className="flex flex-col gap-2" aria-live="polite">
-        <div className="text-xs font-medium text-muted-foreground">
+      <section className="flex flex-col gap-1.5 opacity-80" aria-live="polite">
+        <div className="text-xs text-muted-foreground">
           {t("workspace.reasoningLive")}
         </div>
         {content}
@@ -70,8 +65,12 @@ export function ReasoningTimeline({
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger asChild>
-        <Button variant="ghost" size="sm" className="w-fit">
-          <BrainCircuit data-icon="inline-start" />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-auto w-fit px-0 py-1 text-xs font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+        >
+          <BrainCircuit data-icon="inline-start" className="opacity-60" />
           {t("workspace.reasoningTimeline")}
           <ChevronDown
             data-icon="inline-end"
@@ -79,7 +78,7 @@ export function ReasoningTimeline({
           />
         </Button>
       </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">{content}</CollapsibleContent>
+      <CollapsibleContent className="pt-1 opacity-80">{content}</CollapsibleContent>
     </Collapsible>
   );
 }

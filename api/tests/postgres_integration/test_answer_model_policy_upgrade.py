@@ -118,6 +118,7 @@ def _insert_existing_rows(runtime: PostgresRuntime) -> None:
                 max_unique_evidence=2,
                 max_provider_invocations=8,
                 max_reasoning_revision_cycles=0,
+                max_schema_retries_per_turn=1,
                 context_token_budget=100,
                 tool_token_budget=100,
                 deadline_seconds=120,

@@ -607,6 +607,7 @@ class WorkspaceTurnApplication:
             max_tool_invocations=runtime_policy.max_tool_executions,
             max_provider_invocations=runtime_policy.max_provider_invocations,
             max_reasoning_revision_cycles=runtime_policy.max_reasoning_revision_cycles,
+            max_schema_retries_per_turn=runtime_policy.max_schema_retries_per_turn,
             max_catalog_pages=runtime_policy.max_catalog_pages,
             max_search_rounds=runtime_policy.max_search_rounds,
             max_unique_evidence=runtime_policy.max_unique_evidence,
@@ -1001,6 +1002,8 @@ class WorkspaceTurnApplication:
                             for decision in decisions
                         )
                     )
+            if projection.evidence_review_status == "questionable":
+                assistant_visible = False
             if not assistant_visible:
                 answer = ""
                 direct_document_ids = []

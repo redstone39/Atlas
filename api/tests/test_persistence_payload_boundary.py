@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 from sqlalchemy.dialects.postgresql import JSONB
@@ -47,6 +48,7 @@ from atlas_production.modules.result_governance.records import (
     ClaimSupportAssessment,
     ResponseSegmentRecord,
 )
+from atlas_production.modules.turn_runtime.public import SchemaRetryOriginCode
 from atlas_production.shared.public import AuditEventRecord
 
 
@@ -221,6 +223,47 @@ def _runtime_policy() -> ModelRouteRuntimePolicy:
         max_total_tokens_per_conversation=20_000,
         revision=1,
     )
+
+
+def _model_invocation_with_repair_origin(origin: str) -> ModelInvocationRecord:
+    policy = _runtime_policy()
+    return ModelInvocationRecord(
+        invocation_id="invocation-repair-1",
+        route_id="route-1",
+        provider_type="openai_compatible",
+        model_name="model-1",
+        status="planned",
+        created_at="2026-08-04T00:00:00+00:00",
+        prompt_snapshot_ref="prompt-invocation-repair-1",
+        response_schema_name="answer-v1",
+        response_schema_digest="a" * 64,
+        token_usage={},
+        route_revision=1,
+        runtime_policy_schema_version=policy.schema_version,
+        runtime_policy_revision=policy.revision,
+        runtime_policy_snapshot=vars(policy),
+        repair_origin_error_codes=[origin],
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [*get_args(SchemaRetryOriginCode), "empty_terminal_answer"],
+)
+def test_model_invocation_accepts_owned_repair_origin_contract(origin: str) -> None:
+    payload = _model_invocation_payload(_model_invocation_with_repair_origin(origin))
+
+    assert payload["repair_origin_error_codes"] == [origin]
+
+
+def test_model_invocation_rejects_unknown_repair_origin() -> None:
+    with pytest.raises(
+        PersistedPayloadPolicyError,
+        match="model repair origin error codes are invalid",
+    ):
+        _model_invocation_payload(
+            _model_invocation_with_repair_origin("unknown_retry_origin")
+        )
 
 
 def test_model_routing_jsonb_serializers_use_closed_typed_payloads() -> None:

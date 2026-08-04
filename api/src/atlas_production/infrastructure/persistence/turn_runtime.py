@@ -54,6 +54,7 @@ class AtlasTurnExecutionRow(OrmBase):
     max_reasoning_revision_cycles: Mapped[int] = mapped_column(
         Integer, nullable=False
     )
+    max_schema_retries_per_turn: Mapped[int] = mapped_column(Integer, nullable=False)
     context_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     deadline_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -112,6 +113,7 @@ class AtlasTurnExecutionRow(OrmBase):
         ),
         CheckConstraint(
             "max_reasoning_revision_cycles BETWEEN 0 AND 3 AND "
+            "max_schema_retries_per_turn BETWEEN 1 AND 3 AND "
             "max_provider_invocations >= max_tool_invocations + "
             "4 * max_reasoning_revision_cycles + 6",
             name="ck_atlas_turn_execution_provider_budget",
@@ -166,9 +168,10 @@ class AtlasTurnBudgetCounterRow(OrmBase):
     provider_invocations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tool_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schema_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     __table_args__ = (
-        CheckConstraint("tool_invocations >= 0 AND catalog_pages >= 0 AND document_candidates >= 0 AND search_rounds >= 0 AND unique_evidence >= 0 AND provider_invocations >= 0 AND context_tokens >= 0 AND tool_tokens >= 0", name="ck_atlas_turn_budget_nonnegative"),
+        CheckConstraint("tool_invocations >= 0 AND catalog_pages >= 0 AND document_candidates >= 0 AND search_rounds >= 0 AND unique_evidence >= 0 AND provider_invocations >= 0 AND context_tokens >= 0 AND tool_tokens >= 0 AND schema_retries >= 0", name="ck_atlas_turn_budget_nonnegative"),
     )
 
 

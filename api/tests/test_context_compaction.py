@@ -257,6 +257,8 @@ class _Routing:
     def __init__(self, outcomes) -> None:
         self.outcomes = list(outcomes)
         self.requests = []
+        self.successes = []
+        self.failure_codes = []
 
     def open_tested_attempt(self, _route_id):
         snapshot = Runtime().snapshot_value.route
@@ -287,6 +289,18 @@ class _Routing:
     def invoke(self, _attempt, request, _schema):
         self.requests.append(request)
         return self.outcomes.pop(0)
+
+    def prepare_invocation(self, *_args, **_kwargs):
+        return object()
+
+    def record_invocation_started(self, _handle):
+        return None
+
+    def record_invocation_success(self, _handle, token_usage):
+        self.successes.append(token_usage)
+
+    def record_invocation_failure(self, _handle, error_code):
+        self.failure_codes.append(error_code)
 
 
 def test_raw_context_above_hard_cap_still_compacts_before_enforcement() -> None:
@@ -325,12 +339,17 @@ def test_raw_context_above_hard_cap_still_compacts_before_enforcement() -> None:
     assert prepared.summary is not None
 
 
-def _completed(summary: str, *, finish_reason: str = "stop"):
+def _completed(
+    summary: str,
+    *,
+    finish_reason: str = "stop",
+    usage: dict[str, int] | None = None,
+):
     return ProviderCompleted(
         provider_request_id="provider-summary",
         model_ref="model-1",
         finish_reason=finish_reason,
-        usage={},
+        usage=usage or {},
         output={"summary": summary},
         assistant_message=ProviderAssistantMessage(content=summary),
     )
@@ -365,7 +384,7 @@ def test_summary_prompt_separates_system_rules_from_untrusted_history() -> None:
     assert "optional_custom_guidance" not in summary_wire
 
 
-def test_two_truncated_summary_attempts_fail_the_turn_prerequisite() -> None:
+def test_truncated_summary_does_not_use_schema_retry_budget() -> None:
     routing = _Routing(
         [
             _completed("partial", finish_reason="length"),
@@ -391,7 +410,7 @@ def test_two_truncated_summary_attempts_fail_the_turn_prerequisite() -> None:
         )
 
     assert error.value.safe_code == "summary_generation_failed"
-    assert len(routing.requests) == 2
+    assert len(routing.requests) == 1
 
 
 def test_summary_output_over_6000_tokens_is_rejected_and_retried() -> None:
@@ -401,13 +420,14 @@ def test_summary_output_over_6000_tokens_is_rejected_and_retried() -> None:
             _completed("bounded summary"),
         ]
     )
+    runtime = Runtime()
     generator = ProviderContextSummaryGenerator(
-        routing, record_invocations=False
+        routing, runtime, record_invocations=False
     )
 
     text, token_count = generator.generate(
         execution_id="exec-1",
-        route=Runtime().snapshot_value.route,
+        route=runtime.snapshot_value.route,
         parent_summary=None,
         exchanges=[_exchange(1)],
     )
@@ -415,3 +435,34 @@ def test_summary_output_over_6000_tokens_is_rejected_and_retried() -> None:
     assert text == "bounded summary"
     assert token_count <= 6000
     assert len(routing.requests) == 2
+    assert runtime.snapshot_value.budget.schema_retries == 1
+
+
+def test_completed_invalid_summary_attempts_preserve_usage_for_conversation_quota() -> None:
+    routing = _Routing(
+        [
+            _completed(
+                " word" * 6001,
+                usage={"input_tokens": 11, "output_tokens": 7},
+            ),
+            _completed(
+                "bounded summary",
+                usage={"input_tokens": 5, "output_tokens": 3},
+            ),
+        ]
+    )
+    runtime = Runtime()
+
+    text, _ = ProviderContextSummaryGenerator(routing, runtime).generate(
+        execution_id="exec-1",
+        route=runtime.snapshot_value.route,
+        parent_summary=None,
+        exchanges=[_exchange(1)],
+    )
+
+    assert text == "bounded summary"
+    assert routing.successes == [
+        {"input_tokens": 11, "output_tokens": 7},
+        {"input_tokens": 5, "output_tokens": 3},
+    ]
+    assert routing.failure_codes == []

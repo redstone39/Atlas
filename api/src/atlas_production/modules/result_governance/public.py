@@ -309,6 +309,7 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
     assessment_input_digest: Digest | None = None
     assessment_output_digest: Digest | None = None
     assessment_results: list[PostHocAnswerAssessmentV2] = Field(max_length=100)
+    delivery_constraint: Literal["none", "correction_limit_reached"] = "none"
     idempotency_key: Identity
 
     @model_validator(mode="after")

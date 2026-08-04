@@ -66,7 +66,11 @@ import type {
   ConversationTurn,
   DeclaredEvidencePreview,
 } from "../workspace/index";
-import { ClaimedEvidenceTrace, EvidenceViewerDialog } from "../workspace/index";
+import {
+  AnswerMarkdown,
+  ClaimedEvidenceTrace,
+  EvidenceViewerDialog,
+} from "../workspace/index";
 import { conversationAuditApi } from "./api";
 import type {
   AuditEvent,
@@ -826,9 +830,13 @@ export function ConversationAuditFeature({
                                       </div>
                                       </TechnicalDetails>
                                     )}
-                                    <span>
-                                      {turn.input_text ?? turn.answer_text ?? serverMessage(turn.user_reason, t)}
-                                    </span>
+                                    {turn.answer_text ? (
+                                      <AnswerMarkdown content={turn.answer_text} />
+                                    ) : (
+                                      <span>
+                                        {turn.input_text ?? serverMessage(turn.user_reason, t)}
+                                      </span>
+                                    )}
                                     {turn.role === "assistant" && turn.evidence_review_status && (
                                       <div className="flex flex-wrap items-center gap-2">
                                         <StatusBadge

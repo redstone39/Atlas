@@ -32,6 +32,7 @@ from atlas_production.modules.turn_runtime.public import (
     BeginToolInvocationV1,
     BindContextV1,
     BudgetSnapshotV1,
+    ClaimSchemaRetryV1,
     CommitTerminalV1,
     CompleteReleaseIntentV1,
     CompleteToolInvocationV1,
@@ -116,6 +117,7 @@ def _budget_model(row: AtlasTurnBudgetCounterRow) -> BudgetSnapshotV1:
         provider_invocations=row.provider_invocations,
         context_tokens=row.context_tokens,
         tool_tokens=row.tool_tokens,
+        schema_retries=row.schema_retries,
     )
 
 
@@ -127,6 +129,7 @@ def _policy_model(row: AtlasTurnExecutionRow) -> RoutePolicyV1:
         max_unique_evidence=row.max_unique_evidence,
         max_provider_invocations=row.max_provider_invocations,
         max_reasoning_revision_cycles=row.max_reasoning_revision_cycles,
+        max_schema_retries_per_turn=row.max_schema_retries_per_turn,
         context_token_budget=row.context_token_budget,
         tool_token_budget=row.tool_token_budget,
         deadline_seconds=row.deadline_seconds,
@@ -526,6 +529,7 @@ class PostgresTurnRuntimeOwner:
                         provider_invocations=0,
                         context_tokens=0,
                         tool_tokens=0,
+                        schema_retries=0,
                     ),
                     AtlasTurnRuntimeIdempotencyRow(
                         scope_ref=scope,
@@ -751,6 +755,83 @@ class PostgresTurnRuntimeOwner:
                 event_type="model_action_requested",
                 state=changed.state,
             )
+            session.flush()
+            return self._snapshot(session, command.execution_id)
+
+    def claim_schema_retry(self, command: ClaimSchemaRetryV1) -> ExecutionSnapshotV1:
+        scope = f"execution:{command.execution_id}"
+        digest = _digest_model(command)
+        key = (scope, "claim_schema_retry", command.claim_key)
+        active_states = (
+            ExecutionState.ACCEPTED.value,
+            ExecutionState.CONTEXT_READY.value,
+            ExecutionState.AWAITING_MODEL_ACTION.value,
+            ExecutionState.TOOL_PENDING.value,
+            ExecutionState.TOOL_COMPLETED.value,
+            ExecutionState.GOVERNING_RESULT.value,
+        )
+        with self._session_factory() as session, session.begin():
+            execution = session.scalar(
+                select(AtlasTurnExecutionRow).where(
+                    AtlasTurnExecutionRow.execution_id == command.execution_id,
+                    AtlasTurnExecutionRow.state.in_(active_states),
+                    AtlasTurnExecutionRow.deadline_at > func.clock_timestamp(),
+                    self._active_lease_clause(
+                        command.execution_id, command.fencing_token
+                    ),
+                ).with_for_update()
+            )
+            if execution is None:
+                raise TurnRuntimeCurrentnessConflict(
+                    "schema retry claim requires a live accepted execution and current fence"
+                )
+
+            replay = session.get(AtlasTurnRuntimeIdempotencyRow, key)
+            if replay is not None:
+                if replay.request_digest != digest:
+                    raise TurnRuntimeReplayConflict(
+                        "schema retry claim replay payload conflicts with the original"
+                    )
+                return self._snapshot(session, command.execution_id)
+
+            inserted_key = session.scalar(
+                insert(AtlasTurnRuntimeIdempotencyRow)
+                .values(
+                    scope_ref=scope,
+                    operation="claim_schema_retry",
+                    idempotency_key=command.claim_key,
+                    request_digest=digest,
+                    result_execution_id=command.execution_id,
+                    result_version=execution.version,
+                    created_at=func.clock_timestamp(),
+                )
+                .on_conflict_do_nothing()
+                .returning(AtlasTurnRuntimeIdempotencyRow.idempotency_key)
+            )
+            if inserted_key is None:
+                replay = session.get(AtlasTurnRuntimeIdempotencyRow, key)
+                if replay is not None and replay.request_digest == digest:
+                    return self._snapshot(session, command.execution_id)
+                raise TurnRuntimeReplayConflict(
+                    "schema retry claim identity already exists"
+                )
+
+            budget = session.scalar(
+                update(AtlasTurnBudgetCounterRow)
+                .where(
+                    AtlasTurnBudgetCounterRow.execution_id == command.execution_id,
+                    AtlasTurnBudgetCounterRow.schema_retries
+                    < execution.max_schema_retries_per_turn,
+                )
+                .values(
+                    schema_retries=AtlasTurnBudgetCounterRow.schema_retries + 1
+                )
+                .returning(AtlasTurnBudgetCounterRow)
+            )
+            if budget is None:
+                raise TurnRuntimeBudgetExceeded(
+                    "turn schema retry budget exhausted"
+                )
             session.flush()
             return self._snapshot(session, command.execution_id)
 

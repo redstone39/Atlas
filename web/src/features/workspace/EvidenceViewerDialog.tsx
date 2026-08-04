@@ -53,6 +53,7 @@ export function EvidenceViewerDialog({
     >
       <DialogContent
         className="max-h-[85vh] overflow-y-auto"
+        size="wide"
       >
         <DialogHeader>
           <DialogTitle>{t("citationViewer.title")}</DialogTitle>
@@ -133,7 +134,7 @@ function PdfEvidencePage({
         canvas.width = Math.floor(viewport.width * ratio);
         canvas.height = Math.floor(viewport.height * ratio);
         canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        canvas.style.height = "auto";
         const context = canvas.getContext("2d");
         if (!context) throw new Error("canvas_unavailable");
         renderTask = page.render({
@@ -179,7 +180,7 @@ function PdfEvidencePage({
       <canvas
         ref={canvasRef}
         aria-label={t("citationViewer.pdfPage")}
-        className={cn("mx-auto bg-background", status !== "ready" && "invisible")}
+        className={cn("mx-auto max-w-full bg-background", status !== "ready" && "invisible")}
       />
     </WatermarkedEvidence>
   );

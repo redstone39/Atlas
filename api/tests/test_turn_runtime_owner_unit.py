@@ -93,7 +93,7 @@ def test_all_persisted_budget_deltas_are_typed_and_nonnegative() -> None:
 
 def test_repository_has_complete_public_surface_and_no_cross_owner_imports() -> None:
     for method in (
-        "find_execution", "snapshot", "allocate", "accept", "bind_context", "request_model_action", "record_reasoning_progress", "begin_tool",
+        "find_execution", "snapshot", "allocate", "accept", "bind_context", "request_model_action", "claim_schema_retry", "record_reasoning_progress", "begin_tool",
         "complete_tool", "begin_governance", "prepare_terminal", "commit_terminal",
         "fail_carrier", "finalize_expired", "renew_lease", "fail_expired_leases",
         "pending_release_intents", "complete_release_intent", "events",

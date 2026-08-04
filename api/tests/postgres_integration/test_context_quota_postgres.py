@@ -104,6 +104,7 @@ def _invocation(
     status: str,
     token_usage: dict,
     purpose: str = "turn_execution",
+    repair_origin_error_codes: list[str] | None = None,
 ) -> AtlasModelInvocationRow:
     return AtlasModelInvocationRow(
         invocation_id=invocation_id,
@@ -136,7 +137,7 @@ def _invocation(
         completed_at="2026-07-23T00:00:01Z",
         duration_ms=1000,
         attempt_ordinal=1,
-        repair_origin_error_codes=[],
+        repair_origin_error_codes=repair_origin_error_codes or [],
     )
 
 
@@ -171,6 +172,21 @@ def test_fresh_postgres_exact_replay_read_and_soft_conversation_usage(
                     purpose="turn_execution",
                 ),
                 _invocation(
+                    f"{PREFIX}summary-invalid",
+                    subject_ref=first.execution_id,
+                    status="completed",
+                    token_usage={"input_tokens": 8, "output_tokens": 3},
+                    purpose="context_summary",
+                ),
+                _invocation(
+                    f"{PREFIX}summary-repair",
+                    subject_ref=first.execution_id,
+                    status="completed",
+                    token_usage={"input_tokens": 4, "output_tokens": 2},
+                    purpose="context_summary",
+                    repair_origin_error_codes=["invalid_summary_output"],
+                ),
+                _invocation(
                     f"{PREFIX}failed",
                     subject_ref=first.execution_id,
                     status="failed",
@@ -191,5 +207,5 @@ def test_fresh_postgres_exact_replay_read_and_soft_conversation_usage(
         PostgresConversationTokenUsageReader(
             postgres_runtime.session_factory
         ).observed_tokens("conversation-target")
-        == 14
+        == 31
     )

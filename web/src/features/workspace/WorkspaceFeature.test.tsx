@@ -30,7 +30,10 @@ describe("workspace answer evidence presentation", () => {
     const { rerender } = render(
       <ReasoningTimeline items={reasoningProgress} live />,
     );
-    expect(screen.getByText("Planning the work")).toBeInTheDocument();
+    const progressItem = screen.getByText("Planning the work").closest("li");
+    expect(progressItem).toHaveAttribute("data-slot", "reasoning-progress");
+    expect(progressItem).not.toHaveClass("border");
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
     expect(screen.queryByText(/score/i)).not.toBeInTheDocument();
 
     rerender(<ReasoningTimeline items={reasoningProgress} />);

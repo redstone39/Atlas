@@ -596,6 +596,7 @@ describe("Atlas production web", () => {
     expect(styles).toContain("--radius-xl: var(--radius);");
     expect(styles).toContain("cursor: pointer;");
     expect(styles).toContain("cursor: text;");
+    expect(styles).not.toContain('[data-slot$="-item"]');
     expect(styles).toContain("--background: 42 38% 96%;");
     expect(styles).not.toContain("--background: 210 40% 98%;");
     for (const token of [
@@ -1051,7 +1052,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findAllByText("Planning the work")).toHaveLength(2);
-    expect(screen.getByText("In progress")).toBeInTheDocument();
+    expect(screen.queryByText("In progress")).not.toBeInTheDocument();
     expect(detailReads).toBe(1);
     expect(screen.queryByText(
       "The PCIe reference lane controlled impedance target is 85 ohms differential.",
@@ -3884,6 +3885,61 @@ describe("Atlas production web", () => {
         String(input).includes("/export"),
       ),
     ).toBe(false);
+  });
+
+  it("/admin/audit renders assistant answers as one Markdown document", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const defaultFetch = global.fetch;
+    const markdown = [
+      "## Audit result",
+      "",
+      "- API is healthy",
+      "- Web is healthy",
+      "",
+      "| Service | Status |",
+      "| --- | --- |",
+      "| Atlas | Ready |",
+    ].join("\n");
+    const markdownAssistant = {
+      ...answeredTurn,
+      answer_text: markdown,
+      response_segments: [{
+        ...answeredTurn.response_segments[0],
+        text: markdown,
+      }],
+    };
+    const detail = {
+      ...conversationDetail,
+      turns: conversationDetail.turns.map((turn) =>
+        turn.role === "assistant"
+          ? { ...markdownAssistant, role: "assistant" as const, input_text: null }
+          : turn,
+      ),
+    };
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/admin/conversations/conv-supported-001" &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(adminDetailDto(detail));
+      }
+      return defaultFetch(input, init);
+    });
+    const { container } = render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Audit result", level: 2 }),
+    ).toBeInTheDocument();
+    const transcript = container.querySelector('[data-slot="audit-transcript"]') as HTMLElement;
+    expect(within(transcript).getByRole("list")).toBeInTheDocument();
+    expect(within(transcript).getByRole("table")).toBeInTheDocument();
+    expect(within(transcript).getByRole("cell", { name: "Ready" })).toBeInTheDocument();
   });
 
   it("/admin/audit presents the same model-claimed evidence trace", async () => {

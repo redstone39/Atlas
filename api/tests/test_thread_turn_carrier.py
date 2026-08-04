@@ -58,6 +58,7 @@ def _snapshot() -> ExecutionSnapshotV1:
             provider_invocations=0,
             context_tokens=0,
             tool_tokens=0,
+            schema_retries=0,
         ),
         grant_ref="grant-1",
         catalog_ref="catalog-1",

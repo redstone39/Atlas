@@ -28,8 +28,12 @@ from atlas_production.modules.model_routing.public import (
     require_provider_wire_within_limits,
 )
 from atlas_production.modules.turn_runtime.public import (
+    ClaimSchemaRetryV1,
     ExecutionSnapshotV1,
+    SchemaRetryOriginCode,
     TurnRouteSnapshotV2,
+    TurnRuntimeBudgetExceeded,
+    TurnRuntimeOwner,
 )
 from atlas_production.providers import ProviderError, build_native_json_schema
 
@@ -173,12 +177,38 @@ class ProviderTurnInputProjector:
         self,
         routing: ModelRoutingRuntime,
         projections: TurnInputProjectionOwner,
+        runtime: TurnRuntimeOwner | None = None,
         *,
         record_invocations: bool = True,
     ) -> None:
         self._routing = routing
         self._projections = projections
+        self._runtime = runtime
         self._record_invocations = record_invocations
+
+    def _claim_schema_retry(
+        self,
+        *,
+        snapshot: ExecutionSnapshotV1,
+        stage: Literal["resolver", "rewrite"],
+        attempt_ordinal: int,
+        origin_error_code: SchemaRetryOriginCode,
+    ) -> bool:
+        if self._runtime is None:
+            return False
+        current = self._runtime.snapshot(snapshot.execution_id)
+        try:
+            self._runtime.claim_schema_retry(
+                ClaimSchemaRetryV1(
+                    execution_id=snapshot.execution_id,
+                    fencing_token=current.lease.fencing_token,
+                    claim_key=f"context_{stage}:schema-retry:{attempt_ordinal}",
+                    origin_error_code=origin_error_code,
+                )
+            )
+        except TurnRuntimeBudgetExceeded:
+            return False
+        return True
 
     @staticmethod
     def _remaining_seconds(snapshot: ExecutionSnapshotV1) -> float:
@@ -212,7 +242,7 @@ class ProviderTurnInputProjector:
             )
         )
 
-    def _invoke(
+    def _invoke_once(
         self,
         *,
         stage: Literal["resolver", "rewrite"],
@@ -221,6 +251,8 @@ class ProviderTurnInputProjector:
         request: ProviderConversationRequest,
         output_model: type[BaseModel],
         output_field: str,
+        attempt_ordinal: int,
+        repair_origin: SchemaRetryOriginCode | None,
     ) -> tuple[str, str | None]:
         schema = build_native_json_schema(
             f"context_{stage}_v1", output_model.model_json_schema()
@@ -238,9 +270,14 @@ class ProviderTurnInputProjector:
                 invocation_purpose=f"context_{stage}",
                 subject_kind="turn_execution",
                 subject_ref=snapshot.execution_id,
-                execution_key=f"{snapshot.execution_id}:context-{stage}:1",
+                execution_key=(
+                    f"{snapshot.execution_id}:context-{stage}:{attempt_ordinal}"
+                ),
                 prompt_digest=_digest(request.to_payload()),
-                attempt_ordinal=1,
+                attempt_ordinal=attempt_ordinal,
+                repair_origin_error_codes=(
+                    [] if repair_origin is None else [repair_origin]
+                ),
             )
             self._routing.record_invocation_started(handle)
         try:
@@ -265,13 +302,10 @@ class ProviderTurnInputProjector:
                 failure_code,
                 None if handle is None else handle.invocation_id,
             )
-        if handle is not None:
-            # Provider completion and application-level output validity are
-            # separate facts. Preserve observed usage for conversation quota
-            # even when the completed output is truncated or schema-invalid.
-            self._routing.record_invocation_success(handle, dict(outcome.usage))
         if outcome.finish_reason in {"length", "max_tokens"}:
             failure_code = f"{stage}_output_truncated"
+            if handle is not None:
+                self._routing.record_invocation_success(handle, dict(outcome.usage))
             raise _StageInvocationFailure(
                 failure_code,
                 None if handle is None else handle.invocation_id,
@@ -280,11 +314,59 @@ class ProviderTurnInputProjector:
             parsed = output_model.model_validate(outcome.output)
             output = getattr(parsed, output_field)
         except ValidationError as error:
+            if handle is not None:
+                self._routing.record_invocation_success(handle, dict(outcome.usage))
             raise _StageInvocationFailure(
                 f"invalid_{stage}_output",
                 None if handle is None else handle.invocation_id,
             ) from error
+        if handle is not None:
+            self._routing.record_invocation_success(handle, dict(outcome.usage))
         return output, None if handle is None else handle.invocation_id
+
+    def _invoke(
+        self,
+        *,
+        stage: Literal["resolver", "rewrite"],
+        snapshot: ExecutionSnapshotV1,
+        attempt,
+        request: ProviderConversationRequest,
+        output_model: type[BaseModel],
+        output_field: str,
+    ) -> tuple[str, str | None]:
+        attempt_ordinal = 1
+        repair_origin: SchemaRetryOriginCode | None = None
+        while True:
+            try:
+                return self._invoke_once(
+                    stage=stage,
+                    snapshot=snapshot,
+                    attempt=attempt,
+                    request=request,
+                    output_model=output_model,
+                    output_field=output_field,
+                    attempt_ordinal=attempt_ordinal,
+                    repair_origin=repair_origin,
+                )
+            except _StageInvocationFailure as error:
+                safe_code = error.safe_code
+                retryable = {
+                    "provider_output_decode_error",
+                    "provider_output_schema_error",
+                    f"invalid_{stage}_output",
+                }
+                if safe_code not in retryable:
+                    raise
+                origin: SchemaRetryOriginCode = safe_code
+                if not self._claim_schema_retry(
+                    snapshot=snapshot,
+                    stage=stage,
+                    attempt_ordinal=attempt_ordinal,
+                    origin_error_code=origin,
+                ):
+                    raise
+                repair_origin = origin
+                attempt_ordinal += 1
 
     def project(
         self,

@@ -4,7 +4,6 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from atlas_production.modules.conversation.public import ConversationV1, ReasoningMode
 from atlas_production.modules.turn_runtime.public import (
-    BudgetSnapshotV1,
     ExecutionState,
     ReasoningTraceV3,
     RuntimeEventV1,
@@ -19,6 +18,17 @@ class _StrictModel(BaseModel):
 class AdminConversationListResult(_StrictModel):
     conversations: list[ConversationV1]
     next_cursor: str | None = None
+
+
+class BudgetSnapshotV1(_StrictModel):
+    tool_invocations: int = Field(ge=0)
+    catalog_pages: int = Field(ge=0)
+    document_candidates: int = Field(ge=0)
+    search_rounds: int = Field(ge=0)
+    unique_evidence: int = Field(ge=0)
+    provider_invocations: int = Field(ge=0)
+    context_tokens: int = Field(ge=0)
+    tool_tokens: int = Field(ge=0)
 
 
 class RuntimeTraceDetail(_StrictModel):

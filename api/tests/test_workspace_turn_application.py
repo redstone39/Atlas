@@ -65,7 +65,7 @@ def _budget():
     return BudgetSnapshotV1(
         tool_invocations=0, catalog_pages=0, document_candidates=0,
         search_rounds=0, unique_evidence=0, provider_invocations=0,
-        context_tokens=0, tool_tokens=0,
+        context_tokens=0, tool_tokens=0, schema_retries=0,
     )
 
 
@@ -373,6 +373,7 @@ class ModelRoutes:
                 max_tool_executions=12,
                 max_provider_invocations=26,
                 max_reasoning_revision_cycles=2,
+                max_schema_retries_per_turn=3,
                 max_catalog_pages=5,
                 max_search_rounds=6,
                 max_unique_evidence=40,
@@ -612,6 +613,7 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
         "max_unique_evidence": 40,
         "max_provider_invocations": 26,
         "max_reasoning_revision_cycles": 2,
+        "max_schema_retries_per_turn": 3,
         "context_token_budget": 272000,
         "tool_token_budget": 64000,
         "deadline_seconds": 240,
@@ -1031,7 +1033,7 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
         return WorkspaceTurnProjectionV1(
             turn_id=turn_id, execution_id=f"execution-{turn_id}", ordinal=ordinal,
             user_input=user_input, execution_status=state,
-            evidence_review_status="questionable" if segments else None,
+            evidence_review_status="evidence_aligned" if segments else None,
             segments=segments, citations=[], created_at=NOW,
             model_claimed_evidence=(
                 [
@@ -1207,6 +1209,155 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
     ).open_session(model_input)
     session.next_action(model_input, finalize_only=False)
     assert sentinel not in repr(answer_routing.requests[0])
+
+
+def test_questionable_answer_is_excluded_and_invalidates_contaminated_summary() -> None:
+    contexts = Contexts()
+    application, runtime, _source = _app(Carrier(), contexts=contexts)
+    application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(input_text="current", idempotency_key="current-key"),
+    )
+    current = application._conversations.member
+    assert current is not None
+    aligned = ConversationTurnMemberV1(
+        turn_id="turn-aligned",
+        conversation_id="conversation-1",
+        execution_id="execution-aligned",
+        role="user",
+        ordinal=1,
+        created_at=NOW,
+    )
+    questionable = ConversationTurnMemberV1(
+        turn_id="turn-questionable",
+        conversation_id="conversation-1",
+        execution_id="execution-questionable",
+        role="user",
+        ordinal=2,
+        created_at=NOW,
+    )
+    application._conversations.candidate_turns = lambda _conversation_id: [
+        aligned,
+        questionable,
+        current.model_copy(update={"ordinal": 3}),
+    ]
+    projections = {
+        aligned.turn_id: WorkspaceTurnProjectionV1(
+            turn_id=aligned.turn_id,
+            execution_id=aligned.execution_id,
+            ordinal=1,
+            user_input="aligned original question",
+            execution_status=ExecutionState.TERMINAL_COMPLETED,
+            evidence_review_status="evidence_aligned",
+            segments=[
+                WorkspaceAnswerSegmentV2(
+                    segment_id="segment-aligned",
+                    text="aligned answer",
+                )
+            ],
+            citations=[],
+            created_at=NOW,
+        ),
+        questionable.turn_id: WorkspaceTurnProjectionV1(
+            turn_id=questionable.turn_id,
+            execution_id=questionable.execution_id,
+            ordinal=2,
+            user_input="questionable original question",
+            execution_status=ExecutionState.TERMINAL_COMPLETED,
+            evidence_review_status="questionable",
+            segments=[
+                WorkspaceAnswerSegmentV2(
+                    segment_id="segment-questionable",
+                    text="unsupported synthetic answer",
+                )
+            ],
+            citations=[],
+            created_at=NOW,
+        ),
+    }
+    application._project_turn = (
+        lambda _actor_id, member, _snapshot, _outcome: projections[member.turn_id]
+    )
+    for member in (aligned, questionable):
+        runtime.executions[member.execution_id] = runtime.current.model_copy(
+            update={
+                "execution_id": member.execution_id,
+                "turn_id": member.turn_id,
+                "state": ExecutionState.TERMINAL_COMPLETED,
+                "context_pack_ref": f"context-{member.turn_id}",
+            }
+        )
+    sources = [
+        ContextSummarySourceV3(
+            logical_turn_id=aligned.turn_id,
+            representative_turn_id=aligned.turn_id,
+            representative_content_digest=hashlib.sha256(
+                b"aligned rewritten question\0aligned answer"
+            ).hexdigest(),
+        ),
+        ContextSummarySourceV3(
+            logical_turn_id=questionable.turn_id,
+            representative_turn_id=questionable.turn_id,
+            representative_content_digest=hashlib.sha256(
+                b"questionable rewritten question\0unsupported synthetic answer"
+            ).hexdigest(),
+        ),
+    ]
+    contaminated_summary = ContextSummaryV3(
+        summary_ref="summary-contaminated",
+        text="This summary contains an unsupported synthetic answer.",
+        token_count=8,
+        sources=sources,
+        digest="c" * 64,
+    )
+    packs = {
+        "context-turn-aligned": ContextPackV3(
+            context_pack_ref="context-turn-aligned",
+            execution_id=aligned.execution_id,
+            input_projection_ref="input-projection-aligned",
+            model_user_input="aligned rewritten question",
+            recent_tail=[],
+            dependencies=[],
+            token_budget=112000,
+            digest="a" * 64,
+            created_at=NOW,
+        ),
+        "context-turn-questionable": ContextPackV3(
+            context_pack_ref="context-turn-questionable",
+            execution_id=questionable.execution_id,
+            input_projection_ref="input-projection-questionable",
+            model_user_input="questionable rewritten question",
+            recent_tail=[],
+            summary=contaminated_summary,
+            dependencies=[],
+            token_budget=112000,
+            digest="b" * 64,
+            created_at=NOW,
+        ),
+    }
+    contexts.get = lambda ref: packs.get(ref)
+
+    command = application._context_command(
+        snapshot=runtime.current,
+        actor_id="actor-1",
+        input_text="current",
+    )
+
+    assert command.summary is None
+    assert [item.user_message.text for item in command.recent_tail] == [
+        "aligned rewritten question",
+        "questionable rewritten question",
+    ]
+    assert command.recent_tail[0].assistant_message is not None
+    assert command.recent_tail[0].assistant_message.text == "aligned answer"
+    assert command.recent_tail[1].assistant_message is None
+    assert command.recent_tail[1].direct_document_ids == []
+    assert command.recent_tail[1].representative_content_digest == hashlib.sha256(
+        b"questionable rewritten question\0"
+    ).hexdigest()
+    assert "unsupported synthetic answer" not in command.model_dump_json()
+    assert "summary-contaminated" not in command.model_dump_json()
 
 
 def test_revocation_rebuild_projection_is_direct_only_and_keeps_all_user_messages() -> None:

@@ -32,6 +32,8 @@ from atlas_production.modules.model_routing.public import (
     ProviderCompleted,
     ProviderConversationRequest,
     ProviderIncomplete,
+    ProviderOutputDecodeError,
+    ProviderOutputSchemaError,
     ProviderProtocolError,
     ProviderRefused,
     ProviderSystemMessage,
@@ -45,8 +47,12 @@ from atlas_production.modules.turn_execution.public import (
     TurnModelRecentExchangeV3,
 )
 from atlas_production.modules.turn_runtime.public import (
+    ClaimSchemaRetryV1,
     ExecutionSnapshotV1,
+    SchemaRetryOriginCode,
     TurnRouteSnapshotV2,
+    TurnRuntimeBudgetExceeded,
+    TurnRuntimeOwner,
 )
 from atlas_production.providers import build_native_json_schema
 
@@ -122,10 +128,38 @@ def _verify_route(route: TurnRouteSnapshotV2, tested_route) -> None:
 
 class ProviderContextSummaryGenerator:
     def __init__(
-        self, routing: ModelRoutingRuntime, *, record_invocations: bool = True
+        self,
+        routing: ModelRoutingRuntime,
+        runtime: TurnRuntimeOwner | None = None,
+        *,
+        record_invocations: bool = True,
     ) -> None:
         self._routing = routing
+        self._runtime = runtime
         self._record_invocations = record_invocations
+
+    def _claim_schema_retry(
+        self,
+        *,
+        execution_id: str,
+        attempt_ordinal: int,
+        origin_error_code: SchemaRetryOriginCode,
+    ) -> bool:
+        if self._runtime is None:
+            return False
+        snapshot = self._runtime.snapshot(execution_id)
+        try:
+            self._runtime.claim_schema_retry(
+                ClaimSchemaRetryV1(
+                    execution_id=execution_id,
+                    fencing_token=snapshot.lease.fencing_token,
+                    claim_key=f"context_summary:schema-retry:{attempt_ordinal}",
+                    origin_error_code=origin_error_code,
+                )
+            )
+        except TurnRuntimeBudgetExceeded:
+            return False
+        return True
 
     def generate(
         self,
@@ -139,7 +173,9 @@ class ProviderContextSummaryGenerator:
             "context_summary_v3", _SummaryOutputV3.model_json_schema()
         )
         last_error = "summary_generation_failed"
-        for attempt_ordinal in (1, 2):
+        attempt_ordinal = 1
+        repair_origin: SchemaRetryOriginCode | None = None
+        while True:
             attempt = self._routing.open_tested_attempt(route.route_id)
             _verify_route(route, attempt.route)
             request = ProviderConversationRequest(
@@ -203,6 +239,9 @@ class ProviderContextSummaryGenerator:
                     execution_key=f"{execution_id}:summary:{attempt_ordinal}",
                     prompt_digest=_digest(request.to_payload()),
                     attempt_ordinal=attempt_ordinal,
+                    repair_origin_error_codes=(
+                        [] if repair_origin is None else [repair_origin]
+                    ),
                 )
                 self._routing.record_invocation_started(handle)
             try:
@@ -214,12 +253,14 @@ class ProviderContextSummaryGenerator:
                         last_error = "invalid_summary_provider_outcome"
                     if handle is not None:
                         self._routing.record_invocation_failure(handle, last_error)
-                    continue
+                    break
+                if handle is not None:
+                    self._routing.record_invocation_success(
+                        handle, dict(outcome.usage)
+                    )
                 if outcome.finish_reason in {"length", "max_tokens"}:
                     last_error = "summary_output_truncated"
-                    if handle is not None:
-                        self._routing.record_invocation_failure(handle, last_error)
-                    continue
+                    break
                 parsed = _SummaryOutputV3.model_validate(outcome.output)
                 token_count = len(
                     tiktoken.get_encoding(route.tokenizer_profile).encode(
@@ -228,22 +269,49 @@ class ProviderContextSummaryGenerator:
                 )
                 if token_count < 1 or token_count > SUMMARY_TOKEN_BUDGET:
                     last_error = "summary_output_too_large"
-                    if handle is not None:
-                        self._routing.record_invocation_failure(handle, last_error)
+                    if not self._claim_schema_retry(
+                        execution_id=execution_id,
+                        attempt_ordinal=attempt_ordinal,
+                        origin_error_code="summary_output_too_large",
+                    ):
+                        break
+                    repair_origin = "summary_output_too_large"
+                    attempt_ordinal += 1
                     continue
-                if handle is not None:
-                    self._routing.record_invocation_success(
-                        handle, dict(outcome.usage)
-                    )
                 return parsed.summary, token_count
-            except (ValidationError, ProviderProtocolError) as error:
+            except ValidationError as error:
                 last_error = getattr(error, "safe_code", "invalid_summary_output")
+                if not self._claim_schema_retry(
+                    execution_id=execution_id,
+                    attempt_ordinal=attempt_ordinal,
+                    origin_error_code="invalid_summary_output",
+                ):
+                    break
+                repair_origin = "invalid_summary_output"
+                attempt_ordinal += 1
+            except (ProviderOutputDecodeError, ProviderOutputSchemaError) as error:
+                last_error = error.safe_code
                 if handle is not None:
                     self._routing.record_invocation_failure(handle, last_error)
+                origin: SchemaRetryOriginCode = error.safe_code
+                if not self._claim_schema_retry(
+                    execution_id=execution_id,
+                    attempt_ordinal=attempt_ordinal,
+                    origin_error_code=origin,
+                ):
+                    break
+                repair_origin = origin
+                attempt_ordinal += 1
+            except ProviderProtocolError as error:
+                last_error = error.safe_code
+                if handle is not None:
+                    self._routing.record_invocation_failure(handle, last_error)
+                break
             except Exception as error:
                 last_error = getattr(error, "safe_code", "summary_provider_failed")
                 if handle is not None:
                     self._routing.record_invocation_failure(handle, last_error)
+                break
         raise ContextCompactionFailure("summary_generation_failed") from RuntimeError(
             last_error
         )

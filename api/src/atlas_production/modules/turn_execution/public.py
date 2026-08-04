@@ -23,6 +23,7 @@ from atlas_production.modules.turn_runtime.public import (
     ReasoningEvaluationV1,
     ReasoningPlanV2,
     RoutePolicyV1,
+    SchemaRetryOriginCode,
     TurnRouteSnapshotV2,
 )
 
@@ -404,12 +405,15 @@ class DeepReasoningEvaluationResultV1(_StrictModel):
     output_tokens: int = Field(default=0, ge=0)
 
 
-class ProvisionalEvidenceEvaluationInputV1(_StrictModel):
-    check_ordinal: int = Field(ge=1, le=5)
-    consistency: Literal[
-        "aligned", "conflict", "insufficient", "not_applicable", "unavailable"
-    ]
-    reason_code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+class GateCorrectionFeedbackV1(_StrictModel):
+    consistency: Literal["conflict", "insufficient"]
+    failing_segment_ids: list[Identity] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def require_unique_segment_ids(self) -> "GateCorrectionFeedbackV1":
+        if len(self.failing_segment_ids) != len(set(self.failing_segment_ids)):
+            raise ValueError("gate correction segment ids must be unique")
+        return self
 
 
 class DeepReasoningModel(Protocol):
@@ -418,7 +422,12 @@ class DeepReasoningModel(Protocol):
     ) -> int: ...
 
     def plan(
-        self, model_input: TurnModelInputV3, *, repair: bool
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        repair: bool,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningPlanResultV1: ...
 
     def estimate_replan_request_tokens(
@@ -437,6 +446,8 @@ class DeepReasoningModel(Protocol):
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningPlanResultV1: ...
 
     def estimate_evaluation_request_tokens(
@@ -447,7 +458,6 @@ class DeepReasoningModel(Protocol):
         proposal: FinalizeAnswerV1,
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
     ) -> int: ...
 
     def evaluate(
@@ -458,7 +468,8 @@ class DeepReasoningModel(Protocol):
         proposal: FinalizeAnswerV1,
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningEvaluationResultV1: ...
 
 
@@ -485,6 +496,7 @@ class StrictTurnModelSession(Protocol):
         model_input: TurnModelInputV3,
         *,
         finalize_only: bool,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> ModelStepResultV1: ...
 
     def estimate_next_request_tokens(
@@ -504,10 +516,17 @@ class StrictTurnModelSession(Protocol):
         self,
         evaluation: ReasoningEvaluationV1,
         *,
+        correction_kind: Literal["revise_only", "research_then_revise"],
+        gate_feedback: GateCorrectionFeedbackV1 | None = None,
         plan: ReasoningPlanV2 | None = None,
     ) -> None: ...
 
-    def accept_reasoning_limit(self, evaluation: ReasoningEvaluationV1) -> None: ...
+    def accept_reasoning_limit(
+        self,
+        evaluation: ReasoningEvaluationV1,
+        *,
+        gate_feedback: GateCorrectionFeedbackV1 | None = None,
+    ) -> None: ...
 
     def discard(self) -> None: ...
 
@@ -540,7 +559,7 @@ __all__ = [
     "ModelActionResultV1",
     "ModelContractViolationV1",
     "ModelStepResultV1",
-    "ProvisionalEvidenceEvaluationInputV1",
+    "GateCorrectionFeedbackV1",
     "StrictTurnModel",
     "StrictTurnModelSession",
     "TurnExecutionOrchestrator",

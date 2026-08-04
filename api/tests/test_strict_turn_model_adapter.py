@@ -37,8 +37,8 @@ from atlas_production.modules.turn_execution.public import (
     AnswerBehaviorInputV1,
     DeepReasoningContractError,
     FinalizeAnswerV1,
+    GateCorrectionFeedbackV1,
     ModelContractViolationV1,
-    ProvisionalEvidenceEvaluationInputV1,
     TurnModelHistorySummaryV3,
     TurnModelRecentExchangeV3,
 )
@@ -217,11 +217,6 @@ def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> Non
         ),
         observations=[],
         cycle=1,
-        provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
-            check_ordinal=1,
-            consistency="aligned",
-            reason_code="aligned",
-        ),
     )
     replan_result = model.replan(
         model_input.model_copy(update={"reasoning_plan": plan_result.plan}),
@@ -294,7 +289,54 @@ def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> Non
     assert "evidence" not in json.dumps(replan_payload["current_plan"])
 
 
-def test_process_evaluator_schema_excludes_accept_for_non_aligned_gate() -> None:
+def test_planner_and_replanner_schema_repairs_add_provider_visible_instruction() -> None:
+    plan_output = {
+        "next_objective": "Review the request.",
+        "completion_condition": "The request is covered.",
+        "item_summaries": ["Review the request."],
+    }
+    replan_output = {
+        "next_objective": "Close the evidence gap.",
+        "completion_condition": "The gap is resolved or disclosed.",
+        "completed_item_ids": [],
+        "skipped_item_ids": [],
+        "new_item_summaries": ["Find the missing evidence."],
+    }
+    routing = CapturingRouting(
+        [_completed(plan_output), _completed(plan_output), _completed(replan_output)]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=False)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+
+    model.plan(model_input, repair=False)
+    plan = model.plan(model_input, repair=True).plan
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="research_then_revise",
+        finding_codes=["evidence_gap"],
+        summary="Find support.",
+        score=ProcessScoreV1.model_validate(_process_score()),
+    )
+    model.replan(
+        model_input,
+        plan=plan,
+        evaluation=evaluation,
+        repair=True,
+    )
+
+    instructions = [
+        json.loads(request.messages[1].content)["instruction"]
+        for request in routing.requests
+    ]
+    repair_text = "The previous response violated the required JSON or schema contract."
+    assert repair_text not in instructions[0]
+    assert repair_text in instructions[1]
+    assert repair_text in instructions[2]
+    assert "Return exactly one JSON object" in instructions[1]
+    assert "provider_output_decode_error" not in instructions[1]
+
+
+def test_process_evaluator_is_independent_from_declared_evidence_gate() -> None:
     routing = CapturingRouting(
         [
             _completed(
@@ -321,28 +363,26 @@ def test_process_evaluator_schema_excludes_accept_for_non_aligned_gate() -> None
         ],
     )
 
-    with pytest.raises(DeepReasoningContractError):
-        model.evaluate(
-            model_input.model_copy(update={"reasoning_plan": plan}),
-            plan=plan,
-            proposal=FinalizeAnswerV1(
-                action="finalize_answer",
-                segments=[{"segment_id": "s1", "text": "Candidate"}],
-                claimed_evidence_handles=["kh_evidence_A"],
-            ),
-            observations=[],
-            cycle=1,
-            provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
-                check_ordinal=1,
-                consistency="conflict",
-                reason_code="declared_evidence_conflict",
-            ),
-        )
+    result = model.evaluate(
+        model_input.model_copy(update={"reasoning_plan": plan}),
+        plan=plan,
+        proposal=FinalizeAnswerV1(
+            action="finalize_answer",
+            segments=[{"segment_id": "s1", "text": "Candidate"}],
+            claimed_evidence_handles=["kh_evidence_A"],
+        ),
+        observations=[],
+        cycle=1,
+    )
 
+    assert result.evaluation.verdict == "accept"
     assert routing.schemas[0].schema["properties"]["verdict"]["enum"] == [
+        "accept",
         "revise_only",
         "research_then_revise",
     ]
+    payload = json.loads(routing.requests[0].messages[-1].content)
+    assert "provisional_declared_evidence" not in payload
 
 
 def test_process_evaluator_retains_revision_judgment_after_initial_cycle() -> None:
@@ -382,11 +422,6 @@ def test_process_evaluator_retains_revision_judgment_after_initial_cycle() -> No
         ),
         observations=[],
         cycle=2,
-        provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
-            check_ordinal=2,
-            consistency="aligned",
-            reason_code="aligned",
-        ),
     )
 
     assert result.evaluation.score is not None
@@ -458,11 +493,6 @@ def test_process_evaluator_invalid_semantics_have_safe_category(
             ),
             observations=[],
             cycle=1,
-            provisional_evidence=ProvisionalEvidenceEvaluationInputV1(
-                check_ordinal=1,
-                consistency="aligned",
-                reason_code="aligned",
-            ),
         )
 
     assert error.value.safe_code == safe_code
@@ -594,11 +624,47 @@ def test_revision_feedback_is_structured_and_contains_no_accuracy_claim() -> Non
         score=ProcessScoreV1.model_validate(_process_score()),
     )
 
-    session.accept_reasoning_feedback(evaluation)
+    session.accept_reasoning_feedback(
+        evaluation,
+        correction_kind="revise_only",
+    )
 
     payload = json.loads(session._messages[-1].content)
     assert payload["atlas_process_evaluation"]["verdict"] == "revise_only"
+    assert payload["atlas_runtime_correction_kind"] == "revise_only"
+    assert payload["atlas_gate_correction"] is None
     assert "accuracy" not in json.dumps(payload)
+
+
+def test_gate_only_feedback_preserves_independent_evaluator_accept() -> None:
+    routing = CapturingRouting([])
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    session = StrictProviderTurnModel(
+        routing, record_invocations=False
+    ).open_session(model_input)
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="accept",
+        summary="Process requirements are complete.",
+        score=ProcessScoreV1.model_validate(_process_score()),
+    )
+
+    session.accept_reasoning_feedback(
+        evaluation,
+        correction_kind="revise_only",
+        gate_feedback=GateCorrectionFeedbackV1(
+            consistency="insufficient",
+            failing_segment_ids=["s2"],
+        ),
+    )
+
+    payload = json.loads(session._messages[-1].content)
+    assert payload["atlas_process_evaluation"]["verdict"] == "accept"
+    assert payload["atlas_runtime_correction_kind"] == "revise_only"
+    assert payload["atlas_gate_correction"] == {
+        "consistency": "insufficient",
+        "failing_segment_ids": ["s2"],
+    }
 
 
 def test_history_is_untrusted_and_below_system_authority() -> None:

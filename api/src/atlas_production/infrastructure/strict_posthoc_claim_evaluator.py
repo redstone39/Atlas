@@ -17,6 +17,8 @@ from atlas_production.modules.model_routing.public import (
     ProviderIncomplete,
     ProviderImageContentPart,
     ProviderInvocationError,
+    ProviderOutputDecodeError,
+    ProviderOutputSchemaError,
     ProviderRefused,
     ProviderSystemMessage,
     ProviderTextContentPart,
@@ -35,18 +37,24 @@ from atlas_production.modules.result_governance.public import (
 from atlas_production.modules.retrieval.public import (
     DeclaredEvidenceSubsetV1,
 )
-from atlas_production.modules.turn_runtime.public import TurnRouteSnapshotV2
+from atlas_production.modules.turn_runtime.public import (
+    ClaimSchemaRetryV1,
+    RequestModelActionV1,
+    SchemaRetryOriginCode,
+    TurnRouteSnapshotV2,
+    TurnRuntimeBudgetExceeded,
+    TurnRuntimeOwner,
+)
 from atlas_production.providers import ProviderError, build_native_json_schema
 
 
 logger = logging.getLogger(__name__)
 
 
-class _ProviderAnswerAssessmentDecisionV1(BaseModel):
+class _ProviderAnswerAssessmentDecisionV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    consistency: Literal["aligned", "conflict", "insufficient"]
-    item_statuses: list[Literal["success", "failure"]]
+    item_outcomes: list[Literal["aligned", "conflict", "insufficient"]]
 
 
 class ClaimAssessmentUnavailable(RuntimeError):
@@ -66,13 +74,169 @@ def _digest(value: object) -> str:
 
 
 class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
-    """Use the execution-fixed tested route exactly once, without tools or retry."""
+    """Use the execution-fixed tested route without tools or transport retry."""
 
     def __init__(
-        self, routing: ModelRoutingRuntime, *, record_invocations: bool = True
+        self,
+        routing: ModelRoutingRuntime,
+        runtime: TurnRuntimeOwner | None = None,
+        *,
+        record_invocations: bool = True,
     ) -> None:
         self._routing = routing
+        self._runtime = runtime
         self._record_invocations = record_invocations
+
+    def _claim_schema_retry(
+        self,
+        *,
+        execution_id: str,
+        assessment_ordinal: int,
+        attempt_ordinal: int,
+        origin_error_code: SchemaRetryOriginCode,
+    ) -> bool:
+        if self._runtime is None:
+            return False
+        snapshot = self._runtime.snapshot(execution_id)
+        try:
+            claimed = self._runtime.claim_schema_retry(
+                ClaimSchemaRetryV1(
+                    execution_id=execution_id,
+                    fencing_token=snapshot.lease.fencing_token,
+                    claim_key=(
+                        "provisional_evidence_assessment:"
+                        f"{assessment_ordinal}:schema-retry:{attempt_ordinal}"
+                    ),
+                    origin_error_code=origin_error_code,
+                )
+            )
+            self._runtime.request_model_action(
+                RequestModelActionV1(
+                    execution_id=execution_id,
+                    expected_version=claimed.version,
+                    fencing_token=claimed.lease.fencing_token,
+                    context_tokens=0,
+                )
+            )
+        except TurnRuntimeBudgetExceeded:
+            return False
+        return True
+
+    def _invoke_decision(
+        self,
+        *,
+        execution_id: str,
+        assessment_ordinal: int,
+        assessment_input_digest: str,
+        answer_count: int,
+        attempt,
+        request: ProviderConversationRequest,
+        schema,
+    ):
+        schema_retry_attempt = 0
+        repair_origin: SchemaRetryOriginCode | None = None
+        while True:
+            provider_attempt_ordinal = assessment_ordinal * 10 + schema_retry_attempt
+            handle = None
+            if self._record_invocations:
+                handle = self._routing.prepare_invocation(
+                    attempt.route,
+                    schema,
+                    invocation_purpose="provisional_evidence_assessment",
+                    subject_kind="turn_execution",
+                    subject_ref=execution_id,
+                    execution_key=(
+                        f"{execution_id}:provisional-evidence:{assessment_ordinal}:"
+                        f"{schema_retry_attempt}"
+                    ),
+                    prompt_digest=assessment_input_digest,
+                    attempt_ordinal=provider_attempt_ordinal,
+                    repair_origin_error_codes=(
+                        [] if repair_origin is None else [repair_origin]
+                    ),
+                )
+                self._routing.record_invocation_started(handle)
+            try:
+                outcome = self._routing.invoke(attempt, request, schema)
+            except ProviderInvocationError as error:
+                if handle is not None:
+                    self._routing.record_invocation_failure(handle, error.safe_code)
+                if isinstance(
+                    error, (ProviderOutputDecodeError, ProviderOutputSchemaError)
+                ):
+                    origin: SchemaRetryOriginCode = error.safe_code
+                    if self._claim_schema_retry(
+                        execution_id=execution_id,
+                        assessment_ordinal=assessment_ordinal,
+                        attempt_ordinal=schema_retry_attempt + 1,
+                        origin_error_code=origin,
+                    ):
+                        repair_origin = origin
+                        schema_retry_attempt += 1
+                        continue
+                reason_code: AssessmentReasonCodeV2 = (
+                    "provider_timeout"
+                    if "timeout" in error.safe_code
+                    else "provider_failed"
+                )
+                raise ClaimAssessmentUnavailable(
+                    "provisional evidence assessment provider failed",
+                    reason_code=reason_code,
+                ) from error
+            if not isinstance(outcome, ProviderCompleted):
+                if handle is not None:
+                    self._routing.record_invocation_failure(
+                        handle,
+                        "provisional_evidence_assessment_refused"
+                        if isinstance(outcome, ProviderRefused)
+                        else "provisional_evidence_assessment_incomplete",
+                    )
+                if isinstance(outcome, (ProviderRefused, ProviderIncomplete)):
+                    raise ClaimAssessmentUnavailable(
+                        "provisional evidence assessment did not complete",
+                        reason_code=(
+                            "provider_refused"
+                            if isinstance(outcome, ProviderRefused)
+                            else "provider_incomplete"
+                        ),
+                    )
+                raise ClaimAssessmentUnavailable(
+                    "provisional evidence assessment provider outcome is invalid",
+                    reason_code="provider_failed",
+                )
+            if handle is not None:
+                self._routing.record_invocation_success(handle, dict(outcome.usage))
+            try:
+                decision = _ProviderAnswerAssessmentDecisionV2.model_validate(
+                    outcome.output
+                )
+                if len(decision.item_outcomes) != answer_count:
+                    raise ValueError("provisional evidence item count is invalid")
+            except (ValidationError, ValueError) as error:
+                origin = (
+                    "provisional_evidence_semantic_shape_invalid"
+                    if isinstance(error, ValidationError)
+                    else "provisional_evidence_item_count_invalid"
+                )
+                logger.warning(
+                    "provisional evidence output rejected execution_id=%s safe_code=%s",
+                    execution_id,
+                    origin,
+                )
+                if self._claim_schema_retry(
+                    execution_id=execution_id,
+                    assessment_ordinal=assessment_ordinal,
+                    attempt_ordinal=schema_retry_attempt + 1,
+                    origin_error_code=origin,
+                ):
+                    repair_origin = origin
+                    schema_retry_attempt += 1
+                    continue
+                raise ClaimAssessmentUnavailable(
+                    "provisional evidence assessment output is invalid",
+                    reason_code="invalid_output",
+                ) from error
+            return decision, outcome, handle
 
     def assess(
         self,
@@ -157,7 +321,7 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
             "For every answer item, determine whether its material factual content is "
             "consistent with and reasonably supported by the provided evidence, "
             "without materially exceeding that evidence.\n\n"
-            "Mark an answer item as success only when:\n"
+            "Mark an answer item as aligned only when:\n"
             "1. Its material factual content is explicit in the evidence or is a "
             "faithful paraphrase, summary, comparison, or direct grounded conclusion "
             "from that evidence.\n"
@@ -166,23 +330,30 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
             "inference.\n"
             "3. Non-material conversational framing, restating the question, or naming "
             "the adopted referent does not by itself make the item fail.\n\n"
-            "Mark it as failure when:\n"
-            "1. Its material factual content conflicts with the evidence.\n"
-            "2. It adds a material fact, number, entity, relationship, causal claim, "
+            "Evaluate every material claim independently. Evidence supports a claim "
+            "only when it matches all material dimensions of that claim, including "
+            "the applicable entity, component or attribute, operating mode or "
+            "interface, condition, scope or quantifier, polarity, value, and degree "
+            "of certainty.\n"
+            "Do not treat related but different entities, components, attributes, "
+            "modes, interfaces, conditions, documents, or measurement contexts as "
+            "interchangeable. The same value or terminology appearing in different "
+            "contexts does not establish equivalence.\n"
+            "A comparative, combined, or universal claim requires evidence for every "
+            "material member and every stated dimension. Partial support for some "
+            "members or conditions is insufficient for the broader claim.\n"
+            "Evaluate each claim as written. A qualification, caveat, or narrower "
+            "statement elsewhere in the answer does not repair an unsupported or "
+            "overbroad claim.\n\n"
+            "Mark an answer item as conflict when its material factual content "
+            "contradicts the evidence, applies the evidence to the wrong subject or "
+            "referent, or fails to disclose a visible material conflict.\n"
+            "Mark an answer item as insufficient when there is no material conflict, "
+            "but it adds a material fact, number, entity, relationship, causal claim, "
             "or materially stronger certainty that the evidence cannot reasonably "
-            "support.\n"
-            "3. It applies the evidence to the wrong subject or referent.\n"
-            "4. The evidence is insufficient to reasonably support a material "
-            "conclusion without outside knowledge or speculative inference.\n\n"
-            "Set the answer-level consistency to conflict when any declared evidence "
-            "materially contradicts the answer, is applied to the wrong subject, or a "
-            "visible material conflict is not disclosed.\n"
-            "Set it to insufficient when there is no material conflict but the answer "
-            "exceeds the supplied evidence or depends on outside knowledge or "
-            "speculative inference.\n"
-            "Set it to aligned only when all material factual content is reasonably "
-            "supported and visible material conflicts are disclosed.\n\n"
-            "An answer item containing no factual statement may be marked success.\n\n"
+            "support, or it otherwise depends on outside knowledge or speculative "
+            "inference.\n\n"
+            "An answer item containing no factual statement may be marked aligned.\n\n"
             "Use only the supplied evidence_items.\n"
             "Do not search for additional evidence.\n"
             "Do not use outside knowledge.\n"
@@ -191,7 +362,7 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
             "from unsupported speculation.\n"
             "Do not correct, rewrite, explain, or expand the answer.\n"
             "Do not assess whether the answer fully addresses the user's request.\n\n"
-            "Return exactly one item_statuses entry for every answer item.\n"
+            "Return exactly one item_outcomes entry for every answer item.\n"
             "Preserve the input order.\n"
             "Do not return or reproduce answer item ids. Runtime owns identity mapping.\n"
             "Do not return explanations or additional text.\n\n"
@@ -227,9 +398,9 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
                 "claim assessment deadline elapsed", reason_code="deadline_elapsed"
             )
         try:
-            application_schema = _ProviderAnswerAssessmentDecisionV1.model_json_schema()
+            application_schema = _ProviderAnswerAssessmentDecisionV2.model_json_schema()
             schema = build_native_json_schema(
-                "provisional_declared_evidence_decision_v2",
+                "provisional_declared_evidence_decision_v3",
                 application_schema,
             )
             request = ProviderConversationRequest(
@@ -263,129 +434,47 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
                 "provisional evidence assessment tokenizer is unavailable",
                 reason_code="tokenizer_unavailable",
             ) from error
-        handle = None
-        if self._record_invocations:
-            handle = self._routing.prepare_invocation(
-                attempt.route,
-                schema,
-                invocation_purpose="provisional_evidence_assessment",
-                subject_kind="turn_execution",
-                subject_ref=execution_id,
-                execution_key=f"{execution_id}:provisional-evidence:{assessment_ordinal}",
-                prompt_digest=assessment_input_digest,
-                attempt_ordinal=assessment_ordinal,
-            )
-            self._routing.record_invocation_started(handle)
-        try:
-            outcome = self._routing.invoke(attempt, request, schema)
-        except ProviderInvocationError as error:
-            if handle is not None:
-                self._routing.record_invocation_failure(
-                    handle,
-                    getattr(error, "safe_code", "provisional_evidence_assessment_failed"),
+        decision, outcome, handle = self._invoke_decision(
+            execution_id=execution_id,
+            assessment_ordinal=assessment_ordinal,
+            assessment_input_digest=assessment_input_digest,
+            answer_count=len(answer_ids),
+            attempt=attempt,
+            request=request,
+            schema=schema,
+        )
+        if "conflict" in decision.item_outcomes:
+            consistency: Literal["aligned", "conflict", "insufficient"] = "conflict"
+        elif "insufficient" in decision.item_outcomes:
+            consistency = "insufficient"
+        else:
+            consistency = "aligned"
+        result = PostHocAnswerAssessmentEnvelopeV2(
+            consistency=consistency,
+            results=[
+                PostHocAnswerAssessmentV2(
+                    id=answer_id,
+                    status="success" if item_outcome == "aligned" else "failure",
                 )
-            reason_code: AssessmentReasonCodeV2 = (
-                "provider_timeout"
-                if "timeout" in getattr(error, "safe_code", "")
-                else "provider_failed"
-            )
-            raise ClaimAssessmentUnavailable(
-                "provisional evidence assessment provider failed", reason_code=reason_code
-            ) from error
-        if isinstance(outcome, ProviderCompleted):
-            try:
-                decision = _ProviderAnswerAssessmentDecisionV1.model_validate(
-                    outcome.output
+                for answer_id, item_outcome in zip(
+                    answer_ids, decision.item_outcomes, strict=True
                 )
-            except ValidationError as error:
-                safe_code = "provisional_evidence_semantic_shape_invalid"
-                if handle is not None:
-                    self._routing.record_invocation_failure(
-                        handle, safe_code
-                    )
-                logger.warning(
-                    "provisional evidence output rejected execution_id=%s safe_code=%s",
-                    execution_id,
-                    safe_code,
-                )
-                raise ClaimAssessmentUnavailable(
-                    "provisional evidence assessment output is invalid",
-                    reason_code="invalid_output",
-                ) from error
-            if len(decision.item_statuses) != len(answer_ids):
-                safe_code = "provisional_evidence_item_count_invalid"
-                if handle is not None:
-                    self._routing.record_invocation_failure(
-                        handle, safe_code
-                    )
-                logger.warning(
-                    "provisional evidence output rejected execution_id=%s safe_code=%s",
-                    execution_id,
-                    safe_code,
-                )
-                raise ClaimAssessmentUnavailable(
-                    "provisional evidence assessment item count is invalid",
-                    reason_code="invalid_output",
-                )
-            try:
-                result = PostHocAnswerAssessmentEnvelopeV2(
-                    consistency=decision.consistency,
-                    results=[
-                        PostHocAnswerAssessmentV2(id=answer_id, status=status)
-                        for answer_id, status in zip(
-                            answer_ids, decision.item_statuses, strict=True
-                        )
-                    ],
-                )
-            except (ValidationError, ValueError) as error:
-                safe_code = "provisional_evidence_consistency_invalid"
-                if handle is not None:
-                    self._routing.record_invocation_failure(handle, safe_code)
-                logger.warning(
-                    "provisional evidence output rejected execution_id=%s safe_code=%s",
-                    execution_id,
-                    safe_code,
-                )
-                raise ClaimAssessmentUnavailable(
-                    "provisional evidence assessment consistency is invalid",
-                    reason_code="invalid_output",
-                ) from error
-            if handle is not None:
-                self._routing.record_invocation_success(handle, dict(outcome.usage))
-            return PostHocAnswerAssessmentResultV2(
-                state="completed",
-                consistency=result.consistency,
-                reason_code=(
-                    "aligned"
-                    if result.consistency == "aligned"
-                    else f"declared_evidence_{result.consistency}"
-                ),
-                answer_digest=answer_digest,
-                declared_subset_digest=declared_evidence_subset.digest,
-                visual_image_digests=visual_image_digests,
-                results=result.results,
-                assessment_input_digest=assessment_input_digest,
-                assessment_output_digest=_digest(result.model_dump(mode="json")),
-            )
-        if handle is not None:
-            self._routing.record_invocation_failure(
-                handle,
-                "provisional_evidence_assessment_refused"
-                if isinstance(outcome, ProviderRefused)
-                else "provisional_evidence_assessment_incomplete",
-            )
-        if isinstance(outcome, (ProviderRefused, ProviderIncomplete)):
-            raise ClaimAssessmentUnavailable(
-                "provisional evidence assessment did not complete",
-                reason_code=(
-                    "provider_refused"
-                    if isinstance(outcome, ProviderRefused)
-                    else "provider_incomplete"
-                ),
-            )
-        raise ClaimAssessmentUnavailable(
-            "provisional evidence assessment provider outcome is invalid",
-            reason_code="provider_failed",
+            ],
+        )
+        return PostHocAnswerAssessmentResultV2(
+            state="completed",
+            consistency=result.consistency,
+            reason_code=(
+                "aligned"
+                if result.consistency == "aligned"
+                else f"declared_evidence_{result.consistency}"
+            ),
+            answer_digest=answer_digest,
+            declared_subset_digest=declared_evidence_subset.digest,
+            visual_image_digests=visual_image_digests,
+            results=result.results,
+            assessment_input_digest=assessment_input_digest,
+            assessment_output_digest=_digest(result.model_dump(mode="json")),
         )
 
 

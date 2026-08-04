@@ -60,6 +60,7 @@ def snapshot() -> ExecutionSnapshotV1:
         provider_invocations=4,
         context_tokens=100,
         tool_tokens=80,
+        schema_retries=0,
     )
     lease = ExecutionLeaseV1(
         execution_id="execution-1",

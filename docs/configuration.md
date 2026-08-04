@@ -44,6 +44,8 @@ Provider-specific keys to `.env`.
 
 Model routes carry the bounded runtime policy used by both standard and deep
 turns. `max_reasoning_revision_cycles` accepts `0..3` and defaults to `2`.
+`max_schema_retries_per_turn` accepts `1..3`; its selected value is fixed in
+each accepted execution and shared by every structured-output repair stage.
 Provider capacity must satisfy:
 
 ```text
@@ -56,6 +58,21 @@ This reserves capacity for planning, candidate generation, provisional evidence
 assessment, evaluation, bounded revision, and terminal governance. System Admin
 keeps these limits in the route's technical details; changing them affects new
 executions only.
+
+The initial structured-output attempt does not consume the schema retry budget.
+A decode, schema, or stage-local structured-output contract failure must claim
+the durable counter before a repair invocation is created. Transport, timeout,
+authentication, rate-limit, refusal, routing, authorization, deadline, and
+physical-limit failures do not consume this budget.
+
+These limits have distinct scopes. `max_provider_invocations` is the hard limit
+for model actions within one execution. `max_total_tokens_per_conversation` is
+the conversation-level soft cost limit and aggregates completed normalized
+Provider usage from context preparation, answer generation, evaluation, and
+evidence assessment. Atlas checks that total before accepting a new turn; an
+already accepted turn may cross the threshold, and the following new turn is
+then rejected. Provider-completed attempts retain their observed usage even
+when Atlas rejects the structured output and performs a bounded repair.
 
 ## Runtime inputs
 

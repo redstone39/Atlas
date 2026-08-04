@@ -79,6 +79,7 @@ class RoutePolicyV1(_StrictModel):
     max_unique_evidence: int = Field(default=40, ge=0)
     max_provider_invocations: int = Field(default=26, ge=6)
     max_reasoning_revision_cycles: int = Field(default=2, ge=0, le=3)
+    max_schema_retries_per_turn: int = Field(default=1, ge=1, le=3)
     context_token_budget: int = Field(default=272000, ge=1)
     tool_token_budget: int = Field(default=64000, ge=1)
     deadline_seconds: int = Field(default=240, ge=1)
@@ -347,6 +348,7 @@ class BudgetSnapshotV1(_StrictModel):
     provider_invocations: int = Field(ge=0)
     context_tokens: int = Field(ge=0)
     tool_tokens: int = Field(ge=0)
+    schema_retries: int = Field(ge=0)
 
 
 class ExecutionLeaseV1(_StrictModel):
@@ -467,6 +469,28 @@ class RequestModelActionV1(_StrictModel):
     fencing_token: int = Field(ge=1)
     context_tokens: int = Field(ge=0)
     contract_repair: bool = False
+
+
+SchemaRetryOriginCode = Literal[
+    "provider_output_decode_error",
+    "provider_output_schema_error",
+    "invalid_summary_output",
+    "summary_output_too_large",
+    "invalid_resolver_output",
+    "invalid_rewrite_output",
+    "deep_reasoning_plan_invalid",
+    "deep_reasoning_replan_invalid",
+    "deep_reasoning_evaluation_semantic_shape_invalid",
+    "provisional_evidence_semantic_shape_invalid",
+    "provisional_evidence_item_count_invalid",
+]
+
+
+class ClaimSchemaRetryV1(_StrictModel):
+    execution_id: Identity
+    fencing_token: int = Field(ge=1)
+    claim_key: Identity
+    origin_error_code: SchemaRetryOriginCode
 
 
 class RecordReasoningProgressV1(_StrictModel):
@@ -683,6 +707,8 @@ class TurnRuntimeOwner(Protocol):
     def bind_context(self, command: BindContextV1) -> ExecutionSnapshotV1: ...
 
     def request_model_action(self, command: RequestModelActionV1) -> ExecutionSnapshotV1: ...
+
+    def claim_schema_retry(self, command: ClaimSchemaRetryV1) -> ExecutionSnapshotV1: ...
 
     def record_reasoning_progress(
         self, command: RecordReasoningProgressV1

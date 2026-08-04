@@ -448,6 +448,40 @@ def test_completed_invalid_rewrite_output_counts_usage_and_preserves_ref() -> No
     assert projections.value.rewrite_failure_code == "invalid_rewrite_output"
 
 
+def test_invalid_resolver_output_retries_with_shared_turn_budget() -> None:
+    routing = _Routing(
+        [
+            _completed({"wrong_field": "value"}, 1),
+            _completed({"resolver_context": "文件 A。"}, 2),
+            _completed({"rewritten_question": "比較文件 A 與上一份文件。"}, 3),
+        ]
+    )
+    projections = _Projections()
+    runtime = Runtime()
+    snapshot = runtime.snapshot_value.model_copy(
+        update={
+            "execution_id": "exec-1",
+            "response_language": "en",
+            "applied_guidance_revision": 3,
+            "applied_guidance_digest": "d" * 64,
+            "deadline_at": datetime.now(timezone.utc) + timedelta(seconds=120),
+        }
+    )
+
+    rewritten = ProviderTurnInputProjector(
+        routing, projections, runtime
+    ).project(snapshot=snapshot, recent_tail=_history(), summary=None)
+
+    assert rewritten == "比較文件 A 與上一份文件。"
+    assert len(routing.requests) == 3
+    assert runtime.snapshot_value.budget.schema_retries == 1
+    assert routing.prepared[1].repair_origin_error_codes == [
+        "invalid_resolver_output"
+    ]
+    assert routing.failed == []
+    assert projections.value.rewrite_invocation_ref == "invocation-3"
+
+
 def test_transport_valid_semantically_wrong_rewrite_proceeds_without_validation() -> None:
     routing = _Routing(
         [

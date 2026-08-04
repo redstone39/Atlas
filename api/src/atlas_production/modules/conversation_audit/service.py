@@ -16,7 +16,7 @@ from atlas_production.modules.workspace_turn.public import (
     WorkspaceTurnError,
 )
 
-from .api_models import AdminConversationListResult, RuntimeTraceDetail
+from .api_models import AdminConversationListResult, BudgetSnapshotV1, RuntimeTraceDetail
 from .contracts import ConversationAuditError
 
 
@@ -117,7 +117,9 @@ class ConversationAuditService:
             failure_code=snapshot.terminal_failure_code,
             applied_guidance_revision=snapshot.applied_guidance_revision,
             applied_guidance_digest=snapshot.applied_guidance_digest,
-            budget=snapshot.budget,
+            budget=BudgetSnapshotV1.model_validate(
+                snapshot.budget.model_dump(exclude={"schema_retries"})
+            ),
             document_discovery=document_discovery,
             events=events,
             created_at=snapshot.created_at,

@@ -117,7 +117,10 @@ describe("EvidenceViewerDialog", () => {
 
     const canvas = screen.getByLabelText("Authorized PDF evidence page");
     await waitFor(() => expect(canvas).not.toHaveClass("invisible"));
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-size", "wide");
     expect(canvas.tagName.toLowerCase()).toBe("canvas");
+    expect(canvas).toHaveClass("max-w-full");
+    expect(canvas).toHaveStyle({ width: "400px", height: "auto" });
     expect(pdfMocks.getDocument).toHaveBeenCalledOnce();
     expect(pdfMocks.workerOptions.workerSrc).toBe("pdf-worker");
     expect(pdfRender.getPage).toHaveBeenCalledWith(1);

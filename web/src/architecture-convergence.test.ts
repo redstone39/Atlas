@@ -214,6 +214,8 @@ describe("frontend compatibility convergence", () => {
       "utf8",
     );
     expect(dialogSource).toContain("sm:max-w-3xl");
+    expect(dialogSource).toContain('size?: "default" | "wide"');
+    expect(dialogSource).toContain("data-[size=wide]:sm:max-w-6xl");
     expect(alertDialogSource).toContain("sm:max-w-3xl");
     expect(alertDialogSource).not.toMatch(/data-\[size=sm\]:max-w-/);
 

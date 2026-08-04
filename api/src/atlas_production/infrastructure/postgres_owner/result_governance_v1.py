@@ -90,6 +90,7 @@ def _semantic_payload_v2(
         "assessment_results": [
             item.model_dump(mode="json") for item in command.assessment_results
         ],
+        "delivery_constraint": command.delivery_constraint,
     }
 
 
@@ -220,6 +221,11 @@ def _governed_segments_v2(
         item.status == "failure" for item in command.assessment_results
     ):
         reason_codes.append("answer_item_failed")
+    if command.delivery_constraint == "correction_limit_reached":
+        # The limit-final candidate is deliberately not sent through another
+        # Process Evaluator cycle, so the combined soft review is incomplete
+        # even when its final declared-evidence Gate aligns.
+        reason_codes.append("assessment_not_completed")
     if reason_codes:
         return governed_segments, "questionable", reason_codes
     return governed_segments, "evidence_aligned", ["evidence_aligned"]

@@ -85,6 +85,7 @@ def _snapshot(turn: str, execution: str, context_ref: str) -> ExecutionSnapshotV
             provider_invocations=2,
             context_tokens=10,
             tool_tokens=10,
+            schema_retries=0,
         ),
         grant_ref=f"grant-{execution}",
         catalog_ref=f"catalog-{execution}",

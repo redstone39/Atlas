@@ -3,13 +3,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
-from threading import Barrier
+from threading import Barrier, Event, current_thread
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, event, select, update
 
 from atlas_production.infrastructure.persistence.turn_runtime import (
     AtlasTurnAcceptanceResourceRow,
+    AtlasTurnBudgetCounterRow,
     AtlasTurnExecutionLeaseRow,
     AtlasTurnExecutionRow,
     AtlasTurnRuntimeEventRow,
@@ -35,6 +36,7 @@ from atlas_production.modules.turn_runtime.public import (
     BeginResultGovernanceV1,
     BeginToolInvocationV1,
     BindContextV1,
+    ClaimSchemaRetryV1,
     CommitTerminalV1,
     CompleteReleaseIntentV1,
     CompleteToolInvocationV1,
@@ -120,6 +122,7 @@ def _allocate(
     *,
     max_tools: int = 2,
     max_catalog_pages: int = 2,
+    max_schema_retries: int = 1,
     reasoning_mode: str = "standard",
     max_reasoning_revision_cycles: int | None = None,
 ) -> object:
@@ -145,6 +148,7 @@ def _allocate(
                     max_tools + 4 * revision_cycles + 6
                 ),
                 max_reasoning_revision_cycles=revision_cycles,
+                max_schema_retries_per_turn=max_schema_retries,
                 context_token_budget=20,
                 tool_token_budget=20,
                 deadline_seconds=120,
@@ -572,6 +576,187 @@ def test_allocation_exact_replay_conflict_and_competing_cas(
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(lambda _: compete(), range(2))) == ["accepted", "stale"]
+
+
+def test_schema_retry_claim_is_turn_scoped_idempotent_and_bounded(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(owner, _allocate(owner, "schema-retry-bounded"))
+    assert snapshot.policy.max_schema_retries_per_turn == 1
+    assert snapshot.budget.schema_retries == 0
+
+    command = ClaimSchemaRetryV1(
+        execution_id=snapshot.execution_id,
+        fencing_token=snapshot.lease.fencing_token,
+        claim_key="context-resolver-repair-1",
+        origin_error_code="provider_output_decode_error",
+    )
+    claimed = owner.claim_schema_retry(command)
+    assert claimed.budget.schema_retries == 1
+    assert owner.claim_schema_retry(command).budget.schema_retries == 1
+
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        owner.claim_schema_retry(
+            command.model_copy(
+                update={
+                    "claim_key": "deep-plan-repair-1",
+                    "origin_error_code": "deep_reasoning_plan_invalid",
+                }
+            )
+        )
+    assert owner.snapshot(snapshot.execution_id).budget.schema_retries == 1
+
+
+def test_competing_schema_retry_claims_cannot_overspend(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(owner, _allocate(owner, "schema-retry-competing"))
+    barrier = Barrier(2)
+
+    def compete(ordinal: int) -> str:
+        barrier.wait()
+        try:
+            owner.claim_schema_retry(
+                ClaimSchemaRetryV1(
+                    execution_id=snapshot.execution_id,
+                    fencing_token=snapshot.lease.fencing_token,
+                    claim_key=f"repair-{ordinal}",
+                    origin_error_code="provider_output_schema_error",
+                )
+            )
+            return "claimed"
+        except TurnRuntimeBudgetExceeded:
+            return "exhausted"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(compete, (1, 2))) == ["claimed", "exhausted"]
+    with postgres_runtime.session_factory() as session:
+        budget = session.get(AtlasTurnBudgetCounterRow, snapshot.execution_id)
+        assert budget is not None and budget.schema_retries == 1
+
+
+def test_two_stage_schema_retry_claims_persist_and_third_is_denied(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "schema-retry-two-stages", max_schema_retries=2),
+    )
+
+    first = owner.claim_schema_retry(
+        ClaimSchemaRetryV1(
+            execution_id=snapshot.execution_id,
+            fencing_token=snapshot.lease.fencing_token,
+            claim_key="context-summary-repair-1",
+            origin_error_code="summary_output_too_large",
+        )
+    )
+    assert first.budget.schema_retries == 1
+
+    reloaded_owner = _owner(postgres_runtime)
+    reloaded = reloaded_owner.snapshot(snapshot.execution_id)
+    assert reloaded.budget.schema_retries == 1
+    second = reloaded_owner.claim_schema_retry(
+        ClaimSchemaRetryV1(
+            execution_id=snapshot.execution_id,
+            fencing_token=reloaded.lease.fencing_token,
+            claim_key="deep-plan-repair-1",
+            origin_error_code="deep_reasoning_plan_invalid",
+        )
+    )
+    assert second.budget.schema_retries == 2
+
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        reloaded_owner.claim_schema_retry(
+            ClaimSchemaRetryV1(
+                execution_id=snapshot.execution_id,
+                fencing_token=second.lease.fencing_token,
+                claim_key="provisional-evidence-repair-1",
+                origin_error_code="provisional_evidence_item_count_invalid",
+            )
+        )
+    assert reloaded_owner.snapshot(snapshot.execution_id).budget.schema_retries == 2
+
+
+def test_schema_retry_claim_serializes_with_terminal_transition(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(owner, _allocate(owner, "schema-retry-terminal-race"))
+    command = ClaimSchemaRetryV1(
+        execution_id=snapshot.execution_id,
+        fencing_token=snapshot.lease.fencing_token,
+        claim_key="answer-repair-1",
+        origin_error_code="provider_output_schema_error",
+    )
+    claim_locked = Event()
+    release_claim = Event()
+    terminal_started = Event()
+    completion_order: list[str] = []
+
+    def pause_after_execution_lock(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if (
+            current_thread().name.startswith("schema-claim")
+            and "atlas_turn_executions" in statement
+            and "FOR UPDATE" in statement
+        ):
+            claim_locked.set()
+            assert release_claim.wait(timeout=5)
+
+    event.listen(
+        postgres_runtime.engine,
+        "after_cursor_execute",
+        pause_after_execution_lock,
+    )
+    try:
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="schema-claim"
+        ) as pool:
+            def claim_retry():
+                result = owner.claim_schema_retry(command)
+                completion_order.append("claim")
+                return result
+
+            claim_future = pool.submit(claim_retry)
+            assert claim_locked.wait(timeout=5)
+
+            def terminal_transition() -> None:
+                terminal_started.set()
+                with postgres_runtime.session_factory() as session, session.begin():
+                    session.execute(
+                        update(AtlasTurnExecutionRow)
+                        .where(
+                            AtlasTurnExecutionRow.execution_id
+                            == snapshot.execution_id
+                        )
+                        .values(
+                            state=ExecutionState.TERMINAL_FAILED.value,
+                            terminal_failure_code="test_terminal_transition",
+                        )
+                    )
+                completion_order.append("terminal")
+
+            terminal_future = pool.submit(terminal_transition)
+            assert terminal_started.wait(timeout=5)
+            release_claim.set()
+            assert claim_future.result(timeout=5).budget.schema_retries == 1
+            terminal_future.result(timeout=5)
+    finally:
+        release_claim.set()
+        event.remove(
+            postgres_runtime.engine,
+            "after_cursor_execute",
+            pause_after_execution_lock,
+        )
+
+    assert completion_order == ["claim", "terminal"]
+    with pytest.raises(TurnRuntimeCurrentnessConflict):
+        owner.claim_schema_retry(command)
 
 
 def test_lease_renewal_is_fenced_and_expiry_is_terminal_no_takeover(

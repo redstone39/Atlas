@@ -391,7 +391,7 @@ def build_api_composition(
         result_governance=strict_results,
         citation=strict_citations,
         audit=strict_audit,
-        evaluator=StrictPostHocClaimEvaluator(model_routing),
+        evaluator=StrictPostHocClaimEvaluator(model_routing, strict_runtime),
         reasoning_model=strict_turn_model,
     )
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
@@ -416,9 +416,11 @@ def build_api_composition(
         answer_behavior=answer_behavior_owner,
         context_preparer=SynchronousContextCompactor(
             turn_model=strict_turn_model,
-            summary_generator=ProviderContextSummaryGenerator(model_routing),
+            summary_generator=ProviderContextSummaryGenerator(
+                model_routing, strict_runtime
+            ),
             input_projector=ProviderTurnInputProjector(
-                model_routing, strict_contexts
+                model_routing, strict_contexts, strict_runtime
             ),
             answer_behavior=answer_behavior_owner,
         ),

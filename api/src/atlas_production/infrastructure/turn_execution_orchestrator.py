@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
-from typing import Callable, Literal, Protocol, Sequence
+from typing import Callable, Literal, Protocol, Sequence, cast
 
 from pydantic import ValidationError
 
@@ -50,7 +50,7 @@ from atlas_production.modules.turn_execution.public import (
     DeepReasoningContractError,
     DeepReasoningModel,
     FinalizeAnswerV1,
-    ProvisionalEvidenceEvaluationInputV1,
+    GateCorrectionFeedbackV1,
     ModelContractViolationV1,
     StrictTurnModel,
     TurnExecutionOrchestrator,
@@ -61,6 +61,7 @@ from atlas_production.modules.turn_runtime.public import (
     BeginToolInvocationV1,
     CommitTerminalV1,
     CompleteToolInvocationV1,
+    ClaimSchemaRetryV1,
     ExecutionSnapshotV1,
     ExecutionState,
     FailCarrierExecutionV1,
@@ -75,6 +76,7 @@ from atlas_production.modules.turn_runtime.public import (
     ReasoningTraceV3,
     RecordReasoningProgressV1,
     RequestModelActionV1,
+    SchemaRetryOriginCode,
     TERMINAL_STATES,
     TurnRuntimeOwner,
     TurnRuntimeBudgetExceeded,
@@ -83,6 +85,15 @@ from atlas_production.modules.turn_runtime.public import (
 
 logger = logging.getLogger(__name__)
 _DISCOVERY_PAGE_SIZE = 10
+_SCHEMA_RETRY_ORIGIN_CODES = frozenset(
+    {
+        "provider_output_decode_error",
+        "provider_output_schema_error",
+        "deep_reasoning_plan_invalid",
+        "deep_reasoning_replan_invalid",
+        "deep_reasoning_evaluation_semantic_shape_invalid",
+    }
+)
 ReasoningTerminationReason = Literal[
     "completed",
     "planner_failed",
@@ -116,8 +127,40 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def _gate_correction_feedback(
+    assessment: ProvisionalEvidenceAssessmentV1,
+) -> GateCorrectionFeedbackV1 | None:
+    if assessment.consistency not in {"conflict", "insufficient"}:
+        return None
+    return GateCorrectionFeedbackV1(
+        consistency=assessment.consistency,
+        failing_segment_ids=[
+            result.id for result in assessment.results if result.status == "failure"
+        ],
+    )
+
+
+def _merged_correction_kind(
+    *,
+    evaluation: ReasoningEvaluationV1,
+    gate_feedback: GateCorrectionFeedbackV1 | None,
+) -> Literal["revise_only", "research_then_revise"] | None:
+    if evaluation.verdict == "research_then_revise":
+        return "research_then_revise"
+    if evaluation.verdict == "revise_only" or gate_feedback is not None:
+        return "revise_only"
+    return None
+
+
 def _ref(kind: str, execution_id: str) -> str:
     return f"{kind}:{hashlib.sha256(f'{kind}:{execution_id}'.encode()).hexdigest()}"
+
+
+def _schema_retry_origin(error: Exception) -> SchemaRetryOriginCode | None:
+    safe_code = getattr(error, "safe_code", "")
+    if safe_code not in _SCHEMA_RETRY_ORIGIN_CODES:
+        return None
+    return cast(SchemaRetryOriginCode, safe_code)
 
 
 def _next_reasoning_trace(
@@ -320,6 +363,33 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._evaluator = evaluator
         self._reasoning_model = reasoning_model
 
+    def _claim_schema_retry(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        purpose: str,
+        semantic_ordinal: int,
+        error: Exception,
+    ) -> tuple[ExecutionSnapshotV1, SchemaRetryOriginCode] | None:
+        origin = _schema_retry_origin(error)
+        if origin is None:
+            return None
+        next_ordinal = snapshot.budget.schema_retries + 1
+        try:
+            claimed = self._runtime.claim_schema_retry(
+                ClaimSchemaRetryV1(
+                    execution_id=snapshot.execution_id,
+                    fencing_token=snapshot.lease.fencing_token,
+                    claim_key=(
+                        f"{purpose}:{semantic_ordinal}:schema-retry:{next_ordinal}"
+                    ),
+                    origin_error_code=origin,
+                )
+            )
+        except TurnRuntimeBudgetExceeded:
+            return None
+        return claimed, origin
+
     def _record_reasoning_progress(
         self,
         snapshot: ExecutionSnapshotV1,
@@ -352,6 +422,10 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         proposal: FinalizeAnswerV1,
         visual_images_by_handle: dict[str, VisualImagePayloadV1],
         assessment_ordinal: int,
+        assessment_cache: dict[
+            tuple[str, str, tuple[str, ...], str],
+            ProvisionalEvidenceAssessmentV1,
+        ],
     ) -> tuple[ExecutionSnapshotV1, ProvisionalEvidenceAssessmentV1]:
         if snapshot.catalog_ref is None:
             raise ValueError("candidate assessment lost its catalog ref")
@@ -373,19 +447,39 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             "declared_subset_digest": declared_subset.digest,
             "visual_image_digests": visual_image_digests,
         }
+        cache_key = (
+            answer_digest,
+            declared_subset.digest,
+            tuple(visual_image_digests),
+            "provisional-declared-evidence-v1",
+        )
+        cached = assessment_cache.get(cache_key)
+        if cached is not None:
+            return snapshot, cached
+
+        def remember(
+            assessment: ProvisionalEvidenceAssessmentV1,
+        ) -> tuple[ExecutionSnapshotV1, ProvisionalEvidenceAssessmentV1]:
+            assessment_cache[cache_key] = assessment
+            return snapshot, assessment
+
         if not proposal.claimed_evidence_handles:
-            return snapshot, ProvisionalEvidenceAssessmentV1(
-                state="not_attempted",
-                consistency="not_applicable",
-                reason_code="empty_declaration",
-                **common,
+            return remember(
+                ProvisionalEvidenceAssessmentV1(
+                    state="not_attempted",
+                    consistency="not_applicable",
+                    reason_code="empty_declaration",
+                    **common,
+                )
             )
         if not declared_subset.items:
-            return snapshot, ProvisionalEvidenceAssessmentV1(
-                state="not_attempted",
-                consistency="insufficient",
-                reason_code="no_resolved_declared_evidence",
-                **common,
+            return remember(
+                ProvisionalEvidenceAssessmentV1(
+                    state="not_attempted",
+                    consistency="insufficient",
+                    reason_code="no_resolved_declared_evidence",
+                    **common,
+                )
             )
         try:
             snapshot = self._runtime.request_model_action(
@@ -405,22 +499,26 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 assessment_ordinal=assessment_ordinal,
             )
         except ClaimAssessmentUnavailable as error:
-            return snapshot, ProvisionalEvidenceAssessmentV1(
-                state="unavailable",
-                consistency="unavailable",
-                reason_code=error.reason_code,
-                **common,
+            return remember(
+                ProvisionalEvidenceAssessmentV1(
+                    state="unavailable",
+                    consistency="unavailable",
+                    reason_code=error.reason_code,
+                    **common,
+                )
             )
         except TurnRuntimeBudgetExceeded:
-            return snapshot, ProvisionalEvidenceAssessmentV1(
-                state="unavailable",
-                consistency="unavailable",
-                reason_code=(
-                    "deadline_elapsed"
-                    if datetime.now(timezone.utc) >= snapshot.deadline_at
-                    else "physical_limit_rejected"
-                ),
-                **common,
+            return remember(
+                ProvisionalEvidenceAssessmentV1(
+                    state="unavailable",
+                    consistency="unavailable",
+                    reason_code=(
+                        "deadline_elapsed"
+                        if datetime.now(timezone.utc) >= snapshot.deadline_at
+                        else "physical_limit_rejected"
+                    ),
+                    **common,
+                )
             )
         if (
             assessment.answer_digest != answer_digest
@@ -439,7 +537,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     "reason_code": "partially_unresolved_declared_evidence",
                 }
             )
-        return snapshot, assessment
+        return remember(assessment)
 
     def run(self, execution_id: str) -> None:
         snapshot = self._runtime.snapshot(execution_id)
@@ -468,11 +566,15 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         reasoning_evaluations: list[ReasoningEvaluationV1] = []
         reasoning_corrections: list[ReasoningCorrectionV2] = []
         provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] = []
+        provisional_assessment_cache: dict[
+            tuple[str, str, tuple[str, ...], str],
+            ProvisionalEvidenceAssessmentV1,
+        ] = {}
         pending_correction: tuple[
             Literal["revise_only", "research_then_revise"], int, list[str], str, int | None, int
         ] | None = None
         pending_limit_finalization: tuple[int, str] | None = None
-        shared_plan_repair_remaining = 1
+        schema_repair_origin: SchemaRetryOriginCode | None = None
         force_finalize_only = False
         terminal_provisional_assessment: ProvisionalEvidenceAssessmentV1 | None = None
         try:
@@ -499,7 +601,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     progress_status="completed",
                     message_code="reasoning.understanding_completed",
                 )
-                for repair in (False, True):
+                schema_retry_ordinal = 0
+                while True:
+                    repair = schema_retry_ordinal > 0
                     planner_input = self._model_inputs.build(
                         snapshot,
                         observations=observations,
@@ -525,10 +629,18 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     )
                     _validate_model_input(snapshot, planner_input)
                     try:
-                        plan_result = self._reasoning_model.plan(
-                            planner_input, repair=repair
-                        )
-                    except DeepReasoningContractError:
+                        if schema_repair_origin is None:
+                            plan_result = self._reasoning_model.plan(
+                                planner_input, repair=repair
+                            )
+                        else:
+                            plan_result = self._reasoning_model.plan(
+                                planner_input,
+                                repair=repair,
+                                schema_retry_ordinal=schema_retry_ordinal,
+                                repair_origin_error_code=schema_repair_origin,
+                            )
+                    except Exception as error:
                         step_ordinal += 1
                         audit_steps.append(
                             TurnAuditStepV1(
@@ -541,10 +653,17 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 ),
                             )
                         )
-                        if not repair:
-                            shared_plan_repair_remaining = 0
-                            continue
-                        raise
+                        claimed = self._claim_schema_retry(
+                            snapshot,
+                            purpose="deep_reasoning_plan",
+                            semantic_ordinal=1,
+                            error=error,
+                        )
+                        if claimed is None:
+                            raise
+                        snapshot, schema_repair_origin = claimed
+                        schema_retry_ordinal = snapshot.budget.schema_retries
+                        continue
                     reasoning_plan = plan_result.plan
                     step_ordinal += 1
                     audit_steps.append(
@@ -560,6 +679,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                             output_tokens=plan_result.output_tokens,
                         )
                     )
+                    schema_repair_origin = None
                     break
                 if reasoning_plan is None:
                     raise ValueError("deep reasoning planner did not produce a plan")
@@ -636,9 +756,41 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 ):
                     raise ValueError("post-CAS model input exceeded its context reservation")
                 failure_code = "provider_failed"
-                model_result = session.next_action(
-                    model_input, finalize_only=finalize_only
-                )
+                try:
+                    if schema_repair_origin is None:
+                        model_result = session.next_action(
+                            model_input, finalize_only=finalize_only
+                        )
+                    else:
+                        model_result = session.next_action(
+                            model_input,
+                            finalize_only=finalize_only,
+                            repair_origin_error_code=schema_repair_origin,
+                        )
+                except Exception as error:
+                    claimed = self._claim_schema_retry(
+                        snapshot,
+                        purpose="turn_execution",
+                        semantic_ordinal=step_ordinal + 1,
+                        error=error,
+                    )
+                    if claimed is None:
+                        raise
+                    snapshot, schema_repair_origin = claimed
+                    step_ordinal += 1
+                    audit_steps.append(
+                        TurnAuditStepV1(
+                            ordinal=step_ordinal,
+                            step_kind="model",
+                            operation="turn_execution_schema_repair",
+                            status="failed",
+                            safe_input_digest=_digest(
+                                model_input.model_dump(mode="json")
+                            ),
+                        )
+                    )
+                    continue
+                schema_repair_origin = None
                 step_ordinal += 1
                 if isinstance(model_result, ModelContractViolationV1):
                     logger.warning(
@@ -703,6 +855,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 proposal=action,
                                 visual_images_by_handle=visual_images_by_handle,
                                 assessment_ordinal=assessment_ordinal,
+                                assessment_cache=provisional_assessment_cache,
                             )
                         )
                         is_limit_final = pending_limit_finalization is not None
@@ -811,75 +964,72 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 },
                             )
                             evaluation_cycle = len(reasoning_evaluations) + 1
-                            provisional_input = ProvisionalEvidenceEvaluationInputV1(
-                                check_ordinal=assessment_ordinal,
-                                consistency=terminal_provisional_assessment.consistency,
-                                reason_code=terminal_provisional_assessment.reason_code,
-                            )
                             try:
-                                evaluation_input = self._model_inputs.build(
-                                    snapshot,
-                                    observations=observations,
-                                    contract_repair_remaining=contract_repair_remaining,
-                                ).model_copy(update={"reasoning_plan": reasoning_plan})
-                                _validate_model_input(snapshot, evaluation_input)
-                                evaluation_tokens = (
-                                    self._reasoning_model.estimate_evaluation_request_tokens(
-                                        evaluation_input,
-                                        plan=reasoning_plan,
-                                        proposal=action,
+                                evaluation_schema_origin: SchemaRetryOriginCode | None = None
+                                evaluation_schema_ordinal = 0
+                                while True:
+                                    evaluation_input = self._model_inputs.build(
+                                        snapshot,
                                         observations=observations,
-                                        cycle=evaluation_cycle,
-                                        provisional_evidence=provisional_input,
+                                        contract_repair_remaining=contract_repair_remaining,
+                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    _validate_model_input(snapshot, evaluation_input)
+                                    evaluation_tokens = (
+                                        self._reasoning_model.estimate_evaluation_request_tokens(
+                                            evaluation_input,
+                                            plan=reasoning_plan,
+                                            proposal=action,
+                                            observations=observations,
+                                            cycle=evaluation_cycle,
+                                        )
                                     )
-                                )
-                                snapshot = self._runtime.request_model_action(
-                                    RequestModelActionV1(
-                                        execution_id=execution_id,
-                                        expected_version=snapshot.version,
-                                        fencing_token=snapshot.lease.fencing_token,
-                                        context_tokens=evaluation_tokens,
+                                    snapshot = self._runtime.request_model_action(
+                                        RequestModelActionV1(
+                                            execution_id=execution_id,
+                                            expected_version=snapshot.version,
+                                            fencing_token=snapshot.lease.fencing_token,
+                                            context_tokens=evaluation_tokens,
+                                        )
                                     )
-                                )
-                                evaluation_input = self._model_inputs.build(
-                                    snapshot,
-                                    observations=observations,
-                                    contract_repair_remaining=contract_repair_remaining,
-                                ).model_copy(update={"reasoning_plan": reasoning_plan})
-                                _validate_model_input(snapshot, evaluation_input)
-                                evaluation_result = self._reasoning_model.evaluate(
-                                    evaluation_input,
-                                    plan=reasoning_plan,
-                                    proposal=action,
-                                    observations=observations,
-                                    cycle=evaluation_cycle,
-                                    provisional_evidence=provisional_input,
-                                )
+                                    evaluation_input = self._model_inputs.build(
+                                        snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,
+                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    _validate_model_input(snapshot, evaluation_input)
+                                    try:
+                                        if evaluation_schema_origin is None:
+                                            evaluation_result = self._reasoning_model.evaluate(
+                                                evaluation_input,
+                                                plan=reasoning_plan,
+                                                proposal=action,
+                                                observations=observations,
+                                                cycle=evaluation_cycle,
+                                            )
+                                        else:
+                                            evaluation_result = self._reasoning_model.evaluate(
+                                                evaluation_input,
+                                                plan=reasoning_plan,
+                                                proposal=action,
+                                                observations=observations,
+                                                cycle=evaluation_cycle,
+                                                schema_retry_ordinal=evaluation_schema_ordinal,
+                                                repair_origin_error_code=evaluation_schema_origin,
+                                            )
+                                    except Exception as error:
+                                        claimed = self._claim_schema_retry(
+                                            snapshot,
+                                            purpose="deep_reasoning_evaluation",
+                                            semantic_ordinal=evaluation_cycle,
+                                            error=error,
+                                        )
+                                        if claimed is None:
+                                            raise
+                                        snapshot, evaluation_schema_origin = claimed
+                                        evaluation_schema_ordinal = snapshot.budget.schema_retries
+                                        continue
+                                    break
                                 evaluation = evaluation_result.evaluation
-                                required_finding = {
-                                    "conflict": "declared_evidence_conflict",
-                                    "insufficient": "declared_evidence_insufficient",
-                                }.get(terminal_provisional_assessment.consistency)
-                                if (
-                                    required_finding is not None
-                                    and required_finding not in evaluation.finding_codes
-                                ):
-                                    evaluation = evaluation.model_copy(
-                                        update={
-                                            "finding_codes": [
-                                                *evaluation.finding_codes[:7],
-                                                required_finding,
-                                            ]
-                                        }
-                                    )
-                                if (
-                                    terminal_provisional_assessment.consistency
-                                    in {"conflict", "insufficient"}
-                                    and evaluation.verdict == "accept"
-                                ):
-                                    raise DeepReasoningContractError(
-                                        "deep_reasoning_evaluation_invalid"
-                                    )
                                 step_ordinal += 1
                                 audit_steps.append(
                                     TurnAuditStepV1(
@@ -925,12 +1075,21 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     )
                                 )
                             reasoning_evaluations.append(evaluation)
+                            gate_feedback = _gate_correction_feedback(
+                                terminal_provisional_assessment
+                            )
+                            correction_kind = _merged_correction_kind(
+                                evaluation=evaluation,
+                                gate_feedback=gate_feedback,
+                            )
                             disposition = (
-                                "degraded"
+                                "revised"
+                                if correction_kind is not None
+                                else "degraded"
                                 if evaluation.verdict == "unavailable"
+                                or terminal_provisional_assessment.consistency
+                                == "unavailable"
                                 else "accepted"
-                                if evaluation.verdict == "accept"
-                                else "revised"
                             )
                             provisional_evidence_checks[-1] = (
                                 provisional_evidence_checks[-1].model_copy(
@@ -939,7 +1098,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                             )
                             if pending_correction is not None:
                                 (
-                                    correction_kind,
+                                    completed_correction_kind,
                                     triggering_evaluation,
                                     addressed_codes,
                                     correction_summary,
@@ -950,17 +1109,19 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 reasoning_corrections.append(
                                     ReasoningCorrectionV2(
                                         cycle=len(reasoning_corrections) + 1,
-                                        kind=correction_kind,
+                                        kind=completed_correction_kind,
                                         triggering_evaluation=triggering_evaluation,
                                         plan_generation=correction_plan_generation,
                                         tool_invocation_start=(
                                             tool_start
-                                            if correction_kind == "research_then_revise"
+                                            if completed_correction_kind
+                                            == "research_then_revise"
                                             else None
                                         ),
                                         tool_invocation_end=(
                                             tool_end
-                                            if correction_kind == "research_then_revise"
+                                            if completed_correction_kind
+                                            == "research_then_revise"
                                             else None
                                         ),
                                         result_evaluation=evaluation_cycle,
@@ -974,6 +1135,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 status=(
                                     "degraded"
                                     if evaluation.verdict == "unavailable"
+                                    and correction_kind is None
                                     else "running"
                                 ),
                                 plans=reasoning_plans,
@@ -983,6 +1145,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 termination_reason=(
                                     "evaluator_unavailable"
                                     if evaluation.verdict == "unavailable"
+                                    and correction_kind is None
                                     else None
                                 ),
                             )
@@ -1003,11 +1166,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 ),
                                 message_params={"cycle": evaluation_cycle},
                             )
-                            if evaluation.verdict == "unavailable":
-                                terminal_trace_status = "degraded"
-                                termination_reason = "evaluator_unavailable"
-                            elif evaluation.verdict == "accept":
-                                if (
+                            if correction_kind is None:
+                                if evaluation.verdict == "unavailable":
+                                    terminal_trace_status = "degraded"
+                                    termination_reason = "evaluator_unavailable"
+                                elif (
                                     terminal_provisional_assessment.consistency
                                     == "unavailable"
                                 ):
@@ -1023,14 +1186,13 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 < snapshot.policy.max_reasoning_revision_cycles
                             ):
                                 replacement_plan: ReasoningPlanV2 | None = None
-                                if evaluation.verdict == "research_then_revise":
+                                if correction_kind == "research_then_revise":
                                     failure_code = "contract_violation"
                                     reasoning_replanner_failed = True
-                                    for repair in (False, True):
-                                        if repair and shared_plan_repair_remaining == 0:
-                                            raise DeepReasoningContractError(
-                                                "deep_reasoning_replan_invalid"
-                                            )
+                                    replan_schema_origin: SchemaRetryOriginCode | None = None
+                                    replan_schema_ordinal = 0
+                                    while True:
+                                        repair = replan_schema_ordinal > 0
                                         replan_input = self._model_inputs.build(
                                             snapshot,
                                             observations=observations,
@@ -1061,13 +1223,23 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         ).model_copy(update={"reasoning_plan": reasoning_plan})
                                         _validate_model_input(snapshot, replan_input)
                                         try:
-                                            replan_result = self._reasoning_model.replan(
-                                                replan_input,
-                                                plan=reasoning_plan,
-                                                evaluation=evaluation,
-                                                repair=repair,
-                                            )
-                                        except DeepReasoningContractError:
+                                            if replan_schema_origin is None:
+                                                replan_result = self._reasoning_model.replan(
+                                                    replan_input,
+                                                    plan=reasoning_plan,
+                                                    evaluation=evaluation,
+                                                    repair=repair,
+                                                )
+                                            else:
+                                                replan_result = self._reasoning_model.replan(
+                                                    replan_input,
+                                                    plan=reasoning_plan,
+                                                    evaluation=evaluation,
+                                                    repair=repair,
+                                                    schema_retry_ordinal=replan_schema_ordinal,
+                                                    repair_origin_error_code=replan_schema_origin,
+                                                )
+                                        except Exception as error:
                                             step_ordinal += 1
                                             audit_steps.append(
                                                 TurnAuditStepV1(
@@ -1080,10 +1252,17 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                                     ),
                                                 )
                                             )
-                                            if not repair and shared_plan_repair_remaining == 1:
-                                                shared_plan_repair_remaining = 0
-                                                continue
-                                            raise
+                                            claimed = self._claim_schema_retry(
+                                                snapshot,
+                                                purpose="deep_reasoning_replan",
+                                                semantic_ordinal=reasoning_plan.generation,
+                                                error=error,
+                                            )
+                                            if claimed is None:
+                                                raise
+                                            snapshot, replan_schema_origin = claimed
+                                            replan_schema_ordinal = snapshot.budget.schema_retries
+                                            continue
                                         replacement_plan = replan_result.plan
                                         step_ordinal += 1
                                         audit_steps.append(
@@ -1128,14 +1307,19 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     )
                                 session.accept_reasoning_feedback(
                                     evaluation,
+                                    correction_kind=correction_kind,
+                                    gate_feedback=gate_feedback,
                                     plan=replacement_plan,
                                 )
                                 correction_summary = (
                                     evaluation.summary
-                                    or "Correction requested by process evaluator."
+                                    if evaluation.verdict
+                                    in {"revise_only", "research_then_revise"}
+                                    and evaluation.summary
+                                    else "Correction requested by declared evidence Gate."
                                 )
                                 pending_correction = (
-                                    evaluation.verdict,
+                                    correction_kind,
                                     evaluation_cycle,
                                     evaluation.finding_codes,
                                     correction_summary,
@@ -1158,18 +1342,24 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     message_code="reasoning.correction_requested",
                                     message_params={
                                         "cycle": evaluation_cycle,
-                                        "research": evaluation.verdict
+                                        "research": correction_kind
                                         == "research_then_revise",
                                     },
                                 )
-                                force_finalize_only = evaluation.verdict == "revise_only"
+                                force_finalize_only = correction_kind == "revise_only"
                                 continue
                             else:
-                                session.accept_reasoning_limit(evaluation)
+                                session.accept_reasoning_limit(
+                                    evaluation,
+                                    gate_feedback=gate_feedback,
+                                )
                                 pending_limit_finalization = (
                                     evaluation_cycle,
                                     evaluation.summary
-                                    or "Correction limit reached with unresolved findings.",
+                                    if evaluation.verdict
+                                    in {"revise_only", "research_then_revise"}
+                                    and evaluation.summary
+                                    else "Correction limit reached with an unresolved declared evidence Gate finding.",
                                 )
                                 reasoning_trace = _next_reasoning_trace(
                                     reasoning_trace,
@@ -1228,6 +1418,14 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         retrieval_error_status=retrieval_error_status,
                         finalize_only=finalize_only,
                         provisional_assessment=terminal_provisional_assessment,
+                        delivery_constraint=(
+                            "correction_limit_reached"
+                            if snapshot.reasoning_mode == "deep"
+                            and reasoning_trace is not None
+                            and reasoning_trace.termination_reason
+                            == "correction_limit_reached"
+                            else "none"
+                        ),
                     )
                     return
 
@@ -1431,6 +1629,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         retrieval_error_status: RetrievalStatusV1 | None,
         finalize_only: bool,
         provisional_assessment: ProvisionalEvidenceAssessmentV1 | None,
+        delivery_constraint: Literal["none", "correction_limit_reached"],
     ) -> None:
         execution_id = snapshot.execution_id
         snapshot = self._runtime.begin_governance(
@@ -1579,6 +1778,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 assessment_input_digest=assessment_input_digest,
                 assessment_output_digest=assessment_output_digest,
                 assessment_results=assessment_results,
+                delivery_constraint=delivery_constraint,
                 idempotency_key=f"{execution_id}:governed-answer",
             )
         except ValidationError:
@@ -1602,6 +1802,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 assessment_visual_image_digests=visual_image_digests,
                 assessment_input_digest=assessment_input_digest,
                 assessment_results=[],
+                delivery_constraint=delivery_constraint,
                 idempotency_key=f"{execution_id}:governed-answer",
             )
         governed = self._result_governance.materialize_v2(governance_command)

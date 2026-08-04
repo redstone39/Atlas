@@ -1,6 +1,7 @@
 export { conversationDetail, conversationSummary, workspaceApi } from "./api";
 export type { DeclaredEvidencePreview } from "./api";
 export { AnswerEvidenceSummary } from "./AnswerEvidenceSummary";
+export { AnswerMarkdown } from "./AnswerMarkdown";
 export { ClaimedEvidenceTrace } from "./ClaimedEvidenceTrace";
 export { EvidenceViewerDialog } from "./EvidenceViewerDialog";
 export { WorkspaceFeature } from "./WorkspaceFeature";

@@ -46,7 +46,7 @@ from atlas_production.modules.turn_execution.public import (
     DeepReasoningModel,
     DeepReasoningPlanResultV1,
     FinalizeAnswerV1,
-    ProvisionalEvidenceEvaluationInputV1,
+    GateCorrectionFeedbackV1,
     ModelActionResultV1,
     ModelContractViolationV1,
     ModelStepResultV1,
@@ -60,6 +60,7 @@ from atlas_production.modules.turn_runtime.public import (
     ProcessScoreV1,
     ReasoningEvaluationV1,
     ReasoningPlanV2,
+    SchemaRetryOriginCode,
 )
 from atlas_production.providers import build_native_json_schema
 
@@ -330,6 +331,17 @@ def _bounded_plan_summaries(values: list[str], *, limit: int) -> list[str]:
             continue
         summaries.append(_bounded_plan_text(value, max_length=120))
     return summaries
+
+
+def _with_schema_repair_instruction(instruction: str, *, repair: bool) -> str:
+    if not repair:
+        return instruction
+    return (
+        instruction
+        + " The previous response violated the required JSON or schema contract. "
+        "Return exactly one JSON object that matches the supplied response schema; "
+        "do not add Markdown fences, commentary, prefixes, or suffixes."
+    )
 
 
 def _next_runtime_plan_item_id(
@@ -685,6 +697,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         model_input: TurnModelInputV3,
         *,
         finalize_only: bool,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> ModelStepResultV1:
         if self._discarded:
             raise ProviderProtocolError(safe_code="turn_model_session_discarded")
@@ -712,6 +725,11 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 execution_key=f"{self._execution_id}:provider:{self._provider_ordinal}",
                 prompt_digest=_digest([input_digest, finalize_only]),
                 attempt_ordinal=self._provider_ordinal,
+                repair_origin_error_codes=(
+                    []
+                    if repair_origin_error_code is None
+                    else [repair_origin_error_code]
+                ),
             )
             self._routing.record_invocation_started(handle)
         try:
@@ -893,6 +911,8 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self,
         evaluation: ReasoningEvaluationV1,
         *,
+        correction_kind: Literal["revise_only", "research_then_revise"],
+        gate_feedback: GateCorrectionFeedbackV1 | None = None,
         plan: ReasoningPlanV2 | None = None,
     ) -> None:
         if self._discarded:
@@ -900,9 +920,18 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         if self._pending_tool_call_id is not None:
             raise ProviderProtocolError(safe_code="turn_model_tool_result_missing")
         if (
-            evaluation.verdict not in {"revise_only", "research_then_revise"}
-            or evaluation.score is None
-            or (evaluation.verdict == "research_then_revise") != (plan is not None)
+            evaluation.verdict == "unavailable" and gate_feedback is None
+        ) or (
+            evaluation.verdict != "unavailable" and evaluation.score is None
+        ):
+            raise ProviderProtocolError(safe_code="invalid_reasoning_feedback")
+        if (
+            (correction_kind == "research_then_revise") != (plan is not None)
+            or (evaluation.verdict == "accept" and gate_feedback is None)
+            or (
+                (evaluation.verdict == "research_then_revise")
+                != (correction_kind == "research_then_revise")
+            )
         ):
             raise ProviderProtocolError(safe_code="invalid_reasoning_feedback")
         instruction = (
@@ -916,6 +945,12 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 content=_canonical(
                     {
                         "atlas_process_evaluation": evaluation.model_dump(mode="json"),
+                        "atlas_runtime_correction_kind": correction_kind,
+                        "atlas_gate_correction": (
+                            None
+                            if gate_feedback is None
+                            else gate_feedback.model_dump(mode="json")
+                        ),
                         "replacement_plan": (
                             None if plan is None else plan.model_dump(mode="json")
                         ),
@@ -925,18 +960,31 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             )
         )
 
-    def accept_reasoning_limit(self, evaluation: ReasoningEvaluationV1) -> None:
+    def accept_reasoning_limit(
+        self,
+        evaluation: ReasoningEvaluationV1,
+        *,
+        gate_feedback: GateCorrectionFeedbackV1 | None = None,
+    ) -> None:
         if self._discarded:
             raise ProviderProtocolError(safe_code="turn_model_session_discarded")
         if self._pending_tool_call_id is not None:
             raise ProviderProtocolError(safe_code="turn_model_tool_result_missing")
-        if evaluation.verdict not in {"revise_only", "research_then_revise"}:
+        if (
+            evaluation.verdict in {"accept", "unavailable"}
+            and gate_feedback is None
+        ):
             raise ProviderProtocolError(safe_code="invalid_reasoning_limit")
         self._messages.append(
             ProviderUserMessage(
                 content=_canonical(
                     {
                         "atlas_process_evaluation": evaluation.model_dump(mode="json"),
+                        "atlas_gate_correction": (
+                            None
+                            if gate_feedback is None
+                            else gate_feedback.model_dump(mode="json")
+                        ),
                         "instruction": (
                             "No correction or tool cycles remain. Return one complete limitation-aware "
                             "finalize_answer that addresses safe findings where possible and explicitly "
@@ -1028,6 +1076,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         schema_name: str,
         schema: dict[str, object],
         max_output_tokens: int,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> ProviderCompleted:
         attempt, request, response_schema, _estimate = self._reasoning_wire(
             model_input,
@@ -1048,6 +1097,11 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
                 execution_key=f"{model_input.execution_id}:{purpose}:{ordinal}",
                 prompt_digest=_digest(payload),
                 attempt_ordinal=ordinal,
+                repair_origin_error_codes=(
+                    []
+                    if repair_origin_error_code is None
+                    else [repair_origin_error_code]
+                ),
             )
             self._routing.record_invocation_started(handle)
         try:
@@ -1074,13 +1128,14 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         model_input: TurnModelInputV3, *, repair: bool
     ) -> dict[str, object]:
         return {
-            "instruction": (
+            "instruction": _with_schema_repair_instruction(
                 "Return only a bounded next_objective of at most 160 characters, a "
                 "completion_condition of at most 160 characters, and item_summaries "
                 "containing 1 to 8 concise observable work steps of at most 120 characters "
                 "each. Runtime owns generation, parent linkage, item IDs and status. Do not "
                 "include hidden reasoning, draft answer text, evidence snippets, confidence, "
-                "or accuracy claims."
+                "or accuracy claims.",
+                repair=repair,
             ),
             "schema_repair": repair,
             "current_user_request": model_input.model_user_input,
@@ -1105,16 +1160,22 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         )[3].input_tokens
 
     def plan(
-        self, model_input: TurnModelInputV3, *, repair: bool
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        repair: bool,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningPlanResultV1:
         outcome = self._invoke_reasoning(
             model_input,
             purpose="deep_reasoning_plan",
-            ordinal=2 if repair else 1,
+            ordinal=schema_retry_ordinal + 1,
             payload=self._plan_payload(model_input, repair=repair),
             schema_name="atlas_initial_plan_decision_v1",
             schema=_ProviderInitialPlanDecisionV1.model_json_schema(),
             max_output_tokens=4000,
+            repair_origin_error_code=repair_origin_error_code,
         )
         try:
             decision = _ProviderInitialPlanDecisionV1.model_validate(outcome.output)
@@ -1180,14 +1241,15 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             ),
         }
         return {
-            "instruction": (
+            "instruction": _with_schema_repair_instruction(
                 "Return only a bounded next_objective and completion_condition, each at "
                 "most 160 characters; completed_item_ids and skipped_item_ids selected "
                 "only from currently pending item IDs; and concise new_item_summaries of "
                 "at most 120 characters each. Omit an unchanged pending item from both ID "
                 "lists and Runtime will retain it. Runtime owns generation, parent linkage, "
                 "new item IDs and pending status. Do not include draft text, evidence "
-                "excerpts, opaque handles, provider reasoning, confidence, or accuracy claims."
+                "excerpts, opaque handles, provider reasoning, confidence, or accuracy claims.",
+                repair=repair,
             ),
             "schema_repair": repair,
             "current_plan": plan.model_dump(mode="json"),
@@ -1239,17 +1301,20 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningPlanResultV1:
         outcome = self._invoke_reasoning(
             model_input,
             purpose="deep_reasoning_replan",
-            ordinal=plan.generation + (1 if repair else 0),
+            ordinal=plan.generation * 10 + schema_retry_ordinal,
             payload=self._replan_payload(
                 model_input, plan=plan, evaluation=evaluation, repair=repair
             ),
             schema_name="atlas_replan_decision_v1",
             schema=self._replan_schema(plan),
             max_output_tokens=4000,
+            repair_origin_error_code=repair_origin_error_code,
         )
         try:
             decision = _ProviderReplanDecisionV1.model_validate(outcome.output)
@@ -1325,7 +1390,6 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         proposal: FinalizeAnswerV1,
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
     ) -> dict[str, object]:
         return {
             "instruction": (
@@ -1341,9 +1405,6 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             "user_request": model_input.model_user_input,
             "plan": plan.model_dump(mode="json"),
             "candidate": proposal.model_dump(mode="json"),
-            "provisional_declared_evidence": provisional_evidence.model_dump(
-                mode="json"
-            ),
             "tool_observations": [item.model_dump(mode="json") for item in observations],
             "rubric": {
                 "plan_coverage": "Did the candidate address the planned work?",
@@ -1355,16 +1416,8 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         }
 
     @staticmethod
-    def _evaluation_schema(
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
-    ) -> dict[str, object]:
-        schema = _ProviderProcessEvaluationV1.model_json_schema()
-        if provisional_evidence.consistency in {"conflict", "insufficient"}:
-            schema["properties"]["verdict"] = {
-                "type": "string",
-                "enum": ["revise_only", "research_then_revise"],
-            }
-        return schema
+    def _evaluation_schema() -> dict[str, object]:
+        return _ProviderProcessEvaluationV1.model_json_schema()
 
     def estimate_evaluation_request_tokens(
         self,
@@ -1374,7 +1427,6 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         proposal: FinalizeAnswerV1,
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
     ) -> int:
         payload = self._evaluation_payload(
             model_input,
@@ -1382,14 +1434,13 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             proposal=proposal,
             observations=observations,
             cycle=cycle,
-            provisional_evidence=provisional_evidence,
         )
         return self._reasoning_wire(
             model_input,
             purpose="deep_reasoning_evaluation",
             payload=payload,
             schema_name="atlas_process_evaluation_decision_v2",
-            schema=self._evaluation_schema(provisional_evidence),
+            schema=self._evaluation_schema(),
             max_output_tokens=4000,
         )[3].input_tokens
 
@@ -1401,7 +1452,8 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         proposal: FinalizeAnswerV1,
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
-        provisional_evidence: ProvisionalEvidenceEvaluationInputV1,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningEvaluationResultV1:
         payload = self._evaluation_payload(
             model_input,
@@ -1409,16 +1461,16 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             proposal=proposal,
             observations=observations,
             cycle=cycle,
-            provisional_evidence=provisional_evidence,
         )
         outcome = self._invoke_reasoning(
             model_input,
             purpose="deep_reasoning_evaluation",
-            ordinal=cycle,
+            ordinal=cycle * 10 + schema_retry_ordinal,
             payload=payload,
             schema_name="atlas_process_evaluation_decision_v2",
-            schema=self._evaluation_schema(provisional_evidence),
+            schema=self._evaluation_schema(),
             max_output_tokens=4000,
+            repair_origin_error_code=repair_origin_error_code,
         )
         try:
             provider_evaluation = _ProviderProcessEvaluationV1.model_validate(
@@ -1432,19 +1484,6 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
                 safe_code,
             )
             raise DeepReasoningContractError(safe_code) from error
-        if (
-            provisional_evidence.consistency in {"conflict", "insufficient"}
-            and provider_evaluation.verdict == "accept"
-        ):
-            safe_code = "deep_reasoning_evaluation_gate_verdict_invalid"
-            logger.warning(
-                "deep evaluator output rejected execution_id=%s safe_code=%s",
-                model_input.execution_id,
-                safe_code,
-            )
-            raise DeepReasoningContractError(
-                safe_code
-            )
         dimensions = provider_evaluation.rubric_dimensions.model_dump()
         if cycle == 1:
             dimensions["revision_completion"] = 2
@@ -1453,12 +1492,6 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             for name, score in dimensions.items()
             if score < 2
         ]
-        required_finding = {
-            "conflict": "declared_evidence_conflict",
-            "insufficient": "declared_evidence_insufficient",
-        }.get(provisional_evidence.consistency)
-        if required_finding is not None and required_finding not in finding_codes:
-            finding_codes = [*finding_codes[:7], required_finding]
         try:
             evaluation = ReasoningEvaluationV1(
                 cycle=cycle,

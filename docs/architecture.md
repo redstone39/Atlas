@@ -63,8 +63,18 @@ Architecture ownership and dependency direction are executable in
 - System Admin may inspect a bounded structured trace containing Atlas-owned
   plan, evaluation, revision, termination, and digest metadata. Process scores
   measure completion of configured steps, not factual correctness.
-- Provisional evidence checks can require another revision or mark the final
-  answer questionable, but they do not create formal citation authority.
+- Provisional evidence checks and the Process Evaluator remain independent.
+  Runtime deterministically combines their correction requirements and can
+  require another revision or mark the final answer questionable, but they do
+  not create formal citation authority.
+- A correction-limit answer remains questionable even if its final declared
+  evidence check aligns. It remains visible to the member and System Admin, but
+  its assistant text and direct document dependencies are excluded from later
+  model context.
+- Context summary, resolver, rewrite, planner, replanner, answer, Process
+  Evaluator, and provisional evidence checks share one execution-fixed schema
+  retry budget. Every repair must first claim the durable fenced counter;
+  exhausted budgets preserve each stage's fail-closed or unavailable behavior.
 
 ## Product surfaces
 

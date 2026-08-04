@@ -525,6 +525,7 @@ def _model_input_payload() -> dict:
             "provider_invocations": 0,
             "context_tokens": 0,
             "tool_tokens": 0,
+            "schema_retries": 0,
         },
         "policy": RoutePolicyV1().model_dump(),
         "route": {

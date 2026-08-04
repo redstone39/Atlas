@@ -108,7 +108,6 @@ select {
   input[type="checkbox"]:not(:disabled),
   input[type="radio"]:not(:disabled),
   input[type="file"]:not(:disabled),
-  [data-slot$="-item"]:not([data-disabled]):not([aria-disabled="true"]),
   [data-slot="select-trigger"]:not([data-disabled]),
   [data-slot="checkbox"]:not([data-disabled]),
   [data-slot="radio-group-item"]:not([data-disabled]),

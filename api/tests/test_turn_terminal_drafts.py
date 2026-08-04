@@ -67,7 +67,8 @@ from atlas_production.modules.retrieval.public import (
     VisualImagePayloadV1,
 )
 from atlas_production.providers import ProviderError, conversation_http_payload
-from atlas_production.modules.turn_runtime.public import TurnRouteSnapshotV2
+from atlas_production.modules.turn_runtime.public import RoutePolicyV1, TurnRouteSnapshotV2
+from tests.test_turn_model_loop import Runtime
 
 
 HANDLE = "evidence-handle-0001"
@@ -758,7 +759,7 @@ class _EvaluatorRouting:
         tokenizer_profile: str = "cl100k_base",
         open_error: Exception | None = None,
     ):
-        self.outcome = outcome
+        self.outcomes = list(outcome) if isinstance(outcome, list) else [outcome]
         self.open_error = open_error
         self.calls = 0
         self.requests = []
@@ -795,9 +796,10 @@ class _EvaluatorRouting:
         self.calls += 1
         self.requests.append(request)
         self.schemas.append(schema)
-        if isinstance(self.outcome, Exception):
-            raise self.outcome
-        return self.outcome
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     def prepare_invocation(self, *args, **kwargs):
         return object()
@@ -899,8 +901,6 @@ def _declared_subset(
 
 
 def _completed(output: dict) -> ProviderCompleted:
-    if "item_statuses" in output and "consistency" not in output:
-        output = {"consistency": "aligned", **output}
     return ProviderCompleted(
         provider_request_id="provider-1",
         model_ref="model-1",
@@ -911,11 +911,11 @@ def _completed(output: dict) -> ProviderCompleted:
     )
 
 
-def test_evaluator_uses_one_fresh_no_tool_call_and_strict_combined_output() -> None:
+def test_evaluator_uses_one_fresh_no_tool_call_and_strict_ordered_output() -> None:
     routing = _EvaluatorRouting(
         _completed(
             {
-                "item_statuses": ["success"]
+                "item_outcomes": ["aligned"]
             }
         )
     )
@@ -950,6 +950,28 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_combined_output() -> N
     assert (
         "material fact, number, entity, relationship, causal claim" in system_prompt
     )
+    assert (
+        "entity, component or attribute, operating mode or interface, condition, "
+        "scope or quantifier, polarity, value, and degree of certainty"
+        in system_prompt
+    )
+    assert (
+        "The same value or terminology appearing in different contexts does not "
+        "establish equivalence"
+        in system_prompt
+    )
+    assert (
+        "Partial support for some members or conditions is insufficient for the "
+        "broader claim"
+        in system_prompt
+    )
+    assert (
+        "A qualification, caveat, or narrower statement elsewhere in the answer "
+        "does not repair an unsupported or overbroad claim"
+        in system_prompt
+    )
+    assert "crystal" not in system_prompt.lower()
+    assert "oscillator" not in system_prompt.lower()
     assert "applies the evidence to the wrong subject or referent" in system_prompt
     assert "Do not require verbatim wording" in system_prompt
     assert (
@@ -969,8 +991,7 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_combined_output() -> N
     assert routing.opened_route_ids == ["route-1"]
     assert routing.schemas[0].strict is True
     assert set(routing.schemas[0].schema["properties"]) == {
-        "consistency",
-        "item_statuses",
+        "item_outcomes",
     }
     assert "id" not in json.dumps(routing.schemas[0].schema["properties"])
     wire = conversation_http_payload(
@@ -981,11 +1002,76 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_combined_output() -> N
     assert wire["response_format"] == {
         "type": "json_schema",
         "json_schema": {
-            "name": "provisional_declared_evidence_decision_v2",
+            "name": "provisional_declared_evidence_decision_v3",
             "strict": True,
             "schema": routing.schemas[0].schema,
         },
     }
+
+
+def test_evaluator_invalid_output_retries_with_shared_turn_budget() -> None:
+    routing = _EvaluatorRouting(
+        [
+            _completed({"not_item_outcomes": []}),
+            _completed({"item_outcomes": ["aligned"]}),
+        ]
+    )
+    runtime = Runtime()
+
+    result = StrictPostHocClaimEvaluator(
+        routing, runtime, record_invocations=True
+    ).assess(
+        execution_id="exec-1",
+        finalized_answer=_answer(),
+        declared_evidence_subset=_declared_subset(),
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+        route=_route_snapshot(routing),
+    )
+
+    assert result.consistency == "aligned"
+    assert routing.calls == 2
+    assert runtime.snapshot_value.budget.schema_retries == 1
+    assert routing.failure_codes == []
+    assert len(routing.successes) == 2
+
+
+def test_evaluator_schema_repair_does_not_exceed_provider_invocation_budget() -> None:
+    routing = _EvaluatorRouting(
+        [
+            _completed({"not_item_outcomes": []}),
+            _completed({"item_outcomes": ["aligned"]}),
+        ]
+    )
+    policy = RoutePolicyV1(
+        max_tool_invocations=1,
+        max_reasoning_revision_cycles=0,
+        max_provider_invocations=7,
+    )
+    runtime = Runtime(policy=policy)
+    runtime.snapshot_value = runtime.snapshot_value.model_copy(
+        update={
+            "state": "awaiting_model_action",
+            "budget": runtime.snapshot_value.budget.model_copy(
+                update={"provider_invocations": 7}
+            ),
+        }
+    )
+
+    with pytest.raises(ClaimAssessmentUnavailable) as error:
+        StrictPostHocClaimEvaluator(
+            routing, runtime, record_invocations=True
+        ).assess(
+            execution_id="exec-1",
+            finalized_answer=_answer(),
+            declared_evidence_subset=_declared_subset(),
+            deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+            route=_route_snapshot(routing),
+        )
+
+    assert error.value.reason_code == "invalid_output"
+    assert routing.calls == 1
+    assert runtime.snapshot_value.budget.schema_retries == 1
+    assert runtime.snapshot_value.budget.provider_invocations == 7
 
 
 def test_evaluator_receives_exact_visual_evidence_without_persisting_semantics() -> None:
@@ -1006,7 +1092,7 @@ def test_evaluator_receives_exact_visual_evidence_without_persisting_semantics()
         }
     )
     routing = _EvaluatorRouting(
-        _completed({"item_statuses": ["success"]})
+        _completed({"item_outcomes": ["aligned"]})
     )
 
     StrictPostHocClaimEvaluator(routing, record_invocations=False).assess(
@@ -1044,7 +1130,7 @@ def test_evaluator_v2_payload_contains_only_declared_model_visible_subset() -> N
         visual_images=[],
     )
     routing = _EvaluatorRouting(
-        _completed({"item_statuses": ["success"]})
+        _completed({"item_outcomes": ["aligned"]})
     )
 
     result = StrictPostHocClaimEvaluator(
@@ -1077,7 +1163,7 @@ def test_evaluator_v2_payload_contains_only_declared_model_visible_subset() -> N
     assert len(result.assessment_output_digest) == 64
 
 
-def test_evaluator_runtime_maps_ordered_statuses_to_exact_answer_ids() -> None:
+def test_evaluator_runtime_maps_ordered_outcomes_to_exact_answer_ids() -> None:
     answer = FinalizedAnswerV1(
         segments=[
             {"segment_id": "segment-1", "text": "First."},
@@ -1086,7 +1172,7 @@ def test_evaluator_runtime_maps_ordered_statuses_to_exact_answer_ids() -> None:
     )
     routing = _EvaluatorRouting(
         _completed(
-            {"consistency": "insufficient", "item_statuses": ["failure", "success"]}
+            {"item_outcomes": ["insufficient", "aligned"]}
         )
     )
 
@@ -1104,17 +1190,18 @@ def test_evaluator_runtime_maps_ordered_statuses_to_exact_answer_ids() -> None:
         PostHocAnswerAssessmentV2(id="segment-1", status="failure"),
         PostHocAnswerAssessmentV2(id="segment-2", status="success"),
     ]
+    assert result.consistency == "insufficient"
 
 
-@pytest.mark.parametrize("item_statuses", [[], ["success"], ["success"] * 3])
-def test_evaluator_rejects_ordered_status_count_mismatch(item_statuses) -> None:
+@pytest.mark.parametrize("item_outcomes", [[], ["aligned"], ["aligned"] * 3])
+def test_evaluator_rejects_ordered_outcome_count_mismatch(item_outcomes) -> None:
     answer = FinalizedAnswerV1(
         segments=[
             {"segment_id": "segment-1", "text": "First."},
             {"segment_id": "segment-2", "text": "Second."},
         ]
     )
-    routing = _EvaluatorRouting(_completed({"item_statuses": item_statuses}))
+    routing = _EvaluatorRouting(_completed({"item_outcomes": item_outcomes}))
 
     with pytest.raises(ClaimAssessmentUnavailable) as error:
         StrictPostHocClaimEvaluator(
@@ -1129,34 +1216,41 @@ def test_evaluator_rejects_ordered_status_count_mismatch(item_statuses) -> None:
 
     assert error.value.reason_code == "invalid_output"
     assert routing.calls == 1
-    assert routing.failure_codes == ["provisional_evidence_item_count_invalid"]
+    assert routing.failure_codes == []
+    assert len(routing.successes) == 1
 
 
 @pytest.mark.parametrize(
-    ("consistency", "item_statuses"),
-    [("aligned", ["failure"]), ("conflict", ["success"])],
+    ("item_outcomes", "expected_consistency", "expected_statuses"),
+    [
+        (["aligned", "aligned"], "aligned", ["success", "success"]),
+        (["aligned", "insufficient"], "insufficient", ["success", "failure"]),
+        (["insufficient", "conflict"], "conflict", ["failure", "failure"]),
+    ],
 )
-def test_evaluator_rejects_inconsistent_answer_level_and_item_statuses(
-    consistency, item_statuses
+def test_evaluator_runtime_derives_consistency_from_ordered_item_outcomes(
+    item_outcomes, expected_consistency, expected_statuses
 ) -> None:
-    routing = _EvaluatorRouting(
-        _completed(
-            {"consistency": consistency, "item_statuses": item_statuses}
-        )
+    answer = FinalizedAnswerV1(
+        segments=[
+            {"segment_id": "segment-1", "text": "First."},
+            {"segment_id": "segment-2", "text": "Second."},
+        ]
+    )
+    routing = _EvaluatorRouting(_completed({"item_outcomes": item_outcomes}))
+
+    result = StrictPostHocClaimEvaluator(routing, record_invocations=True).assess(
+        execution_id="execution-1",
+        finalized_answer=answer,
+        declared_evidence_subset=_declared_subset(),
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+        route=_route_snapshot(routing),
     )
 
-    with pytest.raises(ClaimAssessmentUnavailable) as error:
-        StrictPostHocClaimEvaluator(routing, record_invocations=True).assess(
-            execution_id="execution-1",
-            finalized_answer=_answer(),
-            declared_evidence_subset=_declared_subset(),
-            deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
-            route=_route_snapshot(routing),
-        )
-
-    assert error.value.reason_code == "invalid_output"
-    assert routing.failure_codes == ["provisional_evidence_consistency_invalid"]
-    assert routing.successes == []
+    assert result.consistency == expected_consistency
+    assert [item.status for item in result.results] == expected_statuses
+    assert routing.failure_codes == []
+    assert len(routing.successes) == 1
 
 
 @pytest.mark.parametrize(
@@ -1170,7 +1264,7 @@ def test_evaluator_rejects_inconsistent_answer_level_and_item_statuses(
             reason_code="policy",
             message_code=None,
         ),
-        _completed({"not_item_statuses": []}),
+        _completed({"not_item_outcomes": []}),
         ProviderTimeoutError(safe_code="provider_timeout"),
     ],
 )
@@ -1189,7 +1283,7 @@ def test_evaluator_refusal_invalid_json_and_timeout_do_not_retry(outcome) -> Non
 
 def test_evaluator_oversized_input_is_rejected_before_provider_and_internal_conflict_propagates() -> None:
     oversized = _EvaluatorRouting(
-        _completed({"item_statuses": ["success"]}),
+        _completed({"item_outcomes": ["aligned"]}),
         max_input_tokens=1,
     )
     with pytest.raises(ClaimAssessmentUnavailable) as limit:
@@ -1204,7 +1298,7 @@ def test_evaluator_oversized_input_is_rejected_before_provider_and_internal_conf
     assert oversized.calls == 0
 
     unavailable_route = _EvaluatorRouting(
-        _completed({"item_statuses": ["success"]}),
+        _completed({"item_outcomes": ["aligned"]}),
         open_error=ProviderError("model_route_unavailable", "model.route_is_unavailable"),
     )
     with pytest.raises(ClaimAssessmentUnavailable, match="route is unavailable"):
@@ -1220,7 +1314,7 @@ def test_evaluator_oversized_input_is_rejected_before_provider_and_internal_conf
     assert unavailable_route.calls == 0
 
     invalid_tokenizer = _EvaluatorRouting(
-        _completed({"item_statuses": ["success"]}),
+        _completed({"item_outcomes": ["aligned"]}),
         tokenizer_profile="not-a-tokenizer",
     )
     with pytest.raises(ClaimAssessmentUnavailable, match="tokenizer is unavailable"):

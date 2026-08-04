@@ -40,6 +40,7 @@ def _budget(**changes: int) -> BudgetSnapshotV1:
         "provider_invocations": 0,
         "context_tokens": 0,
         "tool_tokens": 0,
+        "schema_retries": 0,
     }
     values.update(changes)
     return BudgetSnapshotV1(**values)

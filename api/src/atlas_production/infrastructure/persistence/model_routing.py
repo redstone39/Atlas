@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, get_args
 
 from sqlalchemy import (
     Boolean,
@@ -28,6 +28,7 @@ from atlas_production.modules.model_routing.api_models import (
     ProviderConnectionStatus,
     ProviderConnectionTestResult,
 )
+from atlas_production.modules.turn_runtime.public import SchemaRetryOriginCode
 from atlas_production.providers import ROUTE_READINESS_SCHEMA
 
 from .base import OrmBase
@@ -103,7 +104,7 @@ _MODEL_TOKEN_USAGE_FIELDS = frozenset(
         "cached_input_tokens",
     }
 )
-_REPAIR_ORIGIN_ERROR_CODES = frozenset(
+_ANSWER_REPAIR_ORIGIN_ERROR_CODES = frozenset(
     {
         "empty_terminal_answer",
         "invalid_segment_mix",
@@ -112,6 +113,12 @@ _REPAIR_ORIGIN_ERROR_CODES = frozenset(
         "controlled_claim_id_invalid",
         "controlled_provenance_missing",
     }
+)
+_SCHEMA_RETRY_ORIGIN_ERROR_CODES = frozenset(
+    str(code) for code in get_args(SchemaRetryOriginCode)
+)
+_REPAIR_ORIGIN_ERROR_CODES = (
+    _ANSWER_REPAIR_ORIGIN_ERROR_CODES | _SCHEMA_RETRY_ORIGIN_ERROR_CODES
 )
 _MODEL_INVOCATION_STATUSES = frozenset(
     {"planned", "denied", "skipped", "started", "completed", "failed"}

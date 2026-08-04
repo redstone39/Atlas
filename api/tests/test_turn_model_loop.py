@@ -12,6 +12,9 @@ from atlas_production.infrastructure.strict_turn_model_adapter import StrictProv
 from atlas_production.infrastructure.strict_posthoc_claim_evaluator import (
     ClaimAssessmentUnavailable,
 )
+from atlas_production.infrastructure.postgres_owner.result_governance_v1 import (
+    _governed_segments_v2,
+)
 from atlas_production.infrastructure.turn_model_input_adapter import (
     PublicOwnerTurnModelInputSource,
 )
@@ -30,13 +33,13 @@ from atlas_production.modules.model_routing.public import (
     ProviderAssistantToolCallMessage,
     ProviderCompleted,
     ProviderFunctionCall,
+    ProviderOutputDecodeError,
     ProviderSystemMessage,
     ProviderToolCall,
     ProviderUserMessage,
 )
 from atlas_production.modules.result_governance.public import (
     GovernedAnswerDraftV2,
-    GovernedAnswerSegmentV2,
     PostHocAnswerAssessmentResultV2,
     PostHocAnswerAssessmentV2,
 )
@@ -83,6 +86,7 @@ from atlas_production.modules.turn_runtime.public import (
     ReasoningPlanItemV2,
     ReasoningPlanV2,
     RoutePolicyV1,
+    TurnRuntimeBudgetExceeded,
 )
 from tests.turn_runtime_fixtures import route_snapshot
 from tests.answer_behavior_fixtures import NullAnswerBehavior
@@ -100,7 +104,7 @@ def _budget(**changes) -> BudgetSnapshotV1:
     values = dict(
         tool_invocations=0, catalog_pages=0, document_candidates=0,
         search_rounds=0, unique_evidence=0, provider_invocations=0,
-        context_tokens=0, tool_tokens=0,
+        context_tokens=0, tool_tokens=0, schema_retries=0,
     )
     values.update(changes)
     return BudgetSnapshotV1(**values)
@@ -166,11 +170,31 @@ class Runtime:
             > self.snapshot_value.policy.context_token_budget
         ):
             raise ValueError("per-invocation context token budget exceeded")
+        if (
+            self.snapshot_value.budget.provider_invocations
+            >= self.snapshot_value.policy.max_provider_invocations
+        ):
+            raise TurnRuntimeBudgetExceeded("provider invocation budget exhausted")
         b = self.snapshot_value.budget.model_copy(update={
             "provider_invocations": self.snapshot_value.budget.provider_invocations + 1,
             "context_tokens": self.snapshot_value.budget.context_tokens + command.context_tokens,
         })
         return self._move("awaiting_model_action", budget=b)
+
+    def claim_schema_retry(self, command):
+        assert command.fencing_token == self.snapshot_value.lease.fencing_token
+        if (
+            self.snapshot_value.budget.schema_retries
+            >= self.snapshot_value.policy.max_schema_retries_per_turn
+        ):
+            raise TurnRuntimeBudgetExceeded("turn schema retry budget exhausted")
+        b = self.snapshot_value.budget.model_copy(
+            update={
+                "schema_retries": self.snapshot_value.budget.schema_retries + 1
+            }
+        )
+        self.snapshot_value = self.snapshot_value.model_copy(update={"budget": b})
+        return self.snapshot_value
 
     def record_reasoning_progress(self, command):
         self.calls.append(f"reasoning:{command.phase}:{command.progress_status}")
@@ -270,7 +294,9 @@ class ScriptSession:
         self.visual_images = []
         self.reasoning_feedback = []
 
-    def next_action(self, model_input, *, finalize_only):
+    def next_action(
+        self, model_input, *, finalize_only, repair_origin_error_code=None
+    ):
         self.finalize_only_values.append(finalize_only)
         if self.fail:
             raise RuntimeError("provider unavailable")
@@ -298,11 +324,20 @@ class ScriptSession:
     def accept_contract_repair(self, violation):
         self.observations.append(violation.model_dump(mode="json"))
 
-    def accept_reasoning_feedback(self, evaluation, *, plan=None):
-        self.reasoning_feedback.append((evaluation, plan))
+    def accept_reasoning_feedback(
+        self,
+        evaluation,
+        *,
+        correction_kind,
+        gate_feedback=None,
+        plan=None,
+    ):
+        self.reasoning_feedback.append(
+            (evaluation, correction_kind, gate_feedback, plan)
+        )
 
-    def accept_reasoning_limit(self, evaluation):
-        self.reasoning_feedback.append((evaluation, "limit"))
+    def accept_reasoning_limit(self, evaluation, *, gate_feedback=None):
+        self.reasoning_feedback.append((evaluation, "limit", gate_feedback, None))
 
     def discard(self):
         self.discarded = True
@@ -334,7 +369,14 @@ class ScriptReasoningModel:
     def estimate_plan_request_tokens(self, model_input, *, repair):
         return 10
 
-    def plan(self, model_input, *, repair):
+    def plan(
+        self,
+        model_input,
+        *,
+        repair,
+        schema_retry_ordinal=0,
+        repair_origin_error_code=None,
+    ):
         self.plan_calls.append(repair)
         if len(self.plan_calls) <= self.planner_failures:
             raise DeepReasoningContractError("deep_reasoning_plan_invalid")
@@ -359,7 +401,16 @@ class ScriptReasoningModel:
     def estimate_replan_request_tokens(self, *args, **kwargs):
         return 10
 
-    def replan(self, model_input, *, plan, evaluation, repair):
+    def replan(
+        self,
+        model_input,
+        *,
+        plan,
+        evaluation,
+        repair,
+        schema_retry_ordinal=0,
+        repair_origin_error_code=None,
+    ):
         self.replan_calls.append(repair)
         if len(self.replan_calls) <= self.replanner_failures:
             raise DeepReasoningContractError("deep_reasoning_replan_invalid")
@@ -850,14 +901,19 @@ class Evaluator:
 
 
 class Governance:
-    def __init__(self, order): self.order = order; self.command = None
+    def __init__(self, order):
+        self.order = order
+        self.command = None
+        self.draft = None
+
     def materialize_v2(self, command):
         self.order.append("governance"); self.command = command
-        return GovernedAnswerDraftV2(
+        segments, review_status, reason_codes = _governed_segments_v2(command)
+        self.draft = GovernedAnswerDraftV2(
             draft_ref=command.draft_ref, execution_id=command.execution_id,
             retrieval_status=command.retrieval_status,
-            evidence_review_status="questionable",
-            evidence_review_reason_codes=["assessment_not_completed"],
+            evidence_review_status=review_status,
+            evidence_review_reason_codes=reason_codes,
             declared_evidence_mappings=command.declared_evidence_mappings,
             assessment_state=command.assessment_state,
             assessment_reason_code=command.assessment_reason_code,
@@ -873,10 +929,9 @@ class Governance:
             assessment_input_digest=command.assessment_input_digest,
             assessment_output_digest=command.assessment_output_digest,
             assessment_results=command.assessment_results,
-            segments=[GovernedAnswerSegmentV2(
-                segment_id=s.segment_id, text=s.text
-            ) for s in command.finalized_answer.segments], digest=DIGEST, created_at=NOW,
+            segments=segments, digest=DIGEST, created_at=NOW,
         )
+        return self.draft
 
 
 class Citation:
@@ -1070,7 +1125,7 @@ def test_deep_conflict_revises_rechecks_and_reuses_only_latest_assessment() -> N
     assert [
         check.candidate_disposition for check in trace.provisional_evidence_checks
     ] == ["revised", "accepted"]
-    assert trace.evaluations[0].finding_codes[-1] == "declared_evidence_conflict"
+    assert "declared_evidence_conflict" not in trace.evaluations[0].finding_codes
     assert orchestrator.test_evaluator.calls == 2
     assert orchestrator._result_governance.command.assessment_consistency == "aligned"
 
@@ -1098,10 +1153,108 @@ def test_deep_partial_unresolved_is_insufficient_until_revised() -> None:
     assert trace.provisional_evidence_checks[0].reason_code == (
         "partially_unresolved_declared_evidence"
     )
-    assert trace.evaluations[0].finding_codes[-1] == (
-        "declared_evidence_insufficient"
-    )
+    assert "declared_evidence_insufficient" not in trace.evaluations[0].finding_codes
     assert trace.provisional_evidence_checks[1].consistency == "aligned"
+
+
+def test_deep_same_gate_input_reuses_first_veto_and_never_reinvokes_provider() -> None:
+    policy = RoutePolicyV1(max_reasoning_revision_cycles=1)
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A"]),
+            finalize(["kh_evidence_A"]),
+            finalize(["kh_evidence_A"]),
+        ],
+        policy=policy,
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "accept"),
+            process_evaluation(2, "accept"),
+        ],
+        assessment_outcomes=["insufficient"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.termination_reason == "correction_limit_reached"
+    assert [item.verdict for item in trace.evaluations] == ["accept", "accept"]
+    assert [item.consistency for item in trace.provisional_evidence_checks] == [
+        "insufficient",
+        "insufficient",
+        "insufficient",
+    ]
+    assert [item.assessment_input_digest for item in trace.provisional_evidence_checks] == [
+        "1" * 64,
+        "1" * 64,
+        "1" * 64,
+    ]
+    assert orchestrator.test_evaluator.calls == 1
+    assert model.session.reasoning_feedback[0][1] == "revise_only"
+    assert model.session.reasoning_feedback[0][2].consistency == "insufficient"
+    assert model.session.reasoning_feedback[0][2].failing_segment_ids == ["s1"]
+
+
+def test_deep_gate_veto_revises_when_process_evaluator_is_unavailable() -> None:
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A"]),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "revised answer"}],
+                claimed_evidence_handles=["kh_evidence_A"],
+            ),
+        ],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            RuntimeError("evaluator unavailable"),
+            process_evaluation(2, "accept"),
+        ],
+        assessment_outcomes=["conflict", "aligned"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.termination_reason == "completed"
+    assert trace.evaluations[0].verdict == "unavailable"
+    assert trace.corrections[0].kind == "revise_only"
+    assert model.session.reasoning_feedback[0][0].verdict == "unavailable"
+    assert model.session.reasoning_feedback[0][2].consistency == "conflict"
+
+
+def test_deep_process_research_takes_precedence_over_gate_veto() -> None:
+    orchestrator, runtime, retrieval, model, _order = _orchestrator(
+        [
+            search("A"),
+            finalize(["kh_evidence_A"]),
+            search("missing evidence"),
+            FinalizeAnswerV1(
+                action="finalize_answer",
+                segments=[{"segment_id": "s1", "text": "researched answer"}],
+                claimed_evidence_handles=["kh_evidence_A"],
+            ),
+        ],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "research_then_revise"),
+            process_evaluation(2, "accept"),
+        ],
+        assessment_outcomes=["conflict", "aligned"],
+    )
+
+    orchestrator.run("exec-1")
+
+    trace = runtime.snapshot_value.reasoning_trace
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert trace is not None and trace.corrections[0].kind == "research_then_revise"
+    assert retrieval.invocations == ["search_knowledge", "search_knowledge"]
+    assert model.session.reasoning_feedback[0][1] == "research_then_revise"
+    assert model.session.reasoning_feedback[0][2].consistency == "conflict"
 
 
 def test_deep_empty_declaration_skips_gate_provider_but_still_evaluates() -> None:
@@ -1175,6 +1328,14 @@ def test_deep_limit_final_candidate_is_gated_without_another_process_evaluation(
         "limit_finalized"
     )
     assert orchestrator.test_evaluator.calls == 2
+    assert orchestrator._result_governance.command.delivery_constraint == (
+        "correction_limit_reached"
+    )
+    assert orchestrator._result_governance.command.assessment_consistency == "aligned"
+    assert orchestrator._result_governance.draft.evidence_review_status == "questionable"
+    assert orchestrator._result_governance.draft.evidence_review_reason_codes == [
+        "assessment_not_completed"
+    ]
 
 
 def test_deep_research_correction_replans_opens_tools_and_evaluates_new_candidate() -> None:
@@ -1201,7 +1362,8 @@ def test_deep_research_correction_replans_opens_tools_and_evaluates_new_candidat
     assert (correction.tool_invocation_start, correction.tool_invocation_end) == (1, 1)
     assert correction.result_evaluation == 2
     assert retrieval.invocations == ["search_knowledge"]
-    assert model.session.reasoning_feedback[0][1].generation == 2
+    assert model.session.reasoning_feedback[0][1] == "research_then_revise"
+    assert model.session.reasoning_feedback[0][3].generation == 2
 
 
 def test_deep_research_correction_cannot_finalize_without_a_tool_invocation() -> None:
@@ -1323,7 +1485,7 @@ def test_deep_planner_failure_after_one_schema_repair_fails_closed() -> None:
     assert orchestrator.test_reasoning_model.plan_calls == [False, True]
 
 
-def test_deep_planner_and_replanner_share_one_schema_repair() -> None:
+def test_deep_planner_and_replanner_share_one_turn_schema_retry_budget() -> None:
     orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
         [finalize()],
         reasoning_mode="deep",
@@ -1838,11 +2000,27 @@ def test_provider_failure_is_terminal_and_orchestrator_has_safe_diagnostics(capl
     orchestrator.run("exec-1")
     assert runtime.snapshot_value.state == ExecutionState.TERMINAL_FAILED
     assert runtime.calls[-1] == "fail:provider_failed"
+    assert runtime.snapshot_value.budget.schema_retries == 0
     assert "failure_code=provider_failed" in caplog.text
     assert "exception_type=builtins.RuntimeError" in caplog.text
     assert "exception_digest=" in caplog.text
     assert "provider unavailable" not in caplog.text
     assert not hasattr(orchestrator, "resume") and not hasattr(orchestrator, "takeover")
+
+
+def test_answer_schema_decode_error_retries_with_shared_turn_budget() -> None:
+    orchestrator, runtime, _, _, _ = _orchestrator(
+        [
+            ProviderOutputDecodeError(safe_code="provider_output_decode_error"),
+            finalize(),
+        ]
+    )
+
+    orchestrator.run("exec-1")
+
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert runtime.snapshot_value.budget.schema_retries == 1
+    assert runtime.snapshot_value.budget.provider_invocations == 2
 
 
 @pytest.mark.parametrize(
