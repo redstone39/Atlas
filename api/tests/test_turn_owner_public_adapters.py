@@ -41,6 +41,7 @@ from atlas_production.infrastructure.postgres_retrieval_v1_adapter import (
 )
 from atlas_production.modules.conversation.public import (
     AppendTurnMemberV1,
+    ConversationArchiveV1,
     ConversationCreateV1,
     ConversationTurnMemberV1,
 )
@@ -59,6 +60,7 @@ class _ConversationStore:
         self.member: TurnMemberRecord | None = None
         self.create_request = None
         self.append_request = None
+        self.archive_request = None
 
     def create(self, command):
         if self.create_request is not None:
@@ -100,6 +102,27 @@ class _ConversationStore:
             self.conversation, next_ordinal=command.expected_next_ordinal + 1
         )
         return self.member
+
+    def archive(self, command, *, audit_event):
+        if self.archive_request is not None:
+            if command != self.archive_request:
+                raise ConversationStoreConflict(
+                    "conversation archive replay payload changed"
+                )
+            assert self.conversation is not None
+            return SimpleNamespace(
+                conversation=self.conversation,
+                audit_event_ref=audit_event.event_id,
+            )
+        assert self.conversation is not None
+        assert self.conversation.status == "active"
+        assert command.expected_next_ordinal == self.conversation.next_ordinal
+        self.archive_request = command
+        self.conversation = replace(self.conversation, status="archived")
+        return SimpleNamespace(
+            conversation=self.conversation,
+            audit_event_ref=audit_event.event_id,
+        )
 
     def get(self, conversation_id):
         if self.conversation is None or self.conversation.conversation_id != conversation_id:
@@ -175,6 +198,22 @@ def test_conversation_public_adapter_hides_ordinal_and_replays_exact_identity(mo
     assert "retry_of_turn_id" not in AppendTurnMemberV1.model_fields
     assert "retry_of_turn_id" not in ConversationTurnMemberV1.model_fields
 
+    archived = adapter.archive(
+        actor_id="actor-1",
+        conversation_id=first.conversation_id,
+        command=ConversationArchiveV1(
+            idempotency_key="archive-key", expected_next_ordinal=2
+        ),
+    )
+    assert archived.conversation.status == "archived"
+    assert archived == adapter.archive(
+        actor_id="actor-1",
+        conversation_id=first.conversation_id,
+        command=ConversationArchiveV1(
+            idempotency_key="archive-key", expected_next_ordinal=2
+        ),
+    )
+
     english_adapter = conversation_adapter.PostgresConversationV1Adapter(
         _ConversationSession
     )
@@ -218,13 +257,14 @@ def test_context_read_adapter_returns_strict_public_models() -> None:
                 "turn-1",
                 "c" * 64,
                 ContextMessageInput("user", "question"),
-                ContextMessageInput("assistant", "answer", "verified"),
+                ContextMessageInput("assistant", "answer", "unverified"),
             ),
         ),
         SummaryRecord(
             "summary-1",
             None,
-            "older",
+            "older user context",
+            "older assistant context pending verification",
             1,
             (SummarySourceInput("root-0", "turn-0", "d" * 64),),
             "a" * 64,
@@ -237,6 +277,10 @@ def test_context_read_adapter_returns_strict_public_models() -> None:
     public = adapter.get("context-pack-1")
     assert public is not None
     assert public.recent_tail[0].representative_turn_id == "turn-1"
+    assert public.summary is not None
+    assert public.summary.assistant_pending_verification_context.endswith(
+        "pending verification"
+    )
     assert adapter.lineage_graph(["turn-2"]).edges[0].source_turn_id == "turn-1"
 
 

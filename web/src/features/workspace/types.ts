@@ -60,6 +60,11 @@ export interface ConversationListResult {
   conversations: ConversationSummary[];
 }
 
+export interface ConversationArchiveResultDto {
+  conversation: WorkspaceConversationDto;
+  audit_event_ref: string;
+}
+
 export interface ConversationTurn {
   turn_id: string;
   conversation_id: string;

@@ -79,7 +79,10 @@ class AtlasTurnConversationIdempotencyRow(OrmBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        CheckConstraint("operation IN ('create_conversation','create_turn','retry_turn')", name="ck_atlas_turn_conversation_idempotency_operation"),
+        CheckConstraint(
+            "operation IN ('create_conversation','create_turn','retry_turn','archive_conversation')",
+            name="ck_atlas_turn_conversation_idempotency_operation",
+        ),
         CheckConstraint("char_length(scope_ref) >= 1", name="ck_atlas_turn_conversation_idempotency_scope"),
         CheckConstraint("request_digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_conversation_idempotency_digest"),
     )

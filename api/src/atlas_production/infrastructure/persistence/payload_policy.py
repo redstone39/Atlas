@@ -21,7 +21,7 @@ MODEL_RUNTIME_POLICY_FIELDS = frozenset(
         "max_reasoning_revision_cycles",
         "max_catalog_pages",
         "max_search_rounds",
-        "max_unique_evidence",
+        "max_model_visible_items_per_turn",
         "max_retrieval_repairs",
         "max_schema_retries_per_turn",
         "max_selected_anchor_pages_per_round",

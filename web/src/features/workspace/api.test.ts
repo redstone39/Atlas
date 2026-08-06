@@ -389,7 +389,7 @@ describe("workspace execution API contract", () => {
 
     const answer = conversationDetail({ conversation, turns: [mixedProjection] }).turns[1];
 
-    expect(answer.answer_text).toBe("Supported claim. Unsupported detail.\nClosing context.");
+    expect(answer.answer_text).toBe("Supported claim. Unsupported detail.\n\nClosing context.");
     expect(answer.response_kind).toBe("answer");
     expect(answer.evidence_review_status).toBe("questionable");
     expect(answer.response_segments[0].verification_status).toBe("not_applicable");
@@ -477,6 +477,30 @@ describe("workspace execution API contract", () => {
     });
     expect(created.turns.map((turn) => turn.role)).toEqual(["user", "assistant"]);
     expect(loaded.turns[1].source_turn_id).toBe("turn-a");
+  });
+
+  it("archives a conversation through the explicit retained-data action", async () => {
+    const archived = { ...conversation, status: "archived" as const };
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({
+      conversation: archived,
+      audit_event_ref: "audit-conversation-archive",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      workspaceApi.archiveWorkspaceConversation("conv a", "archive-key"),
+    ).resolves.toEqual({
+      conversation: archived,
+      audit_event_ref: "audit-conversation-archive",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/workspace/conversations/conv%20a/archive",
+      expect.objectContaining({
+        credentials: "include",
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: "archive-key" }),
+      }),
+    );
   });
 
   it("surfaces typed errors from the durable event endpoint", async () => {

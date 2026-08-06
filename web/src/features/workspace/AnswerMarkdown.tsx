@@ -1,3 +1,4 @@
+import { Children } from "react";
 import Markdown, { type Components, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -30,7 +31,13 @@ const components: Components = {
   ol: ({ children }) => (
     <ol className="list-decimal space-y-1 pl-6">{children}</ol>
   ),
-  li: ({ children }) => <li className="pl-1 leading-7">{children}</li>,
+  li: ({ children }) => (
+    <li className="pl-1 leading-7">
+      {Children.map(children, (child) => typeof child === "string" ? (
+        <span className="whitespace-pre-wrap">{child}</span>
+      ) : child)}
+    </li>
+  ),
   blockquote: ({ children }) => (
     <blockquote className="border-l-2 border-border pl-4 text-muted-foreground">
       {children}
@@ -94,7 +101,7 @@ export function AnswerMarkdown({
   return (
     <div className={cn("min-w-0 space-y-3 break-words", className)}>
       <Markdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         skipHtml
         urlTransform={safeUrlTransform}
         components={components}

@@ -13,7 +13,7 @@ from atlas_production.infrastructure.turn_input_projection import (
 from atlas_production.modules.context_engineering.public import (
     ContextExchangeV3,
     ContextMessageV3,
-    ContextSummaryInputV3,
+    ContextSummaryInputV4,
     ContextSummarySourceV3,
     CreateTurnInputProjectionV1,
     RecordResolverProjectionV1,
@@ -175,10 +175,11 @@ def _history():
 
 
 def _summary():
-    return ContextSummaryInputV3(
+    return ContextSummaryInputV4(
         summary_ref="summary-1",
         parent_summary_ref="summary-parent",
-        text="先前主要討論文件 A。",
+        historical_user_context="先前使用者主要討論文件 A。",
+        assistant_pending_verification_context="先前助理認為文件 A 已完成。",
         token_count=10,
         sources=[
             ContextSummarySourceV3(
@@ -308,14 +309,35 @@ def test_stage_prompts_define_generic_success_without_fixture_leak() -> None:
         "resolver_context",
     }
     assert resolver_payload["authorized_rewritten_context"] == {
-        "summary": "先前主要討論文件 A。",
+        "summary": {
+            "historical_user_context": {
+                "text": "先前使用者主要討論文件 A。",
+                "authority": "user_provided_history",
+            },
+            "assistant_pending_verification_context": {
+                "text": "先前助理認為文件 A 已完成。",
+                "authority": "pending_verification",
+                "usage_scope": "dialogue_context_only",
+            },
+        },
         "recent_exchanges": [
             {
-                "user_message": "比較文件 A 與文件 B。",
-                "assistant_message": "文件 A 已完成比較。",
+                "user_message": {
+                    "text": "比較文件 A 與文件 B。",
+                    "authority": "user_provided_history",
+                },
+                "assistant_message": {
+                    "text": "文件 A 已完成比較。",
+                    "authority": "pending_verification",
+                    "usage_scope": "dialogue_context_only",
+                },
             }
         ],
     }
+    resolver_policy = json.loads(resolver_system)["history_authority_policy"]
+    rewrite_policy = json.loads(rewrite_system)["history_authority_policy"]
+    assert resolver_policy == rewrite_policy
+    assert resolver_policy["enforcement"] == "soft"
     assert rewrite_payload == {
         "original_user_input": "它跟上一份有什麼差異？",
         "resolver_context": "指的是文件 B 與文件 A。",

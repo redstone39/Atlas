@@ -34,14 +34,14 @@ class ProviderConnectionSecretRecord:
 
 @dataclass(frozen=True)
 class ModelRouteRuntimePolicyInput:
-    schema_version: Literal["model-route-runtime-policy-v7"]
+    schema_version: Literal["model-route-runtime-policy-v8"]
     tokenizer_profile: str
     max_tool_executions: int
     max_provider_invocations: int
     max_reasoning_revision_cycles: int
     max_catalog_pages: int
     max_search_rounds: int
-    max_unique_evidence: int
+    max_model_visible_items_per_turn: int
     max_retrieval_repairs: int
     max_schema_retries_per_turn: int
     max_selected_anchor_pages_per_round: int
@@ -55,7 +55,7 @@ class ModelRouteRuntimePolicyInput:
     max_total_tokens_per_conversation: int
 
     def __post_init__(self) -> None:
-        if self.schema_version != "model-route-runtime-policy-v7":
+        if self.schema_version != "model-route-runtime-policy-v8":
             raise ValueError("invalid runtime policy schema")
         if not self.tokenizer_profile.strip():
             raise ValueError("tokenizer profile is required")
@@ -68,7 +68,7 @@ class ModelRouteRuntimePolicyInput:
             self.max_provider_invocations,
             self.max_catalog_pages,
             self.max_search_rounds,
-            self.max_unique_evidence,
+            self.max_model_visible_items_per_turn,
             self.max_retrieval_repairs,
             self.max_schema_retries_per_turn,
             self.max_selected_anchor_pages_per_round,

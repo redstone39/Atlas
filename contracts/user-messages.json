@@ -226,6 +226,18 @@
     "conversation.was_not_found": {
       "params": {}
     },
+    "conversation.was_archived": {
+      "params": {}
+    },
+    "conversation.cannot_be_archived_while_processing": {
+      "params": {}
+    },
+    "conversation.changed_before_archive": {
+      "params": {}
+    },
+    "conversation.changed_before_turn_was_accepted": {
+      "params": {}
+    },
     "conversation.workspace_conversation_was_created": {
       "params": {}
     },

@@ -99,7 +99,7 @@ try {
       name: `${documentTitle}.pdf`,
       mimeType: "application/pdf",
       buffer: searchablePdf(
-        "The controlled impedance target for the PCIe reference lane is 85 ohms differential, with tolerance set by the project stackup note.",
+        "The synthetic reference target is documented in the example source differential, with tolerance set by the project stackup note.",
       ),
     });
   await page.getByLabel("Document description").fill("Controlled smoke evidence");
@@ -165,7 +165,7 @@ try {
   await page.getByRole("heading", { name: "Workspace" }).waitFor();
   await page
     .getByLabel("Message")
-    .fill("What is the controlled impedance target for the PCIe reference lane?");
+    .fill("What is the approved value for the selected item?");
   const turnResponsePromise = page.waitForResponse(
     (response) =>
       response.url().includes("/api/v1/workspace/conversations/") &&
@@ -218,7 +218,7 @@ try {
   await page.getByRole("heading", { name: "Workspace" }).waitFor();
   await page
     .getByLabel("Question")
-    .fill("What is the controlled impedance target for the PCIe reference lane?");
+    .fill("What is the approved value for the selected item?");
   await page.getByRole("button", { name: /^Ask$/ }).click();
   await page.getByText(/do not currently have access/i).first().waitFor();
 

@@ -49,7 +49,11 @@ class AtlasTurnExecutionRow(OrmBase):
     max_tool_invocations: Mapped[int] = mapped_column(Integer, nullable=False)
     max_catalog_pages: Mapped[int] = mapped_column(Integer, nullable=False)
     max_search_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
-    max_unique_evidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_model_visible_items_per_turn: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_retrieval_repairs: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_selected_anchor_pages_per_round: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
     max_provider_invocations: Mapped[int] = mapped_column(Integer, nullable=False)
     max_reasoning_revision_cycles: Mapped[int] = mapped_column(
         Integer, nullable=False
@@ -57,6 +61,7 @@ class AtlasTurnExecutionRow(OrmBase):
     max_schema_retries_per_turn: Mapped[int] = mapped_column(Integer, nullable=False)
     context_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_token_budget: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_execution_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     deadline_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     heartbeat_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     ttl_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -108,7 +113,9 @@ class AtlasTurnExecutionRow(OrmBase):
         ),
         CheckConstraint(
             "max_tool_invocations >= 0 AND max_catalog_pages >= 0 AND "
-            "max_search_rounds >= 0 AND max_unique_evidence >= 0",
+            "max_search_rounds >= 0 AND max_model_visible_items_per_turn >= 0 AND "
+            "max_retrieval_repairs BETWEEN 1 AND 3 AND "
+            "max_selected_anchor_pages_per_round BETWEEN 1 AND 20",
             name="ck_atlas_turn_execution_nonnegative_policy",
         ),
         CheckConstraint(
@@ -120,7 +127,8 @@ class AtlasTurnExecutionRow(OrmBase):
         ),
         CheckConstraint(
             "context_token_budget >= 1 AND tool_token_budget >= 1 AND "
-            "deadline_seconds >= 1",
+            "tool_execution_timeout_seconds >= 1 AND deadline_seconds >= 1 AND "
+            "tool_execution_timeout_seconds <= deadline_seconds",
             name="ck_atlas_turn_execution_positive_policy",
         ),
         CheckConstraint(
@@ -164,14 +172,15 @@ class AtlasTurnBudgetCounterRow(OrmBase):
     catalog_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     document_candidates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     search_rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    unique_evidence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_visible_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provider_invocations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     context_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tool_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retrieval_repairs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     schema_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     __table_args__ = (
-        CheckConstraint("tool_invocations >= 0 AND catalog_pages >= 0 AND document_candidates >= 0 AND search_rounds >= 0 AND unique_evidence >= 0 AND provider_invocations >= 0 AND context_tokens >= 0 AND tool_tokens >= 0 AND schema_retries >= 0", name="ck_atlas_turn_budget_nonnegative"),
+        CheckConstraint("tool_invocations >= 0 AND catalog_pages >= 0 AND document_candidates >= 0 AND search_rounds >= 0 AND model_visible_items >= 0 AND provider_invocations >= 0 AND context_tokens >= 0 AND tool_tokens >= 0 AND retrieval_repairs >= 0 AND schema_retries >= 0", name="ck_atlas_turn_budget_nonnegative"),
     )
 
 
@@ -187,16 +196,21 @@ class AtlasTurnDocumentCandidateLedgerRow(OrmBase):
     __table_args__ = (CheckConstraint("first_invocation_ordinal >= 1", name="ck_atlas_turn_candidate_first_ordinal"),)
 
 
-class AtlasTurnUniqueEvidenceLedgerRow(OrmBase):
-    __tablename__ = "atlas_turn_unique_evidence_ledger"
+class AtlasTurnModelVisibleItemLedgerRow(OrmBase):
+    __tablename__ = "atlas_turn_model_visible_item_ledger"
 
     execution_id: Mapped[str] = mapped_column(
         String(200), ForeignKey("atlas_turn_executions.execution_id", ondelete="CASCADE"), primary_key=True
     )
-    evidence_identity: Mapped[str] = mapped_column(String(300), primary_key=True)
+    item_identity: Mapped[str] = mapped_column(String(300), primary_key=True)
     first_invocation_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    __table_args__ = (CheckConstraint("first_invocation_ordinal >= 1", name="ck_atlas_turn_evidence_first_ordinal"),)
+    __table_args__ = (
+        CheckConstraint(
+            "first_invocation_ordinal >= 1",
+            name="ck_atlas_turn_model_visible_item_first_ordinal",
+        ),
+    )
 
 
 class AtlasTurnStepLedgerRow(OrmBase):
@@ -236,7 +250,7 @@ class AtlasTurnToolLedgerRow(OrmBase):
     reserve_catalog_pages: Mapped[int] = mapped_column(Integer, nullable=False)
     reserve_document_candidates: Mapped[int] = mapped_column(Integer, nullable=False)
     reserve_search_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
-    reserve_unique_evidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserve_model_visible_items: Mapped[int] = mapped_column(Integer, nullable=False)
     reserve_tool_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     result_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
     result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -249,7 +263,7 @@ class AtlasTurnToolLedgerRow(OrmBase):
         CheckConstraint("arguments_digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_tool_arguments_digest"),
         CheckConstraint(
             "reserve_catalog_pages >= 0 AND reserve_document_candidates >= 0 AND "
-            "reserve_search_rounds >= 0 AND reserve_unique_evidence >= 0 AND "
+            "reserve_search_rounds >= 0 AND reserve_model_visible_items >= 0 AND "
             "reserve_tool_tokens >= 0",
             name="ck_atlas_turn_tool_reservations_nonnegative",
         ),
@@ -434,7 +448,7 @@ class AtlasTurnRuntimeIdempotencyRow(OrmBase):
 OWNER_TABLES = frozenset(
     {
         AtlasTurnExecutionRow.__tablename__, AtlasTurnExecutionLeaseRow.__tablename__, AtlasTurnBudgetCounterRow.__tablename__,
-        AtlasTurnDocumentCandidateLedgerRow.__tablename__, AtlasTurnUniqueEvidenceLedgerRow.__tablename__,
+        AtlasTurnDocumentCandidateLedgerRow.__tablename__, AtlasTurnModelVisibleItemLedgerRow.__tablename__,
         AtlasTurnStepLedgerRow.__tablename__, AtlasTurnToolLedgerRow.__tablename__, AtlasTurnRuntimeEventRow.__tablename__,
         AtlasTurnTerminalIntentRow.__tablename__, AtlasTurnTerminalOutcomeRow.__tablename__,
         AtlasTurnAcceptanceResourceRow.__tablename__, AtlasTurnReleaseIntentRow.__tablename__,

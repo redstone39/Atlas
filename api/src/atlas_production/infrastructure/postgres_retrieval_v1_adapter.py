@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from fractions import Fraction
 import hashlib
 import json
@@ -229,6 +230,7 @@ class KnowledgeRetrievalBackend(Protocol):
         documents: tuple[BackendCatalogDocument, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendDiscoveryHit]: ...
 
     def discover_vector(
@@ -237,6 +239,7 @@ class KnowledgeRetrievalBackend(Protocol):
         documents: tuple[BackendCatalogDocument, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendDiscoveryHit]: ...
 
     def search(
@@ -247,6 +250,7 @@ class KnowledgeRetrievalBackend(Protocol):
         required_modalities: tuple[str, ...],
         facet_hints: Mapping[str, object],
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]: ...
 
     def inspect(
@@ -254,6 +258,7 @@ class KnowledgeRetrievalBackend(Protocol):
         *,
         documents: tuple[BackendCatalogDocument, ...],
         evidence_refs: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]: ...
 
     def expand(
@@ -263,6 +268,7 @@ class KnowledgeRetrievalBackend(Protocol):
         anchor_evidence_refs: tuple[str, ...],
         direction: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]: ...
 
     def read_exact(
@@ -278,10 +284,11 @@ class KnowledgeRetrievalBackend(Protocol):
         document: BackendCatalogDocument,
         page_number: int,
         normalized_bbox: tuple[int, int, int, int],
+        deadline_at: datetime | None = None,
     ) -> BackendVisualImage: ...
 
     def navigation_map(
-        self, *, document: BackendCatalogDocument
+        self, *, document: BackendCatalogDocument, deadline_at: datetime | None = None
     ) -> DocumentNavigationMapV1 | None: ...
 
 
@@ -513,10 +520,21 @@ class KnowledgeToolService:
         grant_resources: GrantDocumentResourceOwner,
         store: PostgresRetrievalV1Store,
         backend: KnowledgeRetrievalBackend,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._grant_resources = grant_resources
         self._store = store
         self._backend = backend
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _deadline_expired(self, deadline_at: datetime | None) -> bool:
+        return deadline_at is not None and self._clock() >= deadline_at
+
+    @staticmethod
+    def _is_postgres_statement_timeout(error: BaseException) -> bool:
+        return isinstance(error, OperationalError) and getattr(
+            error.orig, "sqlstate", None
+        ) == "57014"
 
     def create_catalog(
         self,
@@ -602,13 +620,73 @@ class KnowledgeToolService:
         max_output_tokens: int | None = None,
         tokenizer_profile: str = "cl100k_base",
         max_output_bytes: int = 262_144,
+        deadline_at: datetime | None = None,
     ) -> RetrievalInvocationEnvelopeV1:
-        catalog = self._store.get_catalog(execution_id=execution_id, catalog_ref=catalog_ref)
+        try:
+            return self._invoke_with_deadline(
+                execution_id=execution_id,
+                grant_ref=grant_ref,
+                catalog_ref=catalog_ref,
+                invocation_ordinal=invocation_ordinal,
+                action=action,
+                max_output_tokens=max_output_tokens,
+                tokenizer_profile=tokenizer_profile,
+                max_output_bytes=max_output_bytes,
+                deadline_at=deadline_at,
+            )
+        except TimeoutError:
+            return self._persist_failure_observation(
+                execution_id=execution_id,
+                catalog_ref=catalog_ref,
+                invocation_ordinal=invocation_ordinal,
+                action=action,
+                max_output_tokens=max_output_tokens,
+                tokenizer_profile=tokenizer_profile,
+                message_code="retrieval_tool_timeout",
+            )
+        except OperationalError as error:
+            if (
+                deadline_at is None
+                or getattr(error.orig, "sqlstate", None) != "57014"
+            ):
+                raise
+            return self._persist_failure_observation(
+                execution_id=execution_id,
+                catalog_ref=catalog_ref,
+                invocation_ordinal=invocation_ordinal,
+                action=action,
+                max_output_tokens=max_output_tokens,
+                tokenizer_profile=tokenizer_profile,
+                message_code="retrieval_tool_timeout",
+            )
+
+    def _invoke_with_deadline(
+        self,
+        *,
+        execution_id: str,
+        grant_ref: str,
+        catalog_ref: str,
+        invocation_ordinal: int,
+        action: KnowledgeToolActionV1,
+        max_output_tokens: int | None = None,
+        tokenizer_profile: str = "cl100k_base",
+        max_output_bytes: int = 262_144,
+        deadline_at: datetime | None = None,
+    ) -> RetrievalInvocationEnvelopeV1:
+        if self._deadline_expired(deadline_at):
+            raise TimeoutError("retrieval tool deadline elapsed before invocation")
+        catalog = self._store.get_catalog(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+            deadline_at=deadline_at,
+        )
         if catalog.grant_ref != grant_ref:
             raise RetrievalStoreConflict("catalog does not belong to grant")
         if isinstance(action, (InspectVisualV1, NavigateDocumentV1)):
             current = self._grant_resources.current_grant_document_resources(
-                execution_id=execution_id, grant_ref=grant_ref
+                execution_id=execution_id,
+                grant_ref=grant_ref,
+                deadline_at=deadline_at,
             )
             if (
                 current.authorization_revision != catalog.authorization_revision
@@ -659,6 +737,7 @@ class KnowledgeToolService:
             action=action.action,
             schema_version=schema_version,
             canonical_arguments=arguments,
+            deadline_at=deadline_at,
         )
         if replay is not None:
             observation = _OBSERVATION_ADAPTER.validate_python(
@@ -669,28 +748,40 @@ class KnowledgeToolService:
                 observation,
                 replay,
                 resolved=resolved,
-                visual_image=self._replay_visual_image(catalog, observation),
+                visual_image=self._replay_visual_image(
+                    catalog, observation, deadline_at=deadline_at
+                ),
                 tokenizer=tokenizer,
             )
 
         trace: dict[str, object] | None = None
         try:
             if isinstance(action, DiscoverRelevantDocumentsV1):
-                observation, trace = self._execute_discovery(catalog, action)
+                observation, trace = self._execute_discovery(
+                    catalog, action, deadline_at=deadline_at
+                )
                 handles = ()
                 visual_image = None
             else:
                 observation, handles, visual_image = self._execute(
-                    catalog, action, resolved
+                    catalog, action, resolved, deadline_at=deadline_at
                 )
-        except (TimeoutError, ConnectionError, OSError, OperationalError):
+        except (TimeoutError, ConnectionError, OSError, OperationalError) as error:
             # Known backend availability failures are model-visible tool
             # outcomes.  Contract, authorization and immutable-lineage
             # conflicts deliberately continue to fail closed.
             observation = KnowledgeToolErrorV1(
                 result_type="knowledge_tool_error",
                 error_code="tool_failed",
-                message_code="retrieval_backend_unavailable",
+                message_code=(
+                    "retrieval_tool_timeout"
+                    if deadline_at is not None
+                    and (
+                        isinstance(error, TimeoutError)
+                        or self._is_postgres_statement_timeout(error)
+                    )
+                    else "retrieval_backend_unavailable"
+                ),
                 retryable=True,
             )
             handles = ()
@@ -714,6 +805,15 @@ class KnowledgeToolService:
                     ranked=(),
                     vector_coverage=0,
                 )
+        if self._deadline_expired(deadline_at):
+            observation = KnowledgeToolErrorV1(
+                result_type="knowledge_tool_error",
+                error_code="tool_failed",
+                message_code="retrieval_tool_timeout",
+                retryable=True,
+            )
+            handles = ()
+            visual_image = None
         observation, handles = self._bounded_observation(
             observation,
             handles,
@@ -724,6 +824,15 @@ class KnowledgeToolService:
             action=action,
         )
         if not isinstance(observation, VisualInspectionResultV1):
+            visual_image = None
+        if self._deadline_expired(deadline_at):
+            observation = KnowledgeToolErrorV1(
+                result_type="knowledge_tool_error",
+                error_code="tool_failed",
+                message_code="retrieval_tool_timeout",
+                retryable=True,
+            )
+            handles = ()
             visual_image = None
         arguments_digest = _digest(arguments)
         invocation_id = _opaque("invocation", execution_id, catalog_ref, str(invocation_ordinal))
@@ -759,7 +868,12 @@ class KnowledgeToolService:
                 observation=persisted_observation,
                 error_code=(observation.error_code if observation.result_type == "knowledge_tool_error" else None),
                 handles=handles,
-            )
+            ),
+            deadline_at=(
+                deadline_at
+                if observation.result_type != "knowledge_tool_error"
+                else None
+            ),
         )
         return self._envelope(
             catalog,
@@ -767,6 +881,66 @@ class KnowledgeToolService:
             record,
             resolved=resolved,
             visual_image=visual_image,
+            tokenizer=tokenizer,
+        )
+
+    def _persist_failure_observation(
+        self,
+        *,
+        execution_id: str,
+        catalog_ref: str,
+        invocation_ordinal: int,
+        action: KnowledgeToolActionV1,
+        max_output_tokens: int | None,
+        tokenizer_profile: str,
+        message_code: str,
+    ) -> RetrievalInvocationEnvelopeV1:
+        catalog = self._store.get_catalog(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+        )
+        effective_output_tokens = max_output_tokens
+        if effective_output_tokens is None:
+            effective_output_tokens = getattr(action, "max_output_tokens", 16_000)
+        tokenizer = tiktoken.get_encoding(tokenizer_profile)
+        arguments = action.model_dump(mode="json")
+        if isinstance(action, (FindKnowledgeDocumentsV1, DiscoverRelevantDocumentsV1)):
+            arguments["runtime_max_output_tokens"] = effective_output_tokens
+            arguments["tokenizer_profile"] = tokenizer_profile
+        observation = KnowledgeToolErrorV1(
+            result_type="knowledge_tool_error",
+            error_code="tool_failed",
+            message_code=message_code,
+            retryable=True,
+        )
+        schema_version = f"{action.action.replace('_', '-')}-v1"
+        arguments_digest = _digest(arguments)
+        record = self._store.persist_invocation_result(
+            PersistInvocationResultInput(
+                invocation_id=_opaque(
+                    "invocation", execution_id, catalog_ref, str(invocation_ordinal)
+                ),
+                result_ref=_opaque(
+                    "result", execution_id, catalog_ref, action.action, arguments_digest
+                ),
+                execution_id=execution_id,
+                catalog_ref=catalog_ref,
+                invocation_ordinal=invocation_ordinal,
+                action=action.action,
+                schema_version=schema_version,
+                canonical_arguments=arguments,
+                result_type=observation.result_type,
+                observation=observation.model_dump(mode="json"),
+                error_code=observation.error_code,
+                handles=(),
+            )
+        )
+        return self._envelope(
+            catalog,
+            observation,
+            record,
+            resolved=(),
+            visual_image=None,
             tokenizer=tokenizer,
         )
 
@@ -856,6 +1030,8 @@ class KnowledgeToolService:
         self,
         catalog: CatalogRecord,
         action: DiscoverRelevantDocumentsV1,
+        *,
+        deadline_at: datetime | None = None,
     ) -> tuple[
         RelevantDocumentDiscoveryResultV1 | KnowledgeToolErrorV1,
         dict[str, object],
@@ -875,6 +1051,7 @@ class KnowledgeToolService:
                     documents=documents,
                     query_text=action.query_text,
                     limit=channel_limit,
+                    deadline_at=deadline_at,
                 )
                 channel_trace.append(
                     {
@@ -883,7 +1060,12 @@ class KnowledgeToolService:
                         "component_document_count": 0,
                     }
                 )
-            except (TimeoutError, ConnectionError, OSError, OperationalError):
+            except (TimeoutError, ConnectionError, OSError, OperationalError) as error:
+                if deadline_at is not None and (
+                    isinstance(error, TimeoutError)
+                    or self._is_postgres_statement_timeout(error)
+                ):
+                    raise TimeoutError("retrieval discovery deadline elapsed") from error
                 channel_trace.append(
                     {
                         "channel": channel,
@@ -1444,6 +1626,16 @@ class KnowledgeToolService:
             )
         return projected
 
+    def count_page_and_visual_handles(
+        self, *, execution_id: str, catalog_ref: str
+    ) -> int:
+        """Count model-visible page and visual capabilities for one catalog."""
+
+        return self._store.count_page_and_visual_handles(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+        )
+
     def read_governance_evidence_pack(
         self,
         *,
@@ -1942,7 +2134,14 @@ class KnowledgeToolService:
                 )
         return resolved
 
-    def _execute(self, catalog: CatalogRecord, action: KnowledgeToolActionV1, resolved):
+    def _execute(
+        self,
+        catalog: CatalogRecord,
+        action: KnowledgeToolActionV1,
+        resolved,
+        *,
+        deadline_at: datetime | None = None,
+    ):
         if isinstance(action, (ListKnowledgeDocumentsV1, FindKnowledgeDocumentsV1)):
             return self._catalog_page(catalog, action), (), None
         documents = self._backend_documents(catalog)
@@ -1955,16 +2154,23 @@ class KnowledgeToolService:
                 required_modalities=tuple(action.required_modalities),
                 facet_hints=action.facet_hints.model_dump(mode="json"),
                 limit=action.limit,
+                deadline_at=deadline_at,
             )
             observation, handles = self._evidence_result(
                 catalog, evidence, expansion_direction=None, limit=action.limit
             )
             return observation, handles, None
         if isinstance(action, NavigateDocumentV1):
-            return (*self._navigate_document(catalog, action, resolved, by_handle), None)
+            return (*self._navigate_document(
+                catalog, action, resolved, by_handle, deadline_at=deadline_at
+            ), None)
         evidence_refs = tuple(item.resource_ref for item in resolved)
         if isinstance(action, InspectKnowledgeV1):
-            evidence = self._backend.inspect(documents=documents, evidence_refs=evidence_refs)
+            evidence = self._backend.inspect(
+                documents=documents,
+                evidence_refs=evidence_refs,
+                deadline_at=deadline_at,
+            )
             self._validate_backend_evidence(documents, evidence, expected_refs=set(evidence_refs))
             lineage_by_ref = {item.resource_ref: item for item in resolved}
             if any(
@@ -1990,13 +2196,16 @@ class KnowledgeToolService:
                 ],
             ), (), None
         if isinstance(action, InspectVisualV1):
-            return self._inspect_visual(catalog, action, resolved, by_handle)
+            return self._inspect_visual(
+                catalog, action, resolved, by_handle, deadline_at=deadline_at
+            )
         assert isinstance(action, ExpandKnowledgeV1)
         evidence = self._backend.expand(
             documents=documents,
             anchor_evidence_refs=evidence_refs,
             direction=action.direction,
             limit=action.limit,
+            deadline_at=deadline_at,
         )
         observation, handles = self._evidence_result(
             catalog, evidence, expansion_direction=action.direction, limit=action.limit
@@ -2146,6 +2355,8 @@ class KnowledgeToolService:
         action: NavigateDocumentV1,
         resolved,
         documents_by_handle: Mapping[str, BackendCatalogDocument],
+        *,
+        deadline_at: datetime | None = None,
     ):
         if action.mode == "around":
             source = resolved[0]
@@ -2159,7 +2370,9 @@ class KnowledgeToolService:
             assert action.document_handle is not None
             document = documents_by_handle[action.document_handle]
             node_ref = None
-        navigation_map = self._backend.navigation_map(document=document)
+        navigation_map = self._backend.navigation_map(
+            document=document, deadline_at=deadline_at
+        )
         if navigation_map is None:
             return (
                 KnowledgeToolErrorV1(
@@ -2296,7 +2509,15 @@ class KnowledgeToolService:
             tuple({item.handle: item for item in handles}.values()),
         )
 
-    def _inspect_visual(self, catalog, action, resolved, documents_by_handle):
+    def _inspect_visual(
+        self,
+        catalog,
+        action,
+        resolved,
+        documents_by_handle,
+        *,
+        deadline_at: datetime | None = None,
+    ):
         if len(resolved) != 1:
             raise RetrievalStoreConflict("inspect_visual requires exactly one handle")
         source = resolved[0]
@@ -2325,6 +2546,7 @@ class KnowledgeToolService:
             document=document,
             page_number=page_number,
             normalized_bbox=root_bbox,
+            deadline_at=deadline_at,
         )
         if hashlib.sha256(rendered.content).hexdigest() != rendered.digest:
             raise RetrievalStoreConflict("visual renderer digest changed")
@@ -2383,7 +2605,9 @@ class KnowledgeToolService:
             ),
         ), carrier
 
-    def _replay_visual_image(self, catalog, observation):
+    def _replay_visual_image(
+        self, catalog, observation, *, deadline_at: datetime | None = None
+    ):
         if not isinstance(observation, VisualInspectionResultV1):
             return None
         documents = {
@@ -2402,6 +2626,7 @@ class KnowledgeToolService:
             document=document,
             page_number=observation.page_number,
             normalized_bbox=bbox,
+            deadline_at=deadline_at,
         )
         if (
             rendered.digest != observation.image_digest

@@ -23,7 +23,7 @@ from atlas_production.modules.context_engineering.public import (
     ContextLineageEdgeV3,
     ContextMessageV3,
     ContextPackV3,
-    ContextSummaryInputV3,
+    ContextSummaryInputV4,
     ContextSummarySourceV3,
     CreateTurnInputProjectionV1,
     ModelUserInputV3,
@@ -59,7 +59,8 @@ class _Store:
                 else SummaryRecord(
                     summary.summary_ref,
                     summary.parent_summary_ref,
-                    summary.text,
+                    summary.historical_user_context,
+                    summary.assistant_pending_verification_context,
                     summary.token_count,
                     summary.sources,
                     DIGEST,
@@ -209,10 +210,11 @@ def test_materialize_v3_round_trips_summary_lineage_and_direct_resources() -> No
         representative_content_digest=DIGEST,
         direct_document_ids=["document-1"],
     )
-    summary = ContextSummaryInputV3(
+    summary = ContextSummaryInputV4(
         summary_ref="summary-1",
         parent_summary_ref=None,
-        text="Older exchange",
+        historical_user_context="Older question",
+        assistant_pending_verification_context="Older answer",
         token_count=12,
         sources=[source],
     )
@@ -226,7 +228,9 @@ def test_materialize_v3_round_trips_summary_lineage_and_direct_resources() -> No
     )
 
     assert pack.summary is not None
-    assert pack.summary.schema_version == "context-summary-v3"
+    assert pack.summary.schema_version == "context-summary-v4"
+    assert pack.summary.historical_user_context == "Older question"
+    assert pack.summary.assistant_pending_verification_context == "Older answer"
     assert pack.summary.sources[0].direct_document_ids == ["document-1"]
     assert pack.summary.parent_summary_ref is None
 
@@ -238,15 +242,17 @@ def test_summary_token_hard_limit_and_exact_lineage_are_enforced() -> None:
         representative_content_digest=DIGEST,
     )
     with pytest.raises(ValidationError):
-        ContextSummaryInputV3(
+        ContextSummaryInputV4(
             summary_ref="summary-1",
-            text="too large",
+            historical_user_context="too large",
+            assistant_pending_verification_context="",
             token_count=6001,
             sources=[source],
         )
-    summary = ContextSummaryInputV3(
+    summary = ContextSummaryInputV4(
         summary_ref="summary-1",
-        text="valid",
+        historical_user_context="valid",
+        assistant_pending_verification_context="",
         token_count=1,
         sources=[source],
     )

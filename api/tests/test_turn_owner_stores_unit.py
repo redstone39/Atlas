@@ -72,13 +72,14 @@ def test_context_materialization_payload_preserves_full_multi_resource_lineage()
                 "turn-2",
                 "a" * 64,
                 ContextMessageInput("user", "question"),
-                ContextMessageInput("assistant", "prior", "verified"),
+                ContextMessageInput("assistant", "prior", "unverified"),
             ),
         ),
         summary=SummaryInput(
             "summary-1",
             None,
-            "older",
+            "older user context",
+            "older assistant context pending verification",
             2,
             (
                 SummarySourceInput("root-0", "turn-0", "b" * 64),

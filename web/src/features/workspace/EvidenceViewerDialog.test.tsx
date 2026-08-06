@@ -97,11 +97,21 @@ describe("EvidenceViewerDialog", () => {
     expect(screen.getByText("Authorized excerpt")).toBeInTheDocument();
     expect(screen.getByText("Authorized evidence content")).toBeInTheDocument();
     expectWatermark("Workspace User · user-a · 2026-07-29T10:20:30.000Z");
-    expect(
-      screen.getByText(
-        "The visual watermark is for identification only. It does not prevent downloads or guarantee traceability.",
-      ),
-    ).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog");
+    const content = dialog.querySelector(
+      '[data-slot="evidence-viewer-content"]',
+    ) as HTMLElement;
+    expect(dialog).toHaveClass("overflow-hidden");
+    expect(dialog).not.toHaveClass("overflow-y-auto");
+    expect(content).toHaveClass("min-h-0", "overflow-y-auto", "overscroll-contain");
+    expect(content).toContainElement(screen.getByText("Authorized evidence content"));
+    expect(content).not.toContainElement(dialog.querySelector('[data-slot="dialog-header"]'));
+    expect(screen.queryByText(
+      "Review the evidence you are currently authorized to open.",
+    )).not.toBeInTheDocument();
+    expect(screen.queryByText(
+      /visual watermark is for identification only/,
+    )).not.toBeInTheDocument();
     expect(URL.createObjectURL).not.toHaveBeenCalled();
   });
 

@@ -202,14 +202,14 @@ def test_typed_payload_policy_rejects_schema_drift_canonical_content_and_chunks(
 
 def _runtime_policy() -> ModelRouteRuntimePolicy:
     return ModelRouteRuntimePolicy(
-        schema_version="model-route-runtime-policy-v7",
+        schema_version="model-route-runtime-policy-v8",
         tokenizer_profile="cl100k_base",
         max_tool_executions=4,
         max_provider_invocations=20,
         max_reasoning_revision_cycles=2,
         max_catalog_pages=5,
         max_search_rounds=6,
-        max_unique_evidence=40,
+        max_model_visible_items_per_turn=40,
         max_retrieval_repairs=3,
         max_schema_retries_per_turn=3,
         max_selected_anchor_pages_per_round=20,
@@ -278,7 +278,7 @@ def test_model_routing_jsonb_serializers_use_closed_typed_payloads() -> None:
     )
     persisted_route = _model_route_payload(route)
     assert persisted_route["runtime_policy"]["schema_version"] == (
-        "model-route-runtime-policy-v7"
+        "model-route-runtime-policy-v8"
     )
     assert set(persisted_route["runtime_policy"]) == {
         "schema_version",
@@ -288,7 +288,7 @@ def test_model_routing_jsonb_serializers_use_closed_typed_payloads() -> None:
         "max_reasoning_revision_cycles",
         "max_catalog_pages",
         "max_search_rounds",
-        "max_unique_evidence",
+        "max_model_visible_items_per_turn",
         "max_retrieval_repairs",
         "max_schema_retries_per_turn",
         "max_selected_anchor_pages_per_round",

@@ -6,7 +6,11 @@ from fastapi.testclient import TestClient
 
 from atlas_production.app import create_app
 from atlas_production.infrastructure.composition import ApiComposition
-from atlas_production.modules.conversation.public import ConversationV1, TurnAcceptedV1
+from atlas_production.modules.conversation.public import (
+    ConversationArchiveResultV1,
+    ConversationV1,
+    TurnAcceptedV1,
+)
 from atlas_production.modules.citation_preview.public import ProtectedCitationEvidenceV1
 from atlas_production.modules.identity_access.records import UserRecord
 from atlas_production.modules.turn_runtime.public import ExecutionState, RuntimeEventV1
@@ -47,6 +51,14 @@ class _WorkspaceTurns:
 
     def list_conversations(self, _actor):
         return WorkspaceConversationListV1(conversations=[CONVERSATION])
+
+    def archive_conversation(self, _actor, conversation_id, command):
+        assert conversation_id == CONVERSATION.conversation_id
+        assert command.idempotency_key == "archive-key"
+        return ConversationArchiveResultV1(
+            conversation=CONVERSATION.model_copy(update={"status": "archived"}),
+            audit_event_ref="audit-conversation-archived",
+        )
 
     def get_conversation(self, _actor, _conversation_id):
         return WorkspaceConversationDetailV1(conversation=CONVERSATION, turns=[])
@@ -302,6 +314,26 @@ def test_retry_is_fresh_turn_execution_and_create_has_no_knowledge_scope() -> No
         json={"title": "Conversation", "knowledge_scope": ["document-1"]},
     )
     assert rejected.status_code == 422
+
+
+def test_archive_conversation_api_returns_retained_status_and_audit_ref() -> None:
+    client = TestClient(create_app(_composition()))
+
+    response = client.post(
+        "/api/v1/workspace/conversations/conversation-1/archive",
+        json={"idempotency_key": "archive-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["conversation"]["status"] == "archived"
+    assert response.json()["audit_event_ref"] == "audit-conversation-archived"
+
+    replay = client.post(
+        "/api/v1/workspace/conversations/conversation-1/archive",
+        json={"idempotency_key": "archive-key"},
+    )
+    assert replay.status_code == 200
+    assert replay.json() == response.json()
 
 
 def test_protected_citation_read_uses_turn_scoped_route() -> None:

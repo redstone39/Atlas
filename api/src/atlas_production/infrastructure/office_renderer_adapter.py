@@ -144,6 +144,7 @@ class OfficeRendererAdapter:
         content: bytes,
         *,
         normalized_bbox: tuple[int, int, int, int] = (0, 0, 10_000, 10_000),
+        timeout_seconds: float | None = None,
     ) -> PdfPageRasterResult:
         if not self.endpoint:
             raise OfficeRendererError("office_renderer_unavailable")
@@ -160,8 +161,10 @@ class OfficeRendererAdapter:
                     "bbox_bottom": normalized_bbox[3],
                 },
                 files={"file": ("page.pdf", content, "application/pdf")},
-                timeout=210,
+                timeout=210 if timeout_seconds is None else timeout_seconds,
             )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("pdf_page_raster_timeout") from exc
         except httpx.HTTPError as exc:
             raise OfficeRendererError("office_renderer_unavailable") from exc
         if response.status_code != 200:

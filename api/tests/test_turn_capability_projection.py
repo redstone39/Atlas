@@ -36,17 +36,22 @@ def _budget(**changes: int) -> BudgetSnapshotV1:
         "catalog_pages": 0,
         "document_candidates": 0,
         "search_rounds": 0,
-        "unique_evidence": 0,
+        "model_visible_items": 0,
         "provider_invocations": 0,
         "context_tokens": 0,
         "tool_tokens": 0,
+        "retrieval_repairs": 0,
         "schema_retries": 0,
     }
     values.update(changes)
     return BudgetSnapshotV1(**values)
 
 
-def _snapshot(*, budget: BudgetSnapshotV1 | None = None) -> ExecutionSnapshotV1:
+def _snapshot(
+    *,
+    budget: BudgetSnapshotV1 | None = None,
+    policy: RoutePolicyV1 | None = None,
+) -> ExecutionSnapshotV1:
     return ExecutionSnapshotV1(
         execution_id="execution-1",
         turn_id="turn-1",
@@ -54,7 +59,7 @@ def _snapshot(*, budget: BudgetSnapshotV1 | None = None) -> ExecutionSnapshotV1:
         actor_id="actor-1",
         state="awaiting_model_action",
         version=4,
-        policy=RoutePolicyV1(),
+        policy=policy or RoutePolicyV1(max_retrieval_repairs=1),
         route=route_snapshot(),
         input_digest="0" * 64,
         response_language="zh-TW",
@@ -195,7 +200,7 @@ def test_disclosed_documents_can_accumulate_beyond_twenty_candidates() -> None:
 
 def test_candidate_count_does_not_close_scoped_search_or_expansion() -> None:
     result = project_turn_model_capabilities(
-        _snapshot(budget=_budget(document_candidates=20)),
+        _snapshot(budget=_budget(document_candidates=20, model_visible_items=2)),
         catalog_document_count=20,
         observations=[_search_observation()],
         contract_repair_remaining=1,
@@ -204,13 +209,13 @@ def test_candidate_count_does_not_close_scoped_search_or_expansion() -> None:
     assert "search_knowledge" in result.allowed_actions
     assert "inspect_knowledge" in result.allowed_actions
     assert "expand_knowledge" in result.allowed_actions
-    assert result.limits.max_search_limit == 20
-    assert result.limits.max_expand_limit == 20
+    assert result.limits.max_search_limit == 19
+    assert result.limits.max_expand_limit == 19
 
 
 def test_admitted_tool_projects_configured_max_not_remaining_budget() -> None:
     result = project_turn_model_capabilities(
-        _snapshot(budget=_budget(tool_tokens=4_000)),
+        _snapshot(budget=_budget(tool_tokens=4_000, model_visible_items=2)),
         catalog_document_count=2,
         observations=[_search_observation()],
         contract_repair_remaining=1,
@@ -222,7 +227,7 @@ def test_admitted_tool_projects_configured_max_not_remaining_budget() -> None:
 
 def test_prior_usage_below_threshold_still_projects_full_configured_max() -> None:
     result = project_turn_model_capabilities(
-        _snapshot(budget=_budget(tool_tokens=49_054)),
+        _snapshot(budget=_budget(tool_tokens=49_054, model_visible_items=2)),
         catalog_document_count=2,
         observations=[_search_observation()],
         contract_repair_remaining=1,
@@ -233,7 +238,7 @@ def test_prior_usage_below_threshold_still_projects_full_configured_max() -> Non
 
 def test_prior_usage_at_threshold_closes_all_tool_actions() -> None:
     result = project_turn_model_capabilities(
-        _snapshot(budget=_budget(tool_tokens=64_000)),
+        _snapshot(budget=_budget(tool_tokens=64_000, model_visible_items=2)),
         catalog_document_count=2,
         observations=[_search_observation()],
         contract_repair_remaining=1,
@@ -243,9 +248,27 @@ def test_prior_usage_at_threshold_closes_all_tool_actions() -> None:
     assert result.limits.max_output_tokens == 0
 
 
-def test_visual_action_closes_when_unique_evidence_budget_is_exhausted() -> None:
+def test_visual_action_closes_when_model_visible_items_budget_is_exhausted() -> None:
     result = project_turn_model_capabilities(
-        _snapshot(budget=_budget(unique_evidence=40)),
+        _snapshot(budget=_budget(model_visible_items=2)),
+        catalog_document_count=2,
+        observations=[_search_observation()],
+        contract_repair_remaining=1,
+    )
+
+    assert "inspect_visual" in result.allowed_actions
+
+    result = project_turn_model_capabilities(
+        _snapshot(
+            budget=_budget(model_visible_items=2),
+        ).model_copy(
+            update={
+                    "policy": RoutePolicyV1(
+                        max_model_visible_items_per_turn=2,
+                        max_retrieval_repairs=1,
+                    ),
+            }
+        ),
         catalog_document_count=2,
         observations=[_search_observation()],
         contract_repair_remaining=1,
@@ -285,13 +308,13 @@ def test_observations_accumulate_stable_semantic_document_and_evidence_choices()
     observations = [catalog, _search_observation(), inspection]
 
     first = project_turn_model_capabilities(
-        _snapshot(),
+        _snapshot(budget=_budget(model_visible_items=2)),
         catalog_document_count=2,
         observations=observations,
         contract_repair_remaining=1,
     )
     second = project_turn_model_capabilities(
-        _snapshot(),
+        _snapshot(budget=_budget(model_visible_items=2)),
         catalog_document_count=2,
         observations=observations,
         contract_repair_remaining=1,
@@ -330,7 +353,7 @@ def test_visual_observation_adds_recursive_visual_handle() -> None:
     )
 
     result = project_turn_model_capabilities(
-        _snapshot(), catalog_document_count=1,
+        _snapshot(budget=_budget(model_visible_items=3)), catalog_document_count=1,
         observations=[_search_observation(), visual],
         contract_repair_remaining=1,
     )
@@ -375,7 +398,7 @@ def test_navigation_observation_adds_location_and_page_without_evidence() -> Non
     )
 
     result = project_turn_model_capabilities(
-        _snapshot(),
+        _snapshot(budget=_budget(model_visible_items=2)),
         catalog_document_count=1,
         observations=[catalog, navigation],
         contract_repair_remaining=1,
@@ -388,7 +411,12 @@ def test_navigation_observation_adds_location_and_page_without_evidence() -> Non
 
 
 def test_budget_exhaustion_closes_tool_choices_but_preserves_surfaced_semantics() -> None:
-    exhausted = _budget(tool_invocations=12, tool_tokens=32000)
+    exhausted = _budget(
+        tool_invocations=12,
+        tool_tokens=32000,
+        model_visible_items=2,
+        retrieval_repairs=1,
+    )
     result = project_turn_model_capabilities(
         _snapshot(budget=exhausted),
         catalog_document_count=2,
@@ -402,6 +430,7 @@ def test_budget_exhaustion_closes_tool_choices_but_preserves_surfaced_semantics(
         "max_discovery_limit": 0,
         "max_search_limit": 0,
         "max_expand_limit": 0,
+        "max_expand_anchor_handles": 0,
         "max_navigation_limit": 0,
         "max_output_tokens": 0,
     }
@@ -414,7 +443,30 @@ def test_repair_state_is_bound_into_capability_digest() -> None:
         _snapshot(), catalog_document_count=1, observations=[], contract_repair_remaining=1
     )
     after = project_turn_model_capabilities(
-        _snapshot(), catalog_document_count=1, observations=[], contract_repair_remaining=0
+        _snapshot(budget=_budget(retrieval_repairs=1)),
+        catalog_document_count=1,
+        observations=[],
+        contract_repair_remaining=0,
     )
 
     assert before.digest != after.digest
+
+
+def test_policy_projects_independent_expand_anchor_cardinality_and_repair_remaining() -> None:
+    policy = RoutePolicyV1(
+        max_retrieval_repairs=3,
+        max_selected_anchor_pages_per_round=7,
+    )
+    result = project_turn_model_capabilities(
+        _snapshot(
+            policy=policy,
+            budget=_budget(retrieval_repairs=1, model_visible_items=2),
+        ),
+        catalog_document_count=2,
+        observations=[_search_observation()],
+        contract_repair_remaining=2,
+    )
+
+    assert result.contract_repair_remaining == 2
+    assert result.limits.max_expand_anchor_handles == 7
+    assert result.limits.max_expand_limit == 19

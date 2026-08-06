@@ -27,7 +27,7 @@ from atlas_production.modules.context_engineering.public import (
     ContextPackReleaseV3,
     ContextPackV3,
     ContextSummarySourceV3,
-    ContextSummaryV3,
+    ContextSummaryV4,
     CreateTurnInputProjectionV1,
     MaterializeContextPackV3,
     RecordResolverProjectionV1,
@@ -111,10 +111,13 @@ def _pack(record: ContextPackRecord) -> ContextPackV3:
         summary=(
             None
             if summary is None
-            else ContextSummaryV3(
+            else ContextSummaryV4(
                 summary_ref=summary.summary_ref,
                 parent_summary_ref=summary.parent_summary_ref,
-                text=summary.text,
+                historical_user_context=summary.historical_user_context,
+                assistant_pending_verification_context=(
+                    summary.assistant_pending_verification_context
+                ),
                 token_count=summary.token_count,
                 sources=[_source(source) for source in summary.sources],
                 digest=summary.digest,
@@ -221,7 +224,10 @@ class PostgresContextEngineeringV3Adapter:
                     else SummaryInput(
                         summary_ref=summary.summary_ref,
                         parent_summary_ref=summary.parent_summary_ref,
-                        text=summary.text,
+                        historical_user_context=summary.historical_user_context,
+                        assistant_pending_verification_context=(
+                            summary.assistant_pending_verification_context
+                        ),
                         token_count=summary.token_count,
                         sources=tuple(
                             SummarySourceInput(

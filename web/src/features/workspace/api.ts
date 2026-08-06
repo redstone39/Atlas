@@ -2,6 +2,7 @@ import { API_BASE, requestJson } from "../../shared/api-client";
 import { ApiError } from "../../shared/user-messages";
 import type {
   ConversationDetail,
+  ConversationArchiveResultDto,
   ConversationListResult,
   ConversationTurnResult,
   RuntimeStreamEvent,
@@ -32,6 +33,12 @@ export type DeclaredEvidencePreview =
 
 const DECLARED_EVIDENCE_PREVIEW_ACCEPT =
   "application/pdf, image/png, application/json;q=0.5";
+
+export function joinResponseSegmentMarkdown(
+  segments: readonly { text: string }[],
+) {
+  return segments.map((segment) => segment.text).join("\n\n");
+}
 
 export const workspaceApi = {
   workspaceTagScope: () =>
@@ -68,6 +75,16 @@ export const workspaceApi = {
       `/api/v1/workspace/conversations/${conversationId}`,
       { signal },
     ),
+  ),
+  archiveWorkspaceConversation: (
+    conversationId: string,
+    idempotencyKey: string,
+  ) => requestJson<ConversationArchiveResultDto>(
+    `/api/v1/workspace/conversations/${encodeURIComponent(conversationId)}/archive`,
+    {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
   ),
   readCitation: (
     conversationId: string,
@@ -381,7 +398,7 @@ function assistantTurn(turn: WorkspaceTurnProjectionDto, conversationId: string)
     assessment_input_digest: complete ? turn.assessment_input_digest : null,
     assessment_output_digest: complete ? turn.assessment_output_digest : null,
     content_state: "available",
-    answer_text: segments.map((segment) => segment.text).join("\n") || null,
+    answer_text: joinResponseSegmentMarkdown(segments) || null,
     refusal_code: turn.failure_code,
     user_reason: turn.retrieval_status === "access_denied"
       ? "result.knowledge_scope_access_required"

@@ -81,10 +81,11 @@ def _snapshot(turn: str, execution: str, context_ref: str) -> ExecutionSnapshotV
             catalog_pages=0,
             document_candidates=1,
             search_rounds=1,
-            unique_evidence=1,
+            model_visible_items=1,
             provider_invocations=2,
             context_tokens=10,
             tool_tokens=10,
+            retrieval_repairs=0,
             schema_retries=0,
         ),
         grant_ref=f"grant-{execution}",
@@ -276,6 +277,9 @@ class _Retrieval:
 
     def read_discovery_traces(self, **_facts):
         return []
+
+    def count_page_and_visual_handles(self, **_facts):
+        return 0
 
 
 class _Authorization:
@@ -582,7 +586,7 @@ def test_admin_runtime_restore_recomputes_visibility_before_returning_events() -
     authorization.visible = True
     app = _application(authorization)
 
-    snapshot, events, discovery = app.audit_execution(
+    snapshot, events, discovery, visual_capability_count = app.audit_execution(
         actor_id="admin-1",
         conversation_id="conversation-1",
         turn_id="turn-2",
@@ -591,6 +595,7 @@ def test_admin_runtime_restore_recomputes_visibility_before_returning_events() -
     assert snapshot.turn_id == "turn-2"
     assert events == ["event-execution-2"]
     assert discovery == []
+    assert visual_capability_count == 0
 
 
 def test_protected_citation_read_recomputes_visibility_and_uses_exact_lineage() -> None:
@@ -855,7 +860,7 @@ def test_discovery_trace_projection_keeps_raw_order_but_hides_revoked_metadata()
         invocation_id="invocation-1",
         result_ref="result-discovery-1",
         invocation_ordinal=2,
-        query_text="retention policy",
+        query_text="example policy",
         requested_limit=20,
         ranking_contract="equal-reciprocal-rank-v1",
         channels=[
@@ -884,7 +889,7 @@ def test_discovery_trace_projection_keeps_raw_order_but_hides_revoked_metadata()
                 processing_revision_ref="revision-policy",
                 processing_generation_ref="processing-policy",
                 index_generation_ref="index-policy",
-                document_display_name="Retention Policy.pdf",
+                document_display_name="Example Document.pdf",
                 document_version_label="2026",
                 preview="Keep records for seven years.",
                 locator_label="p. 4",

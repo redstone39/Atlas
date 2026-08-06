@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "6bcd86a6a07ff690defc9de5eaecaac24eac3a451a13653558dcd64d93103eb2"
+    "99e7550f22f4ed66c0fce686f0b9ca89828a1de42f3140880d35d3a9f48fc131"
 )
 
 
@@ -37,6 +37,9 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
 
     assert "/api/v1/workspace/turn-executions/{execution_id}" in paths
     assert "/api/v1/workspace/turn-executions/{execution_id}/events" in paths
+    assert (
+        "/api/v1/workspace/conversations/{conversation_id}/archive" in paths
+    )
     assert (
         "/api/v1/workspace/conversations/{conversation_id}/turns/{turn_id}/citations/{citation_ref}"
         in paths
@@ -59,8 +62,15 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
         assert removed_path not in paths
 
     schemas = schema["components"]["schemas"]
+    assert schemas["WorkspaceConversationArchiveV1"]["additionalProperties"] is False
+    assert schemas["ConversationArchiveResultV1"]["additionalProperties"] is False
     assert schemas["AdminConversationListResult"]["additionalProperties"] is False
     assert schemas["RuntimeTraceDetail"]["additionalProperties"] is False
+    assert {
+        "model_visible_item_count",
+        "model_visible_item_limit",
+        "model_visible_item_exceeded",
+    }.issubset(schemas["RuntimeTraceDetail"]["required"])
     assert schemas["ProtectedDeclaredEvidenceV1"]["additionalProperties"] is False
     assert set(
         schemas["WorkspaceConversationSummaryV1"]["properties"]["last_turn_status"][

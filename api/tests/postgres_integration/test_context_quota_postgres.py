@@ -119,7 +119,7 @@ def _invocation(
         token_usage=token_usage,
         error_code=None if status == "completed" else "provider_failed",
         route_revision=1,
-                runtime_policy_schema_version="model-route-runtime-policy-v7",
+        runtime_policy_schema_version="model-route-runtime-policy-v8",
         runtime_policy_revision=1,
         runtime_policy_snapshot={},
         invocation_purpose=purpose,

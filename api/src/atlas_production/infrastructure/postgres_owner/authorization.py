@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.persistence.authorization import (
@@ -22,6 +22,16 @@ from atlas_production.infrastructure.persistence.authorization import (
 
 SessionFactory = Callable[[], Session]
 GRANT_SCHEMA_VERSION = "turn-access-grant-v1"
+
+
+def _apply_statement_deadline(session: Session, deadline_at: datetime | None) -> None:
+    if deadline_at is None:
+        return
+    remaining = (deadline_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        raise TimeoutError("retrieval tool deadline elapsed")
+    timeout_ms = max(1, int(remaining * 1000))
+    session.execute(select(func.set_config("statement_timeout", f"{timeout_ms}ms", True)))
 
 
 class AuthorizationStoreConflict(RuntimeError):
@@ -259,8 +269,11 @@ class PostgresAuthorizationStore:
             session.flush()
             return _release(row)
 
-    def get_grant(self, grant_ref: str) -> GrantRecord | None:
+    def get_grant(
+        self, grant_ref: str, *, deadline_at: datetime | None = None
+    ) -> GrantRecord | None:
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             row = session.get(AtlasTurnAccessGrantRow, grant_ref)
             return None if row is None else _grant(row)
 
@@ -378,9 +391,14 @@ class PostgresAuthorizationStore:
             return self._load_grant_resources(session, row)
 
     def grant_resources(
-        self, *, execution_id: str, grant_ref: str
+        self,
+        *,
+        execution_id: str,
+        grant_ref: str,
+        deadline_at: datetime | None = None,
     ) -> GrantResourceSnapshotRecord:
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             row = session.get(AtlasTurnGrantResourceSnapshotRow, grant_ref)
             if row is None or row.execution_id != execution_id:
                 raise AuthorizationStoreConflict("grant resource snapshot is unavailable")

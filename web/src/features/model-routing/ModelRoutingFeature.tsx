@@ -108,7 +108,7 @@ type RuntimePolicyDraft = Record<
   | "max_reasoning_revision_cycles"
   | "max_catalog_pages"
   | "max_search_rounds"
-  | "max_unique_evidence"
+  | "max_model_visible_items_per_turn"
   | "max_retrieval_repairs"
   | "max_schema_retries_per_turn"
   | "max_selected_anchor_pages_per_round"
@@ -130,7 +130,7 @@ const createRuntimePolicyDraft: RuntimePolicyDraft = {
   max_reasoning_revision_cycles: "2",
   max_catalog_pages: "5",
   max_search_rounds: "6",
-  max_unique_evidence: "40",
+  max_model_visible_items_per_turn: "40",
   max_retrieval_repairs: "3",
   max_schema_retries_per_turn: "3",
   max_selected_anchor_pages_per_round: "20",
@@ -152,7 +152,7 @@ function runtimePolicyDraft(policy: ModelRouteRuntimePolicy): RuntimePolicyDraft
     max_reasoning_revision_cycles: String(policy.max_reasoning_revision_cycles),
     max_catalog_pages: String(policy.max_catalog_pages),
     max_search_rounds: String(policy.max_search_rounds),
-    max_unique_evidence: String(policy.max_unique_evidence),
+    max_model_visible_items_per_turn: String(policy.max_model_visible_items_per_turn),
     max_retrieval_repairs: String(policy.max_retrieval_repairs),
     max_schema_retries_per_turn: String(policy.max_schema_retries_per_turn),
     max_selected_anchor_pages_per_round: String(policy.max_selected_anchor_pages_per_round),
@@ -215,7 +215,7 @@ function parseRuntimePolicy(draft: RuntimePolicyDraft): ModelRouteRuntimePolicyI
     values.turn_timeout_seconds < values.tool_execution_timeout_seconds
   ) return null;
   return {
-    schema_version: "model-route-runtime-policy-v7",
+    schema_version: "model-route-runtime-policy-v8",
     tokenizer_profile: draft.tokenizer_profile.trim(),
     ...values,
   };
@@ -1281,10 +1281,10 @@ export function ModelRoutingFeature({
                   onChange={(value) => setRuntimePolicy((current) => ({ ...current, max_search_rounds: value }))}
                 />
                 <PolicyNumberField
-                  id="max_unique_evidence"
-                  label={t("models.maxUniqueEvidence")}
-                  value={runtimePolicy.max_unique_evidence}
-                  onChange={(value) => setRuntimePolicy((current) => ({ ...current, max_unique_evidence: value }))}
+                  id="max_model_visible_items_per_turn"
+                  label={t("models.maxModelVisibleItemsPerTurn")}
+                  value={runtimePolicy.max_model_visible_items_per_turn}
+                  onChange={(value) => setRuntimePolicy((current) => ({ ...current, max_model_visible_items_per_turn: value }))}
                 />
                 <PolicyNumberField
                   id="max_retrieval_repairs"

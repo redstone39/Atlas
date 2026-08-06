@@ -25,7 +25,7 @@ class BudgetSnapshotV1(_StrictModel):
     catalog_pages: int = Field(ge=0)
     document_candidates: int = Field(ge=0)
     search_rounds: int = Field(ge=0)
-    unique_evidence: int = Field(ge=0)
+    model_visible_items: int = Field(ge=0)
     provider_invocations: int = Field(ge=0)
     context_tokens: int = Field(ge=0)
     tool_tokens: int = Field(ge=0)
@@ -45,6 +45,9 @@ class RuntimeTraceDetail(_StrictModel):
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     budget: BudgetSnapshotV1
+    model_visible_item_count: int = Field(ge=0)
+    model_visible_item_limit: int = Field(ge=0)
+    model_visible_item_exceeded: bool
     document_discovery: list[WorkspaceDiscoveryTraceV1]
     events: list[RuntimeEventV1]
     created_at: AwareDatetime

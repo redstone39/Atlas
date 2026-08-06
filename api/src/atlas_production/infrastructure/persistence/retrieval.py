@@ -169,7 +169,6 @@ class AtlasTurnRetrievalEvidencePackRow(OrmBase):
 
     __table_args__ = (
         CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_retrieval_evidence_pack_digest"),
-        CheckConstraint("jsonb_array_length(lineage_items) <= 40", name="ck_atlas_turn_retrieval_evidence_pack_count"),
         CheckConstraint("octet_length(lineage_items::text) <= 32768", name="ck_atlas_turn_retrieval_evidence_pack_bytes"),
     )
 

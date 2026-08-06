@@ -342,6 +342,7 @@ class VectorIndex:
         *,
         limit: int,
         revision_index_pairs: set[tuple[str, str]],
+        timeout_seconds: float | None = None,
     ) -> list[VectorSearchHit]:
         if (
             limit <= 0
@@ -379,6 +380,7 @@ class VectorIndex:
                 "index_generation_id",
             ],
             with_vectors=False,
+            timeout=(None if timeout_seconds is None else max(1, int(timeout_seconds))),
         )
         hits: list[VectorSearchHit] = []
         for point in response.points:

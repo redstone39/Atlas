@@ -45,6 +45,9 @@ Architecture ownership and dependency direction are executable in
   with model-declared evidence, not a truth guarantee or formal citation
   verification.
 - Formal citation bindings are separate from declared evidence.
+- Deleting a Workspace conversation is an owner-only `active -> archived`
+  transition. Archived conversations are hidden from the member Workspace but
+  retained for System Admin audit; Atlas does not physically delete them.
 - Invalid authority, lineage, lease, configuration, or artifact checks fail
   closed and do not publish a fabricated successful result.
 - Protected previews do not provide public URLs, persistent viewer tokens, or
@@ -75,6 +78,12 @@ Architecture ownership and dependency direction are executable in
   Evaluator, and provisional evidence checks share one execution-fixed schema
   retry budget. Every repair must first claim the durable fenced counter;
   exhausted budgets preserve each stage's fail-closed or unavailable behavior.
+- Context Summary V4 keeps historical user context separate from assistant
+  pending-verification context. Assistant history is dialogue context only and
+  cannot grant evidence authority.
+- Evidence, page, visual, and navigation handles share one deduplicated
+  execution-fixed model-visible item budget. System Admin diagnostics report
+  the exact execution snapshot rather than the current route configuration.
 
 ## Product surfaces
 

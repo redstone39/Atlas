@@ -55,7 +55,9 @@ docker compose -f docker-compose.p1.yml up --build -d
 `down -v` permanently deletes PostgreSQL, Redis, Qdrant, and other named-volume
 state for this Compose project. Preserve any operator-managed source material
 that must be uploaded again. Do not point the new snapshot at an earlier Atlas
-database or at artifact storage still owned by another deployment.
+database or at artifact storage still owned by another deployment. Identities,
+active or archived conversations, audit records, routing configuration, and
+runtime history are not migrated between snapshots.
 
 ## Reset
 

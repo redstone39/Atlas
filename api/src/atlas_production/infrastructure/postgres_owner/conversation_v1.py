@@ -16,11 +16,13 @@ from typing import Callable, Literal
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.infrastructure.persistence.conversation import (
     AtlasTurnConversationIdempotencyRow,
     AtlasTurnConversationMemberRow,
     AtlasTurnConversationRow,
 )
+from atlas_production.shared.public import AuditEventRecord
 
 
 SessionFactory = Callable[[], Session]
@@ -85,6 +87,20 @@ class AppendTurnMemberInput:
     operation: Literal["create_turn", "retry_turn"] = "create_turn"
     retry_of_turn_id: str | None = None
     reasoning_mode: Literal["standard", "deep"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveConversationInput:
+    conversation_id: str
+    actor_id: str
+    expected_next_ordinal: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveConversationResult:
+    conversation: ConversationRecord
+    audit_event_ref: str
 
 
 def _conversation(row: AtlasTurnConversationRow) -> ConversationRecord:
@@ -256,6 +272,93 @@ class PostgresConversationV1Store:
             session.flush()
             return _member(row, retry_of_turn_id=command.retry_of_turn_id)
 
+    def archive(
+        self,
+        command: ArchiveConversationInput,
+        *,
+        audit_event: AuditEventRecord,
+    ) -> ArchiveConversationResult:
+        if command.expected_next_ordinal < 1:
+            raise ValueError("expected_next_ordinal must be positive")
+        expected_target = f"conversation:{command.conversation_id}"
+        if (
+            audit_event.event_type != "conversation_archived"
+            or audit_event.actor_id != command.actor_id
+            or audit_event.target_ref != expected_target
+        ):
+            raise ValueError("conversation archive audit event does not match command")
+        request_digest = _digest(asdict(command))
+        scope_ref = expected_target
+        with self._session_factory() as session, session.begin():
+            replay = session.get(
+                AtlasTurnConversationIdempotencyRow,
+                (scope_ref, "archive_conversation", command.idempotency_key),
+            )
+            if replay is not None:
+                if replay.request_digest != request_digest:
+                    raise ConversationStoreConflict(
+                        "conversation archive replay payload changed"
+                    )
+                row = session.get(AtlasTurnConversationRow, replay.conversation_id)
+                payload = json.loads(replay.response_payload)
+                audit_event_ref = payload.get("audit_event_ref")
+                if (
+                    row is None
+                    or row.owner_actor_id != command.actor_id
+                    or row.status != "archived"
+                    or audit_event_ref != audit_event.event_id
+                ):
+                    raise ConversationStoreConflict(
+                        "conversation archive replay evidence is missing"
+                    )
+                return ArchiveConversationResult(
+                    conversation=_conversation(row),
+                    audit_event_ref=audit_event_ref,
+                )
+
+            archived_at = _now()
+            changed = session.execute(
+                update(AtlasTurnConversationRow)
+                .where(
+                    AtlasTurnConversationRow.conversation_id
+                    == command.conversation_id,
+                    AtlasTurnConversationRow.owner_actor_id == command.actor_id,
+                    AtlasTurnConversationRow.status == "active",
+                    AtlasTurnConversationRow.next_ordinal
+                    == command.expected_next_ordinal,
+                )
+                .values(status="archived", updated_at=archived_at)
+            ).rowcount
+            if changed != 1:
+                raise ConversationStoreConflict("conversation archive CAS failed")
+
+            AuditEventWriter(session).append(audit_event)
+            session.add(
+                AtlasTurnConversationIdempotencyRow(
+                    scope_ref=scope_ref,
+                    operation="archive_conversation",
+                    idempotency_key=command.idempotency_key,
+                    actor_id=command.actor_id,
+                    request_digest=request_digest,
+                    conversation_id=command.conversation_id,
+                    turn_id=None,
+                    execution_id=None,
+                    response_payload=json.dumps(
+                        {"audit_event_ref": audit_event.event_id},
+                        separators=(",", ":"),
+                    ),
+                    created_at=archived_at,
+                )
+            )
+            session.flush()
+            row = session.get(AtlasTurnConversationRow, command.conversation_id)
+            if row is None or row.status != "archived":
+                raise ConversationStoreConflict("archived conversation is missing")
+            return ArchiveConversationResult(
+                conversation=_conversation(row),
+                audit_event_ref=audit_event.event_id,
+            )
+
     def get(self, conversation_id: str) -> ConversationRecord | None:
         with self._session_factory() as session:
             row = session.get(AtlasTurnConversationRow, conversation_id)
@@ -270,7 +373,10 @@ class PostgresConversationV1Store:
         with self._session_factory() as session:
             rows = session.scalars(
                 select(AtlasTurnConversationRow)
-                .where(AtlasTurnConversationRow.owner_actor_id == actor_id)
+                .where(
+                    AtlasTurnConversationRow.owner_actor_id == actor_id,
+                    AtlasTurnConversationRow.status == "active",
+                )
                 .order_by(AtlasTurnConversationRow.updated_at.desc(), AtlasTurnConversationRow.conversation_id)
             ).all()
             return tuple(_conversation(row) for row in rows)
@@ -311,6 +417,8 @@ class PostgresConversationV1Store:
 
 
 __all__ = [
+    "ArchiveConversationInput",
+    "ArchiveConversationResult",
     "AppendTurnMemberInput",
     "ConversationRecord",
     "ConversationStoreConflict",

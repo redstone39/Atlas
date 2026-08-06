@@ -1010,6 +1010,40 @@ export function ConversationAuditFeature({
                             </div>
                           )
                         ) : null}
+                        <div
+                          data-slot="model-visible-item-diagnostic"
+                          className={
+                            selectedRuntime.model_visible_item_exceeded
+                              ? "rounded-md border border-destructive/40 bg-destructive/5 p-4"
+                              : "rounded-md border p-4"
+                          }
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="font-medium">{t("audit.modelVisibleItems")}</div>
+                            <Badge
+                              variant={selectedRuntime.model_visible_item_exceeded ? "destructive" : "outline"}
+                            >
+                              {t(
+                                selectedRuntime.model_visible_item_exceeded
+                                  ? "audit.modelVisibleItemsExceeded"
+                                  : "audit.modelVisibleItemsWithinLimit",
+                              )}
+                            </Badge>
+                          </div>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            {t("audit.modelVisibleItemsDescription")}
+                          </p>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            <AuditField
+                              label={t("audit.modelVisibleItemsCount")}
+                              value={String(selectedRuntime.model_visible_item_count)}
+                            />
+                            <AuditField
+                              label={t("audit.modelVisibleItemsLimit")}
+                              value={String(selectedRuntime.model_visible_item_limit)}
+                            />
+                          </div>
+                        </div>
                         <div>
                           <div className="font-medium">{t("audit.runtimeBudget")}</div>
                           <Table className="mt-2">
@@ -1018,7 +1052,7 @@ export function ConversationAuditFeature({
                                 <TableHead>{t("audit.providerCalls")}</TableHead>
                                 <TableHead>{t("audit.toolCalls")}</TableHead>
                                 <TableHead>{t("audit.searchRounds")}</TableHead>
-                                <TableHead>{t("audit.uniqueEvidence")}</TableHead>
+                                <TableHead>{t("audit.modelVisibleItemsCount")}</TableHead>
                                 <TableHead>{t("audit.catalogPages")}</TableHead>
                                 <TableHead>{t("audit.documentCandidates")}</TableHead>
                                 <TableHead>{t("audit.contextTokens")}</TableHead>
@@ -1030,7 +1064,7 @@ export function ConversationAuditFeature({
                                 <TableCell>{selectedRuntime.budget.provider_invocations}</TableCell>
                                 <TableCell>{selectedRuntime.budget.tool_invocations}</TableCell>
                                 <TableCell>{selectedRuntime.budget.search_rounds}</TableCell>
-                                <TableCell>{selectedRuntime.budget.unique_evidence}</TableCell>
+                                <TableCell>{selectedRuntime.budget.model_visible_items}</TableCell>
                                 <TableCell>{selectedRuntime.budget.catalog_pages}</TableCell>
                                 <TableCell>{selectedRuntime.budget.document_candidates}</TableCell>
                                 <TableCell>{selectedRuntime.budget.context_tokens}</TableCell>

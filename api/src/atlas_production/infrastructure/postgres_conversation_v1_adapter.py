@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
     AppendTurnMemberInput,
+    ArchiveConversationInput,
     ConversationRecord,
     ConversationStoreConflict,
     CreateConversationInput,
@@ -15,10 +16,15 @@ from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
 )
 from atlas_production.modules.conversation.public import (
     AppendTurnMemberV1,
+    ConversationArchiveError,
+    ConversationArchiveResultV1,
+    ConversationArchiveV1,
     ConversationCreateV1,
+    ConversationMembershipConflict,
     ConversationTurnMemberV1,
     ConversationV1,
 )
+from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 
 
 _DEFAULT_TITLE = "New conversation"
@@ -80,6 +86,51 @@ class PostgresConversationV1Adapter:
             actor_id=actor_id, command=command, retry_of_turn_id=None
         )
 
+    def archive(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        command: ConversationArchiveV1,
+    ) -> ConversationArchiveResultV1:
+        current = self._store.get(conversation_id)
+        if current is None or current.owner_actor_id != actor_id:
+            raise ConversationArchiveError("not_found")
+        audit_event_ref = f"audit-{uuid5(NAMESPACE_URL, f'conversation-archive:{actor_id}:{conversation_id}:{command.idempotency_key}').hex}"
+        try:
+            result = self._store.archive(
+                ArchiveConversationInput(
+                    conversation_id=conversation_id,
+                    actor_id=actor_id,
+                    expected_next_ordinal=command.expected_next_ordinal,
+                    idempotency_key=command.idempotency_key,
+                ),
+                audit_event=AuditEventRecord(
+                    event_id=audit_event_ref,
+                    event_type="conversation_archived",
+                    actor_id=actor_id,
+                    target_ref=f"conversation:{conversation_id}",
+                    project_id=None,
+                    message_code="conversation.was_archived",
+                    metadata={"status": "archived"},
+                    created_at=utc_now_iso(),
+                ),
+            )
+        except ConversationStoreConflict as error:
+            latest = self._store.get(conversation_id)
+            reason = (
+                "not_found"
+                if latest is None
+                or latest.owner_actor_id != actor_id
+                or latest.status != "active"
+                else "conflict"
+            )
+            raise ConversationArchiveError(reason) from error
+        return ConversationArchiveResultV1(
+            conversation=_conversation(result.conversation),
+            audit_event_ref=result.audit_event_ref,
+        )
+
     def append_retry_turn_member(
         self,
         *,
@@ -105,8 +156,14 @@ class PostgresConversationV1Adapter:
         for _ in range(_MAX_ORDINAL_CAS_ATTEMPTS):
             replay = self.get_turn(command.turn_id)
             conversation = self._store.get(command.conversation_id)
-            if conversation is None:
-                raise ConversationStoreConflict("conversation does not exist")
+            if (
+                conversation is None
+                or conversation.owner_actor_id != actor_id
+                or conversation.status != "active"
+            ):
+                raise ConversationMembershipConflict(
+                    "conversation changed before membership publication"
+                )
             expected_ordinal = replay.ordinal if replay is not None else conversation.next_ordinal
             try:
                 return _turn(
@@ -127,8 +184,21 @@ class PostgresConversationV1Adapter:
                 )
             except ConversationStoreConflict as error:
                 if "ordinal CAS failed" not in str(error):
-                    raise
-        raise ConversationStoreConflict("conversation ordinal CAS retry limit exceeded")
+                    raise ConversationMembershipConflict(
+                        "turn membership publication conflicted"
+                    ) from error
+                latest = self._store.get(command.conversation_id)
+                if (
+                    latest is None
+                    or latest.owner_actor_id != actor_id
+                    or latest.status != "active"
+                ):
+                    raise ConversationMembershipConflict(
+                        "conversation changed before membership publication"
+                    ) from error
+        raise ConversationMembershipConflict(
+            "conversation membership CAS retry limit exceeded"
+        )
 
     def list_for_actor(self, actor_id: str) -> list[ConversationV1]:
         return [_conversation(record) for record in self._store.list_for_actor(actor_id)]

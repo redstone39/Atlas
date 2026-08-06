@@ -163,7 +163,7 @@ def test_navigation_map_rejects_revision_from_foreign_identity() -> None:
 class FakeRows:
     current = True
 
-    def grant_authority(self, *, actor_id: str, conversation_id: str):
+    def grant_authority(self, *, actor_id: str, conversation_id: str, deadline_at=None):
         return GrantAuthorityState(actor_id, conversation_id, True, "authority-snapshot", 7)
 
     def grant_resources(self, *, actor_id: str, conversation_id: str):
@@ -184,7 +184,7 @@ class FakeRows:
         values = {DOCUMENT.resource_ref: DOCUMENT, OTHER.resource_ref: OTHER}
         return tuple(values[ref] for ref in resource_refs if ref in values and self.current)
 
-    def resource_authorizations(self, *, actor_id: str, resource_refs: tuple[str, ...]):
+    def resource_authorizations(self, *, actor_id: str, resource_refs: tuple[str, ...], deadline_at=None):
         assert actor_id == "actor-1"
         values = {DOCUMENT.resource_ref: DOCUMENT, OTHER.resource_ref: OTHER}
         return tuple(
@@ -196,7 +196,7 @@ class FakeRows:
             for ref in dict.fromkeys(resource_refs)
         )
 
-    def pinned_documents(self, *, pins):
+    def pinned_documents(self, *, pins, deadline_at=None):
         expected = (
             DOCUMENT.document_version_ref,
             DOCUMENT.processing_generation_ref,
@@ -205,16 +205,16 @@ class FakeRows:
         )
         return (DOCUMENT,) if self.current and expected in pins else ()
 
-    def evidence(self, *, documents):
+    def evidence(self, *, documents, deadline_at=None):
         assert documents == (DOCUMENT,)
         return (EVIDENCE_B, EVIDENCE_A, EVIDENCE_VISUAL)
 
-    def lexical_discovery(self, *, documents, query_text, limit):
+    def lexical_discovery(self, *, documents, query_text, limit, deadline_at=None):
         assert documents == (DOCUMENT,)
         assert query_text == "alpha retention"
         return (CurrentDiscoveryMatch("chunk-a", EVIDENCE_A),)[:limit]
 
-    def vector_discovery(self, *, documents, chunk_ids):
+    def vector_discovery(self, *, documents, chunk_ids, deadline_at=None):
         assert documents == (DOCUMENT,)
         return tuple(
             CurrentDiscoveryMatch(chunk_id, EVIDENCE_B)
@@ -323,7 +323,9 @@ def test_backend_discovery_uses_exact_pins_and_vector_pairs() -> None:
         def __init__(self):
             self.pairs = None
 
-        def search_hits(self, query_text, *, limit, revision_index_pairs):
+        def search_hits(
+            self, query_text, *, limit, revision_index_pairs, timeout_seconds=None
+        ):
             from atlas_production.async_runtime.vector_index import VectorSearchHit
 
             assert query_text == "alpha retention"

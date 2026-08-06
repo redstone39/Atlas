@@ -143,6 +143,12 @@ def test_immutable_owner_outputs_have_replay_uniqueness() -> None:
         recent.name, CheckConstraint
     )
     summary = OrmBase.metadata.tables["atlas_turn_context_summaries"]
+    assert "historical_user_context" in summary.columns
+    assert "assistant_pending_verification_context" in summary.columns
+    assert "text" not in summary.columns
+    assert "ck_atlas_turn_context_summary_content" in _constraint_names(
+        summary.name, CheckConstraint
+    )
     assert "ck_atlas_turn_context_summary_tokens" in _constraint_names(
         summary.name, CheckConstraint
     )
@@ -158,10 +164,12 @@ def test_retrieval_jsonb_has_database_byte_caps() -> None:
     assert "ck_atlas_turn_retrieval_observation_bytes" in _constraint_names(
         "atlas_turn_retrieval_results", CheckConstraint
     )
-    assert {
-        "ck_atlas_turn_retrieval_evidence_pack_count",
-        "ck_atlas_turn_retrieval_evidence_pack_bytes",
-    } <= _constraint_names("atlas_turn_retrieval_evidence_packs", CheckConstraint)
+    assert "ck_atlas_turn_retrieval_evidence_pack_bytes" in _constraint_names(
+        "atlas_turn_retrieval_evidence_packs", CheckConstraint
+    )
+    assert "ck_atlas_turn_retrieval_evidence_pack_count" not in _constraint_names(
+        "atlas_turn_retrieval_evidence_packs", CheckConstraint
+    )
 
 
 def test_catalog_pins_authority_and_exact_document_lineage() -> None:
@@ -238,9 +246,12 @@ def test_runtime_has_independent_versioned_lease_and_dedup_ledgers() -> None:
     execution = OrmBase.metadata.tables["atlas_turn_executions"]
     assert {
         "max_tool_invocations", "max_catalog_pages",
-        "max_search_rounds", "max_unique_evidence", "max_provider_invocations",
+        "max_search_rounds", "max_model_visible_items_per_turn",
+        "max_retrieval_repairs", "max_selected_anchor_pages_per_round",
+        "max_provider_invocations",
         "max_reasoning_revision_cycles",
-        "context_token_budget", "tool_token_budget", "deadline_seconds",
+        "context_token_budget", "tool_token_budget",
+        "tool_execution_timeout_seconds", "deadline_seconds",
         "heartbeat_interval_seconds", "ttl_seconds", "failure_sweep_interval_seconds",
     } <= set(execution.columns.keys())
     assert {
@@ -254,6 +265,8 @@ def test_runtime_has_independent_versioned_lease_and_dedup_ledgers() -> None:
     assert "max_document_candidates" not in execution.columns
     assert "route_policy" not in execution.columns
     assert "lease_policy" not in execution.columns
+    budget = OrmBase.metadata.tables["atlas_turn_budget_counters"]
+    assert "retrieval_repairs" in budget.columns
     assert {
         "ck_atlas_turn_execution_nonnegative_policy",
         "ck_atlas_turn_execution_provider_budget",
@@ -295,19 +308,19 @@ def test_conversation_language_and_answer_behavior_are_durably_bounded() -> None
         lease.name, CheckConstraint
     )
     candidate = OrmBase.metadata.tables["atlas_turn_document_candidate_ledger"]
-    evidence = OrmBase.metadata.tables["atlas_turn_unique_evidence_ledger"]
+    visible_items = OrmBase.metadata.tables["atlas_turn_model_visible_item_ledger"]
     assert [column.name for column in candidate.primary_key.columns] == [
         "execution_id", "document_identity"
     ]
-    assert [column.name for column in evidence.primary_key.columns] == [
-        "execution_id", "evidence_identity"
+    assert [column.name for column in visible_items.primary_key.columns] == [
+        "execution_id", "item_identity"
     ]
     tool = OrmBase.metadata.tables["atlas_turn_tool_ledger"]
     assert {
         "reserve_catalog_pages",
         "reserve_document_candidates",
         "reserve_search_rounds",
-        "reserve_unique_evidence",
+        "reserve_model_visible_items",
         "reserve_tool_tokens",
     } <= set(tool.columns.keys())
     assert "ck_atlas_turn_tool_reservations_nonnegative" in _constraint_names(

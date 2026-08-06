@@ -56,10 +56,11 @@ def snapshot() -> ExecutionSnapshotV1:
         catalog_pages=1,
         document_candidates=3,
         search_rounds=2,
-        unique_evidence=2,
+        model_visible_items=2,
         provider_invocations=4,
         context_tokens=100,
         tool_tokens=80,
+        retrieval_repairs=0,
         schema_retries=0,
     )
     lease = ExecutionLeaseV1(
@@ -78,7 +79,7 @@ def snapshot() -> ExecutionSnapshotV1:
         actor_id="owner-1",
         state=ExecutionState.TERMINAL_FAILED,
         version=9,
-        policy=RoutePolicyV1(),
+        policy=RoutePolicyV1(max_model_visible_items_per_turn=37),
         route=route_snapshot(),
         input_digest="0" * 64,
         response_language="zh-TW",
@@ -140,6 +141,7 @@ class Workspace:
         self.detail_calls: list[tuple[str, str]] = []
         self.runtime_calls: list[tuple[str, str, str]] = []
         self.declared_calls: list[tuple[str, str, str, str]] = []
+        self.model_visible_items = 44
 
     def audit_list_conversations(self, *, actor_id: str) -> list[ConversationV1]:
         assert actor_id == "admin-1"
@@ -161,7 +163,15 @@ class Workspace:
             failure_code="execution_carrier_lost",
             created_at=NOW + timedelta(seconds=10),
         )
-        return snapshot(), [event], []
+        runtime_snapshot = snapshot()
+        runtime_snapshot = runtime_snapshot.model_copy(
+            update={
+                "budget": runtime_snapshot.budget.model_copy(
+                    update={"model_visible_items": self.model_visible_items}
+                )
+            }
+        )
+        return runtime_snapshot, [event], [], 0
 
     def audit_read_declared_evidence(
         self,
@@ -239,11 +249,25 @@ def test_admin_runtime_returns_strict_snapshot_and_durable_events() -> None:
     assert "response_language" not in result.model_dump()
     assert "custom_guidance" not in result.model_dump()
     assert result.budget.tool_invocations == 2
+    assert result.model_visible_item_count == 44
+    assert result.model_visible_item_limit == 37
+    assert result.model_visible_item_exceeded is True
     assert result.document_discovery == []
     assert [event.event_id for event in result.events] == ["event-1"]
     assert result.created_at == NOW
     assert workspace.runtime_calls == [("admin-1", "conversation-1", "turn-1")]
     assert writer.calls[0][0] == "read_runtime_trace"
+
+
+def test_admin_runtime_reports_execution_fixed_limit_without_overflow() -> None:
+    subject, workspace, _ = service()
+    workspace.model_visible_items = 12
+
+    result = subject.get_runtime(ADMIN, "conversation-1", "turn-1")
+
+    assert result.model_visible_item_count == 12
+    assert result.model_visible_item_limit == 37
+    assert result.model_visible_item_exceeded is False
 
 
 def test_admin_declared_evidence_read_is_role_checked_and_audited() -> None:

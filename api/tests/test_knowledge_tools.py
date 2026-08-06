@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import ast
 import hashlib
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 import tiktoken
 
 from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
@@ -100,7 +101,7 @@ class FakeGrantResources:
         return self.snapshot
 
     def current_grant_document_resources(
-        self, *, execution_id: str, grant_ref: str
+        self, *, execution_id: str, grant_ref: str, deadline_at=None
     ):
         if not self.current_authorized:
             raise PermissionError("grant revoked")
@@ -140,7 +141,7 @@ class FakeStore:
                 )
         return self.catalog
 
-    def get_catalog(self, *, execution_id: str, catalog_ref: str):
+    def get_catalog(self, *, execution_id: str, catalog_ref: str, deadline_at=None):
         if self.catalog is None or (execution_id, catalog_ref) != (
             self.catalog.execution_id, self.catalog.catalog_ref
         ):
@@ -165,12 +166,12 @@ class FakeStore:
             for handle in handles
         )
 
-    def replay_invocation(self, *, execution_id, catalog_ref, action, schema_version, canonical_arguments):
+    def replay_invocation(self, *, execution_id, catalog_ref, action, schema_version, canonical_arguments, deadline_at=None):
         self.get_catalog(execution_id=execution_id, catalog_ref=catalog_ref)
         record = self.results.get((action, schema_version, _digest(canonical_arguments)))
         return None if record is None else replace(record, replayed=True)
 
-    def persist_invocation_result(self, command):
+    def persist_invocation_result(self, command, *, deadline_at=None):
         key = (command.action, command.schema_version, _digest(command.canonical_arguments))
         existing = self.results.get(key)
         if existing:
@@ -229,21 +230,21 @@ class FakeBackend:
         self.vector_error = False
         self.navigation_enabled = True
 
-    def discover_lexical(self, *, documents, query_text, limit):
+    def discover_lexical(self, *, documents, query_text, limit, deadline_at=None):
         self.reads += 1
         self.operations.append("discover_lexical")
         if self.lexical_error:
             raise ConnectionError("lexical unavailable")
         return self.lexical_hits[:limit]
 
-    def discover_vector(self, *, documents, query_text, limit):
+    def discover_vector(self, *, documents, query_text, limit, deadline_at=None):
         self.reads += 1
         self.operations.append("discover_vector")
         if self.vector_error:
             raise OSError("vector unavailable")
         return self.vector_hits[:limit]
 
-    def search(self, *, documents, query_text, required_modalities, facet_hints, limit):
+    def search(self, *, documents, query_text, required_modalities, facet_hints, limit, deadline_at=None):
         self.reads += 1
         self.operations.append("search")
         self.search_document_scopes.append(
@@ -257,12 +258,12 @@ class FakeBackend:
         self.evidence[item.evidence_ref] = item
         return [item]
 
-    def inspect(self, *, documents, evidence_refs):
+    def inspect(self, *, documents, evidence_refs, deadline_at=None):
         self.reads += 1
         self.operations.append("inspect")
         return [self.evidence[ref] for ref in evidence_refs]
 
-    def expand(self, *, documents, anchor_evidence_refs, direction, limit):
+    def expand(self, *, documents, anchor_evidence_refs, direction, limit, deadline_at=None):
         self.reads += 1
         self.operations.append("expand")
         document = documents[0]
@@ -282,7 +283,7 @@ class FakeBackend:
             if ref in self.evidence
         ]
 
-    def render_visual(self, *, document, page_number, normalized_bbox):
+    def render_visual(self, *, document, page_number, normalized_bbox, deadline_at=None):
         self.reads += 1
         self.operations.append("render_visual")
         content = f"image:{page_number}:{normalized_bbox}".encode()
@@ -293,7 +294,7 @@ class FakeBackend:
             height=600,
         )
 
-    def navigation_map(self, *, document):
+    def navigation_map(self, *, document, deadline_at=None):
         self.reads += 1
         self.operations.append("navigation_map")
         if not self.navigation_enabled:
@@ -1527,6 +1528,275 @@ def test_known_backend_timeout_is_persisted_as_typed_tool_result() -> None:
     assert result.observation.error_code == "tool_failed"
     assert result.observation.message_code == "retrieval_backend_unavailable"
     assert next(iter(store.results.values())).error_code == "tool_failed"
+
+
+class _PostgresStatementTimeout(Exception):
+    sqlstate = "57014"
+
+
+def _postgres_statement_timeout() -> OperationalError:
+    return OperationalError("SELECT", {}, _PostgresStatementTimeout())
+
+
+def test_backend_postgres_statement_timeout_is_typed_tool_timeout() -> None:
+    service, store, backend, catalog = _service()
+
+    def timed_out(**_kwargs):
+        raise _postgres_statement_timeout()
+
+    backend.search = timed_out
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    persisted = next(iter(store.results.values())).observation
+    assert persisted["message_code"] == (
+        "retrieval_tool_timeout"
+    )
+
+
+def test_discovery_postgres_statement_timeout_is_not_degraded() -> None:
+    service, store, backend, catalog = _service()
+
+    def timed_out(**_kwargs):
+        raise _postgres_statement_timeout()
+
+    backend.discover_lexical = timed_out
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        action=DiscoverRelevantDocumentsV1(
+            action="discover_relevant_documents",
+            query_text="natural language policy question",
+            limit=3,
+        ),
+    )
+
+    assert result.observation.result_type == "knowledge_tool_error"
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    persisted = next(iter(store.results.values())).observation
+    assert persisted["provider_observation"]["message_code"] == (
+        "retrieval_tool_timeout"
+    )
+
+
+def test_tool_deadline_rejects_late_normal_result_and_persists_retryable_error() -> None:
+    service, store, backend, catalog = _service()
+    current = [datetime(2026, 8, 6, tzinfo=timezone.utc)]
+    deadline = current[0] + timedelta(seconds=7)
+    service._clock = lambda: current[0]
+    original_search = backend.search
+    handles_before = dict(store.handles)
+
+    def late_search(**kwargs):
+        result = original_search(**kwargs)
+        current[0] = deadline
+        return result
+
+    backend.search = late_search
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=deadline,
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert result.observation.result_type == "knowledge_tool_error"
+    assert result.observation.error_code == "tool_failed"
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    assert result.observation.retryable is True
+    persisted = next(iter(store.results.values()))
+    assert persisted.result_type == "knowledge_tool_error"
+    assert persisted.observation["message_code"] == "retrieval_tool_timeout"
+    assert store.handles == handles_before
+
+
+def test_tool_deadline_allows_result_completed_before_deadline() -> None:
+    service, store, _backend, catalog = _service()
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    service._clock = lambda: now
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=now + timedelta(seconds=9),
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert result.observation.result_type == "knowledge_search_result"
+    assert next(iter(store.results.values())).result_type == "knowledge_search_result"
+
+
+def test_elapsed_tool_deadline_at_service_entry_persists_retryable_error() -> None:
+    service, store, backend, catalog = _service()
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    service._clock = lambda: now
+
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=now,
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert backend.operations == []
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    assert result.observation.retryable is True
+    assert next(iter(store.results.values())).error_code == "tool_failed"
+
+
+def test_persistence_deadline_rolls_normal_result_into_persisted_timeout() -> None:
+    service, store, _backend, catalog = _service()
+    now = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    service._clock = lambda: now
+    original_persist = store.persist_invocation_result
+    handles_before = dict(store.handles)
+
+    def deadline_fenced_persist(command, *, deadline_at=None):
+        if deadline_at is not None:
+            raise TimeoutError("result transaction crossed tool deadline")
+        return original_persist(command)
+
+    store.persist_invocation_result = deadline_fenced_persist
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=now + timedelta(seconds=5),
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    assert next(iter(store.results.values())).result_type == "knowledge_tool_error"
+    assert store.handles == handles_before
+
+
+def test_catalog_deadline_is_converted_to_persisted_timeout() -> None:
+    service, store, _backend, catalog = _service()
+    original_get_catalog = store.get_catalog
+
+    def deadline_fenced_catalog(*, execution_id, catalog_ref, deadline_at=None):
+        if deadline_at is not None:
+            raise TimeoutError("catalog read crossed tool deadline")
+        return original_get_catalog(execution_id=execution_id, catalog_ref=catalog_ref)
+
+    store.get_catalog = deadline_fenced_catalog
+    result = service.invoke(
+        execution_id="execution-1",
+        grant_ref="grant-1",
+        catalog_ref=catalog.catalog_ref,
+        invocation_ordinal=1,
+        deadline_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        action=SearchKnowledgeV1(
+            action="search_knowledge",
+            query_text="alpha",
+            document_handles=[_first_document_handle(store)],
+            required_modalities=[],
+            facet_hints=FacetHintsV1(
+                document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+            ),
+            limit=1,
+            max_output_tokens=256,
+        ),
+    )
+
+    assert result.observation.message_code == "retrieval_tool_timeout"
+    assert next(iter(store.results.values())).error_code == "tool_failed"
+
+
+def test_catalog_connection_failure_before_deadline_remains_fail_closed() -> None:
+    service, store, _backend, catalog = _service()
+
+    def unavailable_catalog(**_kwargs):
+        raise ConnectionError("catalog store unavailable")
+
+    store.get_catalog = unavailable_catalog
+    with pytest.raises(ConnectionError, match="catalog store unavailable"):
+        service.invoke(
+            execution_id="execution-1",
+            grant_ref="grant-1",
+            catalog_ref=catalog.catalog_ref,
+            invocation_ordinal=1,
+            deadline_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+            action=SearchKnowledgeV1(
+                action="search_knowledge",
+                query_text="alpha",
+                document_handles=[_first_document_handle(store)],
+                required_modalities=[],
+                facet_hints=FacetHintsV1(
+                    document_types=[], date_from=None, date_to=None, languages=[], tags=[]
+                ),
+                limit=1,
+                max_output_tokens=256,
+            ),
+        )
+
+    assert store.results == {}
 
 
 def test_retrieval_adapter_uses_authorization_public_contract_only() -> None:

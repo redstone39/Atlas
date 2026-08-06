@@ -44,7 +44,7 @@ export interface RuntimeBudgetSnapshot {
   catalog_pages: number;
   document_candidates: number;
   search_rounds: number;
-  unique_evidence: number;
+  model_visible_items: number;
   provider_invocations: number;
   context_tokens: number;
   tool_tokens: number;
@@ -125,6 +125,9 @@ export interface RuntimeTraceDetail {
   applied_guidance_revision: number;
   applied_guidance_digest: string | null;
   budget: RuntimeBudgetSnapshot;
+  model_visible_item_count: number;
+  model_visible_item_limit: number;
+  model_visible_item_exceeded: boolean;
   document_discovery: DocumentDiscoveryTrace[];
   events: RuntimeEvent[];
   created_at: string;

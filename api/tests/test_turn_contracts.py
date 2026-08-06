@@ -198,9 +198,12 @@ def test_policy_defaults_match_the_approved_hard_limits() -> None:
     assert policy.max_catalog_pages == 5
     assert "max_document_candidates" not in RoutePolicyV1.model_fields
     assert policy.max_search_rounds == 6
-    assert policy.max_unique_evidence == 40
+    assert policy.max_model_visible_items_per_turn == 40
+    assert policy.max_retrieval_repairs == 3
+    assert policy.max_selected_anchor_pages_per_round == 20
     assert policy.context_token_budget == 272_000
     assert policy.tool_token_budget == 64_000
+    assert policy.tool_execution_timeout_seconds == 45
     assert policy.deadline_seconds == 240
     assert policy.max_reasoning_revision_cycles == 2
     assert policy.max_provider_invocations == 26
@@ -226,6 +229,12 @@ def test_policy_defaults_match_the_approved_hard_limits() -> None:
             max_reasoning_revision_cycles=3,
             max_provider_invocations=29,
         )
+    with pytest.raises(ValidationError):
+        RoutePolicyV1(max_retrieval_repairs=4)
+    with pytest.raises(ValidationError):
+        RoutePolicyV1(max_selected_anchor_pages_per_round=21)
+    with pytest.raises(ValidationError):
+        RoutePolicyV1(tool_execution_timeout_seconds=241)
     with pytest.raises(ValidationError):
         LeasePolicyV1(heartbeat_interval_seconds=15, ttl_seconds=15)
 
@@ -325,10 +334,10 @@ def test_model_route_policy_v4_api_requires_and_round_trips_execution_limits() -
 
     request = ModelRouteCreateRequest.model_validate(payload)
 
-    assert request.runtime_policy.schema_version == "model-route-runtime-policy-v7"
+    assert request.runtime_policy.schema_version == "model-route-runtime-policy-v8"
     assert request.runtime_policy.max_catalog_pages == 5
     assert request.runtime_policy.max_search_rounds == 6
-    assert request.runtime_policy.max_unique_evidence == 40
+    assert request.runtime_policy.max_model_visible_items_per_turn == 40
     assert request.model_dump(mode="json")["runtime_policy"] == (
         model_route_runtime_policy()
     )
@@ -377,7 +386,7 @@ def test_runtime_budget_commands_require_typed_usage_inputs() -> None:
         reserve_catalog_pages=0,
         reserve_document_candidates=10,
         reserve_search_rounds=1,
-        reserve_unique_evidence=10,
+        reserve_model_visible_items=10,
         reserve_tool_tokens=2000,
     )
     assert begin.reserve_search_rounds == 1
@@ -395,7 +404,7 @@ def test_runtime_budget_commands_require_typed_usage_inputs() -> None:
             "result_ref": "result-ref-1",
             "result_digest": "a" * 64,
             "document_candidate_handles": ["document-handle-1"],
-            "unique_evidence_identities": ["evidence-identity-1"],
+            "model_visible_item_identities": ["evidence-identity-1"],
             "catalog_pages": 1,
             "search_rounds": 1,
             "tool_tokens": 20,
@@ -521,10 +530,11 @@ def _model_input_payload() -> dict:
             "catalog_pages": 0,
             "document_candidates": 0,
             "search_rounds": 0,
-            "unique_evidence": 0,
+            "model_visible_items": 0,
             "provider_invocations": 0,
             "context_tokens": 0,
             "tool_tokens": 0,
+            "retrieval_repairs": 0,
             "schema_retries": 0,
         },
         "policy": RoutePolicyV1().model_dump(),
@@ -571,6 +581,7 @@ def _model_input_payload() -> dict:
                 "max_discovery_limit": 20,
                 "max_search_limit": 0,
                 "max_expand_limit": 0,
+                "max_expand_anchor_handles": 0,
                 "max_output_tokens": 16000,
             },
             "contract_repair_remaining": 1,
@@ -588,11 +599,14 @@ def test_model_input_carries_only_bounded_visible_history() -> None:
         "representative_turn_id": "turn-1",
         "user_text": "Question.",
         "assistant_text": "Only visible prior text.",
-        "verification_status": "verified",
+        "user_authority": "user_provided_history",
+        "assistant_authority": "pending_verification",
+        "assistant_usage_scope": "dialogue_context_only",
     }
     summary = {
         "summary_ref": "summary-ref-1",
-        "text": "Visible older-history summary.",
+        "historical_user_context": "Earlier user premise.",
+        "assistant_pending_verification_context": "Visible older assistant summary.",
         "digest": "a" * 64,
     }
     model_input = TurnModelInputV3.model_validate(
@@ -611,6 +625,8 @@ def test_model_input_carries_only_bounded_visible_history() -> None:
     )
     assert model_input.summary is not None
     assert model_input.summary.summary_ref == "summary-ref-1"
+    assert model_input.recent_tail[0].assistant_authority == "pending_verification"
+    assert model_input.summary.historical_user_context == "Earlier user premise."
     with pytest.raises(ValidationError):
         TurnModelInputV3.model_validate({**payload, "hidden_turns": ["turn-secret"]})
 

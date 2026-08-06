@@ -8,7 +8,7 @@ import hashlib
 import json
 from typing import Callable, Literal, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.persistence.retrieval import (
@@ -55,6 +55,16 @@ def _digest(value: object) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _apply_statement_deadline(session: Session, deadline_at: datetime | None) -> None:
+    if deadline_at is None:
+        return
+    remaining = (deadline_at - _now()).total_seconds()
+    if remaining <= 0:
+        raise TimeoutError("retrieval tool deadline elapsed")
+    timeout_ms = max(1, int(remaining * 1000))
+    session.execute(select(func.set_config("statement_timeout", f"{timeout_ms}ms", True)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,8 +327,15 @@ class PostgresRetrievalV1Store:
             session.flush()
             return self._load_catalog(session, row)
 
-    def get_catalog(self, *, execution_id: str, catalog_ref: str) -> CatalogRecord:
+    def get_catalog(
+        self,
+        *,
+        execution_id: str,
+        catalog_ref: str,
+        deadline_at: datetime | None = None,
+    ) -> CatalogRecord:
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             row = session.get(AtlasTurnKnowledgeCatalogRow, catalog_ref)
             if row is None or row.execution_id != execution_id:
                 raise RetrievalStoreConflict("catalog does not belong to execution")
@@ -341,9 +358,11 @@ class PostgresRetrievalV1Store:
         action: ActionName,
         schema_version: str,
         canonical_arguments: Mapping[str, object],
+        deadline_at: datetime | None = None,
     ) -> InvocationResultRecord | None:
         arguments_digest = _digest(dict(canonical_arguments))
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             invocation = session.scalar(
                 select(AtlasTurnRetrievalInvocationRow).where(
                     AtlasTurnRetrievalInvocationRow.execution_id == execution_id,
@@ -365,7 +384,10 @@ class PostgresRetrievalV1Store:
             return self._invocation_result(invocation, result, replayed=True)
 
     def persist_invocation_result(
-        self, command: PersistInvocationResultInput
+        self,
+        command: PersistInvocationResultInput,
+        *,
+        deadline_at: datetime | None = None,
     ) -> InvocationResultRecord:
         if command.invocation_ordinal < 1:
             raise ValueError("invocation_ordinal must be positive")
@@ -383,6 +405,7 @@ class PostgresRetrievalV1Store:
             }
         )
         with self._session_factory() as session, session.begin():
+            _apply_statement_deadline(session, deadline_at)
             catalog = session.get(AtlasTurnKnowledgeCatalogRow, command.catalog_ref)
             if catalog is None or catalog.execution_id != command.execution_id:
                 raise RetrievalStoreConflict("catalog does not belong to execution")
@@ -446,6 +469,8 @@ class PostgresRetrievalV1Store:
             )
             session.add(result)
             session.flush()
+            if deadline_at is not None and _now() >= deadline_at:
+                raise TimeoutError("retrieval tool deadline elapsed before result commit")
             return self._invocation_result(invocation, result, replayed=False)
 
     def resolve_handles(
@@ -697,6 +722,25 @@ class PostgresRetrievalV1Store:
             if invocation is None:
                 raise RetrievalStoreConflict("retrieval result invocation is missing")
             return self._invocation_result(invocation, result, replayed=False)
+
+    def count_page_and_visual_handles(
+        self, *, execution_id: str, catalog_ref: str
+    ) -> int:
+        if not execution_id:
+            raise ValueError("execution_id must be non-empty")
+        if not catalog_ref:
+            raise ValueError("catalog_ref must be non-empty")
+        with self._session_factory() as session:
+            count = session.scalar(
+                select(func.count())
+                .select_from(AtlasTurnRetrievalHandleRow)
+                .where(
+                    AtlasTurnRetrievalHandleRow.execution_id == execution_id,
+                    AtlasTurnRetrievalHandleRow.catalog_ref == catalog_ref,
+                    AtlasTurnRetrievalHandleRow.handle_kind.in_(("page", "visual")),
+                )
+            )
+            return int(count or 0)
 
     def read_invocation_results(
         self, *, execution_id: str, catalog_ref: str, action: ActionName

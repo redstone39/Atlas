@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -124,11 +125,19 @@ class CurrentResourceAuthorizationReader(Protocol):
     """Reads current ACL/currentness outside Authorization-owned transactions."""
 
     def current_grant_authorization(
-        self, *, actor_id: Identity, conversation_id: Identity
+        self,
+        *,
+        actor_id: Identity,
+        conversation_id: Identity,
+        deadline_at: datetime | None = None,
     ) -> CurrentGrantAuthorizationSnapshotV1: ...
 
     def current_resource_authorizations(
-        self, *, actor_id: Identity, resource_refs: tuple[OpaqueRef, ...]
+        self,
+        *,
+        actor_id: Identity,
+        resource_refs: tuple[OpaqueRef, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentResourceAuthorizationSnapshotV1, ...]: ...
 
 
@@ -138,11 +147,19 @@ class GrantDocumentResourceOwner(Protocol):
     ) -> GrantDocumentResourceSnapshotV1: ...
 
     def grant_document_resources(
-        self, *, execution_id: Identity, grant_ref: OpaqueRef
+        self,
+        *,
+        execution_id: Identity,
+        grant_ref: OpaqueRef,
+        deadline_at: datetime | None = None,
     ) -> GrantDocumentResourceSnapshotV1: ...
 
     def current_grant_document_resources(
-        self, *, execution_id: Identity, grant_ref: OpaqueRef
+        self,
+        *,
+        execution_id: Identity,
+        grant_ref: OpaqueRef,
+        deadline_at: datetime | None = None,
     ) -> GrantDocumentResourceSnapshotV1: ...
 
 

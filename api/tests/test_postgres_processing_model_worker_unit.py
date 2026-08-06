@@ -361,7 +361,7 @@ def _invocation(status: str, **changes) -> ModelInvocationRecord:
         status=status, created_at="2026-07-18T00:00:00+00:00",
         prompt_snapshot_ref="audit:prompt", response_schema_name="schema",
         response_schema_digest="a" * 64, route_revision=1,
-        runtime_policy_schema_version="model-route-runtime-policy-v7",
+        runtime_policy_schema_version="model-route-runtime-policy-v8",
         runtime_policy_revision=1,
         execution_key="execution-1", subject_kind="document",
         subject_ref="document-1",

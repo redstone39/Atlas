@@ -7,6 +7,7 @@ each collaborator has closed its own transaction.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Annotated, Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -41,7 +42,7 @@ from atlas_production.modules.context_engineering.public import (
     ContextExchangeV3,
     ContextLineageEdgeV3,
     ContextMessageV3,
-    ContextSummaryInputV3,
+    ContextSummaryInputV4,
     CreateTurnInputProjectionV1,
     ModelUserInputV3,
     ModelUserTextSegmentV3,
@@ -51,7 +52,11 @@ from atlas_production.modules.context_engineering.public import (
 from atlas_production.modules.model_routing.public import ModelRoutingRuntime
 from atlas_production.modules.conversation.public import (
     AppendTurnMemberV1,
+    ConversationArchiveError,
+    ConversationArchiveResultV1,
+    ConversationArchiveV1,
     ConversationCreateV1,
+    ConversationMembershipConflict,
     ConversationOwner,
     ConversationRetryLineageOwner,
     ConversationTurnMemberV1,
@@ -136,6 +141,10 @@ class WorkspaceConversationCreateV1(_StrictModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     idempotency_key: Identity | None = None
     response_language: ResponseLanguage = "zh-TW"
+
+
+class WorkspaceConversationArchiveV1(_StrictModel):
+    idempotency_key: Identity
 
 
 class WorkspaceCitationV1(_StrictModel):
@@ -298,7 +307,7 @@ class WorkspaceReasoningProgressV1(_StrictModel):
     sequence: int = Field(ge=1)
     phase: ReasoningPhase
     status: ReasoningProgressStatus
-    cycle: int | None = Field(default=None, ge=1, le=4)
+    cycle: int | None = Field(default=None, ge=1, le=3)
     message_code: Identity
     message_params: dict[Identity, MessageParamValue] = Field(
         default_factory=dict, max_length=12
@@ -413,6 +422,34 @@ def _context_ref(execution_id: str) -> str:
     return f"context-pack-{hashlib.sha256(execution_id.encode()).hexdigest()}"
 
 
+def _historical_exchange_content_digest(
+    *,
+    user_text: str,
+    assistant_text: str,
+    direct_document_ids: list[str],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+                "assistant_authority": (
+                    None
+                    if not assistant_text
+                    else {
+                        "authority": "pending_verification",
+                        "usage_scope": "dialogue_context_only",
+                    }
+                ),
+                "direct_document_ids": direct_document_ids,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _input_projection_ref(execution_id: str) -> str:
     return f"input-projection-{hashlib.sha256(execution_id.encode()).hexdigest()}"
 
@@ -500,8 +537,57 @@ class WorkspaceTurnApplication:
             conversations=[
                 self._conversation_summary(item)
                 for item in self._conversations.list_for_actor(actor_id)
+                if item.status == "active"
             ]
         )
+
+    def archive_conversation(
+        self,
+        actor: object | None,
+        conversation_id: str,
+        command: WorkspaceConversationArchiveV1,
+    ) -> ConversationArchiveResultV1:
+        actor_id = self._actor_id(actor)
+        conversation = self._conversations.get(conversation_id)
+        if conversation is None or conversation.owner_actor_id != actor_id:
+            raise WorkspaceTurnError(
+                "not_found", "conversation.was_not_found", 404
+            )
+        members = self._conversations.candidate_turns(conversation_id)
+        expected_next_ordinal = max(
+            (member.ordinal for member in members), default=0
+        ) + 1
+        if conversation.status == "active":
+            for member in members:
+                state = self._runtime.snapshot(member.execution_id).state
+                if state not in {
+                    ExecutionState.TERMINAL_COMPLETED,
+                    ExecutionState.TERMINAL_FAILED,
+                }:
+                    raise WorkspaceTurnError(
+                        "conversation_processing",
+                        "conversation.cannot_be_archived_while_processing",
+                        409,
+                    )
+        try:
+            return self._conversations.archive(
+                actor_id=actor_id,
+                conversation_id=conversation_id,
+                command=ConversationArchiveV1(
+                    idempotency_key=command.idempotency_key,
+                    expected_next_ordinal=expected_next_ordinal,
+                ),
+            )
+        except ConversationArchiveError as error:
+            if error.reason == "not_found":
+                raise WorkspaceTurnError(
+                    "not_found", "conversation.was_not_found", 404
+                ) from error
+            raise WorkspaceTurnError(
+                "conversation_changed",
+                "conversation.changed_before_archive",
+                409,
+            ) from error
 
     def _conversation_summary(
         self, conversation: ConversationV1
@@ -610,9 +696,16 @@ class WorkspaceTurnApplication:
             max_schema_retries_per_turn=runtime_policy.max_schema_retries_per_turn,
             max_catalog_pages=runtime_policy.max_catalog_pages,
             max_search_rounds=runtime_policy.max_search_rounds,
-            max_unique_evidence=runtime_policy.max_unique_evidence,
+            max_model_visible_items_per_turn=runtime_policy.max_model_visible_items_per_turn,
+            max_retrieval_repairs=runtime_policy.max_retrieval_repairs,
+            max_selected_anchor_pages_per_round=(
+                runtime_policy.max_selected_anchor_pages_per_round
+            ),
             context_token_budget=runtime_policy.max_input_tokens_per_invocation,
             tool_token_budget=runtime_policy.max_tool_result_tokens_per_execution,
+            tool_execution_timeout_seconds=(
+                runtime_policy.tool_execution_timeout_seconds
+            ),
             deadline_seconds=runtime_policy.turn_timeout_seconds,
         )
         answer_behavior = self._answer_behavior.current()
@@ -690,6 +783,12 @@ class WorkspaceTurnApplication:
                     )
                     current = self._runtime.snapshot(execution_id)
                 if not membership_published:
+                    if isinstance(error, ConversationMembershipConflict):
+                        raise WorkspaceTurnError(
+                            "conversation_changed",
+                            "conversation.changed_before_turn_was_accepted",
+                            409,
+                        ) from error
                     raise
                 # Allocation plus membership is the public acceptance point.
                 # Any later owner failure is represented by the durable
@@ -1007,9 +1106,11 @@ class WorkspaceTurnApplication:
             if not assistant_visible:
                 answer = ""
                 direct_document_ids = []
-            content_digest = hashlib.sha256(
-                f"{source_context.model_user_input}\0{answer}".encode("utf-8")
-            ).hexdigest()
+            content_digest = _historical_exchange_content_digest(
+                user_text=source_context.model_user_input,
+                assistant_text=answer,
+                direct_document_ids=direct_document_ids,
+            )
             return ContextExchangeV3(
                 logical_turn_id=logical_turn_id,
                 representative_turn_id=member.turn_id,
@@ -1023,10 +1124,9 @@ class WorkspaceTurnApplication:
                     else ContextMessageV3(
                         role="assistant",
                         text=answer,
-                        # Evidence review is a post-answer audit projection only.
-                        # It must not influence any later Answer/Resolver/Rewrite/
-                        # Summary request or retry context.
-                        verification_status="not_applicable",
+                        # Every selected assistant answer is dialogue context whose
+                        # factual content remains pending current-turn verification.
+                        verification_status="unverified",
                     )
                 ),
                 direct_document_ids=direct_document_ids,
@@ -1064,10 +1164,13 @@ class WorkspaceTurnApplication:
                     valid = False
                     break
             if valid:
-                reusable_summary = ContextSummaryInputV3(
+                reusable_summary = ContextSummaryInputV4(
                     summary_ref=candidate.summary_ref,
                     parent_summary_ref=candidate.parent_summary_ref,
-                    text=candidate.text,
+                    historical_user_context=candidate.historical_user_context,
+                    assistant_pending_verification_context=(
+                        candidate.assistant_pending_verification_context
+                    ),
                     token_count=candidate.token_count,
                     sources=candidate.sources,
                 )
@@ -1411,6 +1514,7 @@ class WorkspaceTurnApplication:
         ExecutionSnapshotV1,
         list[RuntimeEventV1],
         list[WorkspaceDiscoveryTraceV1],
+        int,
     ]:
         member = self._conversations.get_turn(turn_id)
         if member is None or member.conversation_id != conversation_id:
@@ -1433,6 +1537,14 @@ class WorkspaceTurnApplication:
             snapshot,
             self._runtime.events(member.execution_id),
             self._project_discovery_traces(actor_id, traces),
+            (
+                self._retrieval.count_page_and_visual_handles(
+                    execution_id=snapshot.execution_id,
+                    catalog_ref=snapshot.catalog_ref,
+                )
+                if snapshot.catalog_ref is not None
+                else 0
+            ),
         )
 
     def _project_discovery_traces(

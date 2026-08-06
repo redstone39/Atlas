@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -32,11 +32,15 @@ from atlas_production.modules.result_governance.public import (
     RetrievalStatusV1,
 )
 from atlas_production.modules.retrieval.public import (
+    DocumentNavigationResultV1,
     DiscoverRelevantDocumentsV1,
     ExpandKnowledgeV1,
     FindKnowledgeDocumentsV1,
     InspectKnowledgeV1,
     InspectVisualV1,
+    KnowledgeExpansionResultV1,
+    KnowledgeInspectionResultV1,
+    KnowledgeSearchResultV1,
     KnowledgeToolActionV1,
     KnowledgeToolObservationV1,
     ListKnowledgeDocumentsV1,
@@ -45,6 +49,7 @@ from atlas_production.modules.retrieval.public import (
     RetrievalOwner,
     SearchKnowledgeV1,
     VisualImagePayloadV1,
+    VisualInspectionResultV1,
 )
 from atlas_production.modules.turn_execution.public import (
     DeepReasoningContractError,
@@ -81,6 +86,10 @@ from atlas_production.modules.turn_runtime.public import (
     TurnRuntimeOwner,
     TurnRuntimeBudgetExceeded,
 )
+
+
+def _contract_repair_remaining(snapshot: ExecutionSnapshotV1) -> int:
+    return snapshot.policy.max_retrieval_repairs - snapshot.budget.retrieval_repairs
 
 
 logger = logging.getLogger(__name__)
@@ -221,8 +230,9 @@ def _action_reservation(
         )
     if isinstance(action, SearchKnowledgeV1):
         # Search is restricted to already disclosed documents, so it cannot
-        # add a new document-candidate identity.
-        return (0, 0, 1, action.limit, action.max_output_tokens)
+        # add a new document-candidate identity. Each result can add one
+        # evidence handle and one page handle to the model-visible total.
+        return (0, 0, 1, action.limit * 2, action.max_output_tokens)
     if isinstance(action, InspectKnowledgeV1):
         # Inspected evidence and its documents were already obtained and counted.
         return (0, 0, 0, 0, action.max_output_tokens)
@@ -233,13 +243,39 @@ def _action_reservation(
             0,
             0,
             1 if action.mode == "search" else 0,
-            0,
+            action.limit * 2,
             action.max_output_tokens,
         )
     assert isinstance(action, ExpandKnowledgeV1)
     # Expansion may surface another authorized binding for related evidence,
     # so preserve the existing candidate reservation.
-    return (0, action.limit, 0, action.limit, action.max_output_tokens)
+    return (0, action.limit, 0, action.limit * 2, action.max_output_tokens)
+
+
+def _model_visible_item_identities(
+    observation: KnowledgeToolObservationV1,
+) -> tuple[str, ...]:
+    """Return model-selectable handles in deterministic result order."""
+
+    identities: list[str] = []
+    if isinstance(observation, (KnowledgeSearchResultV1, KnowledgeExpansionResultV1)):
+        for item in observation.evidence:
+            identities.append(item.evidence_handle)
+            if item.page_handle is not None:
+                identities.append(item.page_handle)
+    elif isinstance(observation, KnowledgeInspectionResultV1):
+        identities.extend(item.evidence_handle for item in observation.items)
+    elif isinstance(observation, VisualInspectionResultV1):
+        # inspect_visual can only target an existing page/visual capability, so
+        # the returned page handle is already admitted. A new crop/full render
+        # can add at most the result visual handle; exact replay adds none.
+        identities.extend((observation.page_handle, observation.visual_handle))
+    elif isinstance(observation, DocumentNavigationResultV1):
+        for item in observation.targets:
+            identities.append(item.navigation_handle)
+            if item.page_handle is not None:
+                identities.append(item.page_handle)
+    return tuple(dict.fromkeys(identities))
 
 
 def _has_legal_tool(
@@ -258,7 +294,7 @@ def _has_legal_tool(
     )
     can_search_or_expand = (
         budget.search_rounds < policy.max_search_rounds
-        and budget.unique_evidence < policy.max_unique_evidence
+        and budget.model_visible_items < policy.max_model_visible_items_per_turn
     )
     return (
         can_catalog
@@ -352,6 +388,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         audit: TurnAuditDraftOwnerV2,
         evaluator: PostHocAnswerEvaluatorV2,
         reasoning_model: DeepReasoningModel | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._runtime = runtime
         self._model = model
@@ -362,6 +399,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._audit = audit
         self._evaluator = evaluator
         self._reasoning_model = reasoning_model
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _claim_schema_retry(
         self,
@@ -514,7 +552,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     consistency="unavailable",
                     reason_code=(
                         "deadline_elapsed"
-                        if datetime.now(timezone.utc) >= snapshot.deadline_at
+                        if self._clock() >= snapshot.deadline_at
                         else "physical_limit_rejected"
                     ),
                     **common,
@@ -547,7 +585,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             raise ValueError("accepted execution refs are incomplete")
 
         observations: list[KnowledgeToolObservationV1] = []
-        contract_repair_remaining = 1
+        contract_repair_remaining = _contract_repair_remaining(snapshot)
         document_candidate_handles: set[str] = set()
         evidence_by_handle: dict[str, RetrievalEvidenceLineageV1] = {}
         visual_images_by_handle: dict[str, VisualImagePayloadV1] = {}
@@ -619,7 +657,6 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                             expected_version=snapshot.version,
                             fencing_token=snapshot.lease.fencing_token,
                             context_tokens=context_tokens,
-                            contract_repair=repair,
                         )
                     )
                     planner_input = self._model_inputs.build(
@@ -708,7 +745,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             session = self._model.open_session(initial_input)
 
             while True:
-                if datetime.now(timezone.utc) >= snapshot.deadline_at:
+                if self._clock() >= snapshot.deadline_at:
                     failure_code = "deadline_exceeded"
                     raise TimeoutError("turn deadline elapsed")
                 finalize_only = force_finalize_only or not _has_legal_tool(
@@ -737,6 +774,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         contract_repair=contract_repair_request,
                     )
                 )
+                contract_repair_remaining = _contract_repair_remaining(snapshot)
                 contract_repair_request = False
                 model_input = self._model_inputs.build(
                     snapshot,
@@ -816,7 +854,6 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     failure_code = "contract_violation"
                     if contract_repair_remaining == 0:
                         raise ValueError("provider repeated an invalid capability selection")
-                    contract_repair_remaining = 0
                     session.accept_contract_repair(model_result)
                     contract_repair_request = True
                     continue
@@ -1048,7 +1085,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 safe_code = getattr(error, "safe_code", "")
                                 unavailable_reason = (
                                     "deadline_exceeded"
-                                    if datetime.now(timezone.utc) >= snapshot.deadline_at
+                                    if self._clock() >= snapshot.deadline_at
                                     else "budget_exhausted"
                                     if "budget" in safe_code
                                     or "budget" in type(error).__name__.lower()
@@ -1440,7 +1477,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     )
                     arguments["tokenizer_profile"] = snapshot.route.tokenizer_profile
                 action_digest = _digest(arguments)
-                pages, candidates, searches, evidence, tokens = _action_reservation(
+                pages, candidates, searches, model_visible_items, tokens = _action_reservation(
                     action,
                     snapshot,
                 )
@@ -1452,7 +1489,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 # the repeated model-visible observation.
                 if action_digest in completed_actions:
                     candidates = 0
-                    evidence = 0
+                    model_visible_items = 0
                 invocation_ordinal = snapshot.budget.tool_invocations + 1
                 invocation_id = _ref(
                     "tool-invocation",
@@ -1472,11 +1509,20 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         reserve_catalog_pages=pages,
                         reserve_document_candidates=candidates,
                         reserve_search_rounds=searches,
-                        reserve_unique_evidence=evidence,
+                        reserve_model_visible_items=model_visible_items,
                         reserve_tool_tokens=tokens,
                     )
                 )
                 failure_code = "tool_failed"
+                tool_started_at = self._clock()
+                if tool_started_at >= snapshot.deadline_at:
+                    failure_code = "deadline_exceeded"
+                    raise TimeoutError("turn deadline elapsed before retrieval")
+                tool_deadline_at = min(
+                    tool_started_at
+                    + timedelta(seconds=snapshot.policy.tool_execution_timeout_seconds),
+                    snapshot.deadline_at,
+                )
                 envelope = self._retrieval.invoke(
                     execution_id=execution_id,
                     grant_ref=snapshot.grant_ref,
@@ -1485,7 +1531,16 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     action=action,
                     max_output_tokens=tokens,
                     tokenizer_profile=snapshot.route.tokenizer_profile,
+                    deadline_at=tool_deadline_at,
                 )
+                if self._clock() >= snapshot.deadline_at:
+                    failure_code = "deadline_exceeded"
+                    raise TimeoutError("turn deadline elapsed during retrieval")
+                if self._clock() >= tool_deadline_at and (
+                    envelope.observation.result_type != "knowledge_tool_error"
+                    or envelope.observation.message_code != "retrieval_tool_timeout"
+                ):
+                    raise ValueError("retrieval returned a late normal result")
                 document_candidate_handles.update(
                     envelope.document_candidate_handles
                 )
@@ -1505,10 +1560,8 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         result_ref=envelope.result_ref,
                         result_digest=envelope.result_digest,
                         document_candidate_handles=envelope.document_candidate_handles,
-                        unique_evidence_identities=list(
-                            dict.fromkeys(
-                                item.evidence_identity for item in envelope.evidence_lineage
-                            )
+                        model_visible_item_identities=list(
+                            _model_visible_item_identities(envelope.observation)
                         ),
                         catalog_pages=(
                             1

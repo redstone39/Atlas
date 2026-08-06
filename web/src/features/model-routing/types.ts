@@ -3,14 +3,14 @@ import type { MessageReference } from "../../shared/user-messages";
 export type ProviderType = "openai_compatible" | "azure_openai";
 
 export interface ModelRouteRuntimePolicyInput {
-  schema_version: "model-route-runtime-policy-v7";
+  schema_version: "model-route-runtime-policy-v8";
   tokenizer_profile: string;
   max_tool_executions: number;
   max_provider_invocations: number;
   max_reasoning_revision_cycles: number;
   max_catalog_pages: number;
   max_search_rounds: number;
-  max_unique_evidence: number;
+  max_model_visible_items_per_turn: number;
   max_retrieval_repairs: number;
   max_schema_retries_per_turn: number;
   max_selected_anchor_pages_per_round: number;

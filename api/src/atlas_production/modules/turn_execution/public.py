@@ -250,15 +250,36 @@ class TurnModelRecentExchangeV3(_StrictModel):
     representative_turn_id: Identity
     user_text: str = Field(max_length=50000)
     assistant_text: str | None = Field(default=None, max_length=50000)
-    verification_status: Literal[
-        "verified", "partially_verified", "unverified", "not_applicable"
-    ]
+    user_authority: Literal["user_provided_history"] = "user_provided_history"
+    assistant_authority: Literal["pending_verification"] | None = None
+    assistant_usage_scope: Literal["dialogue_context_only"] | None = None
+
+    @model_validator(mode="after")
+    def require_assistant_authority_with_text(self) -> "TurnModelRecentExchangeV3":
+        has_text = self.assistant_text is not None
+        has_authority = (
+            self.assistant_authority is not None
+            and self.assistant_usage_scope is not None
+        )
+        if has_text != has_authority:
+            raise ValueError("assistant history text requires pending authority metadata")
+        return self
 
 
-class TurnModelHistorySummaryV3(_StrictModel):
+class TurnModelHistorySummaryV4(_StrictModel):
     summary_ref: OpaqueRef
-    text: str = Field(max_length=50000)
+    historical_user_context: str = Field(max_length=50000)
+    assistant_pending_verification_context: str = Field(max_length=50000)
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_bounded_combined_text(self) -> "TurnModelHistorySummaryV4":
+        combined = self.historical_user_context + self.assistant_pending_verification_context
+        if not combined:
+            raise ValueError("summary content must not be empty")
+        if len(combined) > 50000:
+            raise ValueError("combined summary content exceeds 50000 characters")
+        return self
 
 
 class TurnModelDocumentOptionV1(_StrictModel):
@@ -305,6 +326,7 @@ class TurnModelCapabilityLimitsV1(_StrictModel):
     max_discovery_limit: int = Field(ge=0, le=20)
     max_search_limit: int = Field(ge=0, le=20)
     max_expand_limit: int = Field(ge=0, le=20)
+    max_expand_anchor_handles: int = Field(ge=0, le=20)
     max_navigation_limit: int = Field(default=0, ge=0, le=20)
     max_output_tokens: int = Field(ge=0, le=64_000)
 
@@ -317,9 +339,7 @@ class TurnModelCapabilitySnapshotV1(_StrictModel):
     documents: list[TurnModelDocumentOptionV1]
     evidence: list[TurnModelEvidenceOptionV1] = Field(max_length=40)
     visuals: list[TurnModelVisualOptionV1] = Field(max_length=40)
-    navigation: list[TurnModelNavigationOptionV1] = Field(
-        default_factory=list, max_length=40
-    )
+    navigation: list[TurnModelNavigationOptionV1] = Field(default_factory=list, max_length=40)
     allowed_modalities: list[Literal["text", "table", "figure"]] = Field(
         min_length=3, max_length=3
     )
@@ -341,7 +361,7 @@ class TurnModelCapabilitySnapshotV1(_StrictModel):
     )
     catalog_wide_search_allowed: bool
     limits: TurnModelCapabilityLimitsV1
-    contract_repair_remaining: Literal[0, 1]
+    contract_repair_remaining: int = Field(ge=0, le=3)
     digest: Digest
 
 
@@ -350,8 +370,8 @@ class TurnModelBehaviorContractV1(_StrictModel):
         "Choose only exact actions, handles, modalities, directions, and limits listed in the current capabilities; never invent or reuse stale opaque values."
     ] = "Choose only exact actions, handles, modalities, directions, and limits listed in the current capabilities; never invent or reuse stale opaque values."
     retrieval_rule: Literal[
-        "Use document discovery before evidence search. Use discover_relevant_documents for natural-language content discovery; its previews guide selection only and are not evidence. For find_knowledge_documents, provide one concise document-identity keyword based on a name, model, version, or tag; do not use the user's content question as the identity keyword or treat find as content search. Review the disclosed candidates, then choose one or more current document handles for search_knowledge; never search without selected document handles or treat the whole authorized catalog as the target. You control each query, keyword, cursor, and selected handle and may discover, reselect, and search repeatedly, and may navigate repeatedly, within the current capabilities and budget. Use navigate_document overview, search, and around to explore a selected document's fixed structure and nearby locations when document layout, a table of contents, a named section, a figure, a table, or exhaustive page coverage matters. A page_handle returned by navigate_document can be passed directly to inspect_visual while that handle remains in current capabilities. Navigation targets and page handles are location choices only, never evidence; inspect text or visuals before relying on their contents. Treat an incomplete initial retrieval result as an evidence gap, not proof that disclosed content is unavailable. When the user explicitly asks to look at or inspect a page, figure, diagram, image, shape, or visual arrangement, or requests exhaustive, all, complete, or equivalent coverage, make the best reasonable effort to continue with relevant legal discovery, navigation, search, text inspection, or visual inspection while useful disclosed handles and execution budget remain. Do not finalize by claiming that a disclosed page or visual is inaccessible before attempting inspect_visual when it is legal and relevant. You may choose any useful tool order and need not follow a fixed or repeatable path. If no candidate is found, retry content or identity discovery, browse with list_knowledge_documents, explain the limitation, or ask for clarification; never treat discovery preview, navigation metadata, or catalog metadata as cited evidence. Use evidence retrieval before presenting document-backed factual conclusions. Stop honestly with the precise unresolved scope when relevant actions or handles are unavailable, further exploration is no longer useful, or authorization, budget, or deadline prevents continuation."
-    ] = "Use document discovery before evidence search. Use discover_relevant_documents for natural-language content discovery; its previews guide selection only and are not evidence. For find_knowledge_documents, provide one concise document-identity keyword based on a name, model, version, or tag; do not use the user's content question as the identity keyword or treat find as content search. Review the disclosed candidates, then choose one or more current document handles for search_knowledge; never search without selected document handles or treat the whole authorized catalog as the target. You control each query, keyword, cursor, and selected handle and may discover, reselect, and search repeatedly, and may navigate repeatedly, within the current capabilities and budget. Use navigate_document overview, search, and around to explore a selected document's fixed structure and nearby locations when document layout, a table of contents, a named section, a figure, a table, or exhaustive page coverage matters. A page_handle returned by navigate_document can be passed directly to inspect_visual while that handle remains in current capabilities. Navigation targets and page handles are location choices only, never evidence; inspect text or visuals before relying on their contents. Treat an incomplete initial retrieval result as an evidence gap, not proof that disclosed content is unavailable. When the user explicitly asks to look at or inspect a page, figure, diagram, image, shape, or visual arrangement, or requests exhaustive, all, complete, or equivalent coverage, make the best reasonable effort to continue with relevant legal discovery, navigation, search, text inspection, or visual inspection while useful disclosed handles and execution budget remain. Do not finalize by claiming that a disclosed page or visual is inaccessible before attempting inspect_visual when it is legal and relevant. You may choose any useful tool order and need not follow a fixed or repeatable path. If no candidate is found, retry content or identity discovery, browse with list_knowledge_documents, explain the limitation, or ask for clarification; never treat discovery preview, navigation metadata, or catalog metadata as cited evidence. Use evidence retrieval before presenting document-backed factual conclusions. Stop honestly with the precise unresolved scope when relevant actions or handles are unavailable, further exploration is no longer useful, or authorization, budget, or deadline prevents continuation."
+        "Use document discovery before evidence search. Use discover_relevant_documents for natural-language content discovery; its previews guide selection only and are not evidence. For find_knowledge_documents, provide one concise document-identity keyword based on a name, model, version, or tag; do not use the user's content question as the identity keyword or treat find as content search. Review the disclosed candidates, then choose one or more current document handles for search_knowledge; never search without selected document handles or treat the whole authorized catalog as the target. You control each query, keyword, cursor, and selected handle and may discover, reselect, and search repeatedly, and may navigate repeatedly, within the current capabilities and budget. Use navigate_document overview, search, and around to explore a selected document's fixed structure and nearby locations when document layout, a table of contents, a named section, a figure, a table, or exhaustive page coverage matters. Any page_handle in current capabilities, whether returned by search_knowledge or navigate_document, can be passed directly to inspect_visual. Navigation targets and page handles are location choices only, never evidence; inspect text or visuals before relying on their contents. Treat an incomplete initial retrieval result as an evidence gap, not proof that disclosed content is unavailable. Use inspect_visual proactively whenever visual inspection would help understand, verify, compare, or resolve ambiguity in the requested task; the user does not need to ask explicitly. This includes figures, diagrams, images, shapes, visual labels, relative positions, page layouts, waveforms, schematics, and visually encoded tables. Text extraction, snippets, captions, and navigation metadata may help locate a target but do not replace visual inspection when the conclusion depends on visual content. For comparisons, inspect every material visual target. When the user requests exhaustive, all, complete, or equivalent coverage, make the best reasonable effort to continue with relevant legal discovery, navigation, search, text inspection, or visual inspection while useful disclosed handles and execution budget remain. Do not finalize by claiming that a disclosed page or visual is inaccessible before attempting inspect_visual when it is legal and relevant. You may choose any useful tool order and need not follow a fixed or repeatable path. If no candidate is found, retry content or identity discovery, browse with list_knowledge_documents, explain the limitation, or ask for clarification; never treat discovery preview, navigation metadata, or catalog metadata as cited evidence. Use evidence retrieval before presenting document-backed factual conclusions. Stop honestly with the precise unresolved scope when relevant actions or handles are unavailable, further exploration is no longer useful, or authorization, budget, or deadline prevents continuation."
+    ] = "Use document discovery before evidence search. Use discover_relevant_documents for natural-language content discovery; its previews guide selection only and are not evidence. For find_knowledge_documents, provide one concise document-identity keyword based on a name, model, version, or tag; do not use the user's content question as the identity keyword or treat find as content search. Review the disclosed candidates, then choose one or more current document handles for search_knowledge; never search without selected document handles or treat the whole authorized catalog as the target. You control each query, keyword, cursor, and selected handle and may discover, reselect, and search repeatedly, and may navigate repeatedly, within the current capabilities and budget. Use navigate_document overview, search, and around to explore a selected document's fixed structure and nearby locations when document layout, a table of contents, a named section, a figure, a table, or exhaustive page coverage matters. Any page_handle in current capabilities, whether returned by search_knowledge or navigate_document, can be passed directly to inspect_visual. Navigation targets and page handles are location choices only, never evidence; inspect text or visuals before relying on their contents. Treat an incomplete initial retrieval result as an evidence gap, not proof that disclosed content is unavailable. Use inspect_visual proactively whenever visual inspection would help understand, verify, compare, or resolve ambiguity in the requested task; the user does not need to ask explicitly. This includes figures, diagrams, images, shapes, visual labels, relative positions, page layouts, waveforms, schematics, and visually encoded tables. Text extraction, snippets, captions, and navigation metadata may help locate a target but do not replace visual inspection when the conclusion depends on visual content. For comparisons, inspect every material visual target. When the user requests exhaustive, all, complete, or equivalent coverage, make the best reasonable effort to continue with relevant legal discovery, navigation, search, text inspection, or visual inspection while useful disclosed handles and execution budget remain. Do not finalize by claiming that a disclosed page or visual is inaccessible before attempting inspect_visual when it is legal and relevant. You may choose any useful tool order and need not follow a fixed or repeatable path. If no candidate is found, retry content or identity discovery, browse with list_knowledge_documents, explain the limitation, or ask for clarification; never treat discovery preview, navigation metadata, or catalog metadata as cited evidence. Use evidence retrieval before presenting document-backed factual conclusions. Stop honestly with the precise unresolved scope when relevant actions or handles are unavailable, further exploration is no longer useful, or authorization, budget, or deadline prevents continuation."
     answer_rule: Literal[
         "Success criteria: Answer only the user's current target request, covering the requested depth, format, scope, and comparison. State the adopted referent, scope, units, conditions, and material limitations needed to prevent misunderstanding, and make the direct answer the most prominent content. When the current message is an acknowledgment, confirmation, greeting, pause, farewell, or other non-request, respond only to that dialogue act without resuming prior work. Add context or ask a follow-up question only when necessary to resolve material ambiguity, disclose a material limitation, prevent a misleading answer, or complete the user's requested decision. Brevity must not remove qualifications needed for correctness. Prohibited behaviors: Do not answer a different, broader, adjacent, prior, or assistant-suggested task that the current user message did not request. Do not resume, repeat, or expand prior work merely because it is recent, detailed, unfinished, or related. Do not turn a question about one model, document, page, object, or item into an answer about every item or an unrequested comparison. Do not add tangential background, unsolicited alternatives, extra recommendations, extra checklists, or routine offers such as 'if you want, I can also...'. Do not let supplementary context precede, obscure, or outweigh the direct answer. Do not rely only on pronouns for referent-sensitive conclusions. Finalize only the complete ordered answer segments; a separate post-answer reviewer may assess declared evidence alignment, but its judgement never repairs, retries, truncates, or blocks this complete answer."
     ] = "Success criteria: Answer only the user's current target request, covering the requested depth, format, scope, and comparison. State the adopted referent, scope, units, conditions, and material limitations needed to prevent misunderstanding, and make the direct answer the most prominent content. When the current message is an acknowledgment, confirmation, greeting, pause, farewell, or other non-request, respond only to that dialogue act without resuming prior work. Add context or ask a follow-up question only when necessary to resolve material ambiguity, disclose a material limitation, prevent a misleading answer, or complete the user's requested decision. Brevity must not remove qualifications needed for correctness. Prohibited behaviors: Do not answer a different, broader, adjacent, prior, or assistant-suggested task that the current user message did not request. Do not resume, repeat, or expand prior work merely because it is recent, detailed, unfinished, or related. Do not turn a question about one model, document, page, object, or item into an answer about every item or an unrequested comparison. Do not add tangential background, unsolicited alternatives, extra recommendations, extra checklists, or routine offers such as 'if you want, I can also...'. Do not let supplementary context precede, obscure, or outweigh the direct answer. Do not rely only on pronouns for referent-sensitive conclusions. Finalize only the complete ordered answer segments; a separate post-answer reviewer may assess declared evidence alignment, but its judgement never repairs, retries, truncates, or blocks this complete answer."
@@ -371,7 +391,7 @@ class TurnModelInputV3(_StrictModel):
     execution_id: Identity
     model_user_input: str = Field(min_length=1, max_length=50000)
     recent_tail: list[TurnModelRecentExchangeV3]
-    summary: TurnModelHistorySummaryV3 | None
+    summary: TurnModelHistorySummaryV4 | None
     context_pack_ref: OpaqueRef
     knowledge_catalog_ref: OpaqueRef
     catalog_document_count: int = Field(ge=0)
@@ -385,6 +405,26 @@ class TurnModelInputV3(_StrictModel):
     )
     previous_observation: KnowledgeToolObservationV1 | None = None
     reasoning_plan: ReasoningPlanV2 | None = None
+
+    @model_validator(mode="after")
+    def require_execution_fixed_model_visible_item_total(self) -> "TurnModelInputV3":
+        identities = (
+            {item.evidence_handle for item in self.capabilities.evidence}
+            | {item.handle for item in self.capabilities.visuals}
+            | {
+                item.navigation_handle
+                for item in self.capabilities.navigation
+            }
+        )
+        if len(identities) != self.budget.model_visible_items:
+            raise ValueError(
+                "model-visible capabilities do not match the runtime budget total"
+            )
+        if len(identities) > self.policy.max_model_visible_items_per_turn:
+            raise ValueError(
+                "model-visible capabilities exceed the execution-fixed limit"
+            )
+        return self
 
 
 class DeepReasoningPlanResultV1(_StrictModel):
@@ -565,7 +605,7 @@ __all__ = [
     "TurnExecutionOrchestrator",
     "TurnActionV1",
     "TurnActionEnvelopeV1",
-    "TurnModelHistorySummaryV3",
+    "TurnModelHistorySummaryV4",
     "TurnModelCapabilityLimitsV1",
     "TurnModelCapabilitySnapshotV1",
     "TurnModelBehaviorContractV1",

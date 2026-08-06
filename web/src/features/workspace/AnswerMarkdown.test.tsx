@@ -4,6 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AnswerMarkdown } from "./AnswerMarkdown";
+import { joinResponseSegmentMarkdown } from "./api";
 
 afterEach(cleanup);
 
@@ -32,6 +33,75 @@ describe("AnswerMarkdown", () => {
     expect(screen.getByRole("list")).toBeInTheDocument();
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "Ready" })).toBeInTheDocument();
+  });
+
+  it("keeps single tildes literal and preserves visible soft line breaks", () => {
+    const { container } = render(
+      <AnswerMarkdown
+        content={[
+          "A~B~C",
+          "Second paragraph line",
+          "",
+          "- First list line",
+          "  Second list line",
+          "",
+          "A~~B~~C",
+        ].join("\n")}
+      />,
+    );
+
+    const paragraphs = container.querySelectorAll("p");
+    const listItem = screen.getByRole("listitem");
+    const listText = listItem.querySelector("span");
+    const deletion = container.querySelector("del");
+
+    expect(paragraphs[0]).toHaveTextContent("A~B~C Second paragraph line");
+    expect(paragraphs[0]).toHaveClass("whitespace-pre-wrap");
+    expect(paragraphs[0].textContent).toContain("\n");
+    expect(listItem).toHaveTextContent("First list line Second list line");
+    expect(listItem).not.toHaveClass("whitespace-pre-wrap");
+    expect(listText).toHaveClass("whitespace-pre-wrap");
+    expect(listItem.textContent).toContain("\n");
+    expect(deletion).toHaveTextContent("B");
+    expect(container.querySelectorAll("del")).toHaveLength(1);
+  });
+
+  it("does not preserve Markdown structural whitespace around nested list blocks", () => {
+    render(
+      <AnswerMarkdown
+        content={[
+          "- Parent item:",
+          "",
+          "  - First nested item",
+          "",
+          "  - Second nested item",
+          "",
+          "- Next parent item",
+        ].join("\n")}
+      />,
+    );
+
+    const listItems = screen.getAllByRole("listitem");
+
+    expect(listItems).toHaveLength(4);
+    for (const listItem of listItems) {
+      expect(listItem).not.toHaveClass("whitespace-pre-wrap");
+    }
+    expect(screen.getByText("Parent item:").closest("p")).toHaveClass("whitespace-pre-wrap");
+  });
+
+  it("keeps a following response segment outside the preceding list", () => {
+    render(
+      <AnswerMarkdown
+        content={joinResponseSegmentMarkdown([
+          { text: "**First section**\n- List item" },
+          { text: "**Second section**\n- Next item" },
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Second section").closest("li")).toBeNull();
+    expect(screen.getAllByRole("list")).toHaveLength(2);
   });
 
   it("opens only safe external links in a separate browsing context", () => {

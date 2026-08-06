@@ -103,8 +103,8 @@ def _hash(value: object) -> str:
 def _budget(**changes) -> BudgetSnapshotV1:
     values = dict(
         tool_invocations=0, catalog_pages=0, document_candidates=0,
-        search_rounds=0, unique_evidence=0, provider_invocations=0,
-        context_tokens=0, tool_tokens=0, schema_retries=0,
+        search_rounds=0, model_visible_items=0, provider_invocations=0,
+        context_tokens=0, tool_tokens=0, retrieval_repairs=0, schema_retries=0,
     )
     values.update(changes)
     return BudgetSnapshotV1(**values)
@@ -121,11 +121,12 @@ class Runtime:
         self.model_action_repairs: list[bool] = []
         self.reservations = []
         self.document_candidate_handles: set[str] = set()
+        self.model_visible_item_identities: set[str] = set()
         self.reasoning_events = []
         self.snapshot_value = ExecutionSnapshotV1(
             execution_id="exec-1", turn_id="turn-1", conversation_id="conversation-1",
             actor_id="actor-1", state="context_ready", version=3,
-            policy=policy or RoutePolicyV1(),
+            policy=policy or RoutePolicyV1(max_retrieval_repairs=1),
             route=route_snapshot(),
             input_digest="0" * 64,
             response_language="zh-TW",
@@ -178,6 +179,10 @@ class Runtime:
         b = self.snapshot_value.budget.model_copy(update={
             "provider_invocations": self.snapshot_value.budget.provider_invocations + 1,
             "context_tokens": self.snapshot_value.budget.context_tokens + command.context_tokens,
+            "retrieval_repairs": (
+                self.snapshot_value.budget.retrieval_repairs
+                + (1 if command.contract_repair else 0)
+            ),
         })
         return self._move("awaiting_model_action", budget=b)
 
@@ -222,6 +227,10 @@ class Runtime:
             self.document_candidate_handles
         )
         self.document_candidate_handles.update(command.document_candidate_handles)
+        new_model_visible_items = set(command.model_visible_item_identities).difference(
+            self.model_visible_item_identities
+        )
+        self.model_visible_item_identities.update(command.model_visible_item_identities)
         b = self.snapshot_value.budget.model_copy(update={
             "catalog_pages": self.snapshot_value.budget.catalog_pages + command.catalog_pages,
             "search_rounds": self.snapshot_value.budget.search_rounds + command.search_rounds,
@@ -229,13 +238,13 @@ class Runtime:
                 self.snapshot_value.budget.document_candidates
                 + len(new_document_candidates)
             ),
-            "unique_evidence": min(
-                self.snapshot_value.policy.max_unique_evidence,
-                self.snapshot_value.budget.unique_evidence + len(command.unique_evidence_identities),
+            "model_visible_items": (
+                self.snapshot_value.budget.model_visible_items
+                + len(new_model_visible_items)
             ),
             "tool_tokens": self.snapshot_value.budget.tool_tokens + command.tool_tokens,
         })
-        self.last_unique_identities = command.unique_evidence_identities
+        self.last_unique_identities = command.model_visible_item_identities
         return self._move("tool_completed", budget=b)
 
     def begin_governance(self, command):
@@ -462,9 +471,11 @@ class Retrieval:
         max_output_tokens=None,
         tokenizer_profile=None,
         max_output_bytes=262_144,
+        deadline_at=None,
     ):
         assert max_output_tokens is not None
         assert tokenizer_profile == "cl100k_base"
+        assert deadline_at is not None
         handles = (
             getattr(action, "document_handles", None)
             or getattr(action, "handles", None)
@@ -516,7 +527,7 @@ class Retrieval:
                         preview=(
                             "保留政策候選內容"
                             if "保留" in action.query_text
-                            else "Retention policy candidate"
+                            else "Example policy candidate"
                         ),
                         locator_label=f"{handle[-1]}.pdf · p. 1",
                         page_number=1,
@@ -616,7 +627,7 @@ class Retrieval:
             )
             document_handle = "kh_document_B" if "B" in suffix else "kh_document_A"
             item_count = (
-                20
+                action.limit
                 if action.action == "search_knowledge"
                 and action.query_text.startswith("bulk")
                 else 1
@@ -1506,21 +1517,35 @@ def test_deep_planner_and_replanner_share_one_turn_schema_retry_budget() -> None
     assert trace.corrections == []
 
 
-def test_two_searches_can_materialize_forty_unique_evidence_items() -> None:
-    bulk_search = lambda query: {
+def test_multistep_search_and_visuals_can_fill_shared_visible_item_total() -> None:
+    bulk_search = lambda query, limit: {
         **search(query),
-        "limit": 20,
+        "limit": limit,
         "max_output_tokens": 64_000,
     }
     orchestrator, runtime, retrieval, _model, order = _orchestrator(
-        [bulk_search("bulkA"), bulk_search("bulkB"), finalize()]
+        [
+            bulk_search("bulkA", 20),
+            bulk_search("bulkB9", 9),
+            bulk_search("bulkB4", 4),
+            bulk_search("bulkB2", 2),
+            bulk_search("bulkB1a", 1),
+            bulk_search("bulkB1b", 1),
+            {
+                "action": "inspect_visual",
+                "handle": "kh_page_A",
+                "scope": "full",
+                "bbox": None,
+            },
+            finalize(),
+        ]
     )
 
     orchestrator.run("exec-1")
 
     assert runtime.snapshot_value.state == ExecutionState.TERMINAL_COMPLETED
-    assert runtime.snapshot_value.budget.unique_evidence == 40
-    assert retrieval.pack is not None and len(retrieval.pack.items) == 40
+    assert runtime.snapshot_value.budget.model_visible_items == 40
+    assert retrieval.pack is not None and len(retrieval.pack.items) == 38
     assert orchestrator._result_governance.command.evidence_lineage == []
     assert orchestrator._audit.command.steps[-3].evidence_count == 0
     assert orchestrator._result_governance.command.assessment_reason_code == (
@@ -1584,7 +1609,7 @@ def test_normal_turn_repeated_visual_journey_reaches_governance() -> None:
         "kh_visual_1", "kh_visual_2"
     ]
     assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
-    assert runtime.last_reservation.reserve_unique_evidence == 1
+    assert runtime.last_reservation.reserve_model_visible_items == 1
     assert order == ["governance", "citation", "audit"]
     assert orchestrator.test_evaluator.calls == 0
     assert [
@@ -1629,7 +1654,9 @@ def test_public_model_input_does_not_repeat_session_tool_observation() -> None:
     )
 
     model_input = source.build(
-        runtime.snapshot_value,
+        runtime.snapshot_value.model_copy(
+            update={"budget": _budget(model_visible_items=2)}
+        ),
         observations=[observation],
         contract_repair_remaining=1,
     )
@@ -1698,9 +1725,9 @@ def test_identical_search_replays_and_internal_identity_never_enters_observation
     assert len(retrieval.backend_calls) == 1
     assert any(step.status == "replayed" for step in orchestrator._audit.command.steps)
     assert "INTERNAL:" not in json.dumps(model.session.observations)
-    assert runtime.last_unique_identities == ["INTERNAL:A"]
+    assert runtime.last_unique_identities == ["kh_evidence_A", "kh_page_A"]
     assert runtime.last_reservation.reserve_document_candidates == 0
-    assert runtime.last_reservation.reserve_unique_evidence == 0
+    assert runtime.last_reservation.reserve_model_visible_items == 0
 
 
 @pytest.mark.parametrize(
@@ -1827,7 +1854,7 @@ def test_discovery_reserves_exact_budget_then_discloses_handles_for_search() -> 
     assert reservation.reserve_catalog_pages == 1
     assert reservation.reserve_document_candidates == 2
     assert reservation.reserve_search_rounds == 0
-    assert reservation.reserve_unique_evidence == 0
+    assert reservation.reserve_model_visible_items == 0
     assert reservation.reserve_tool_tokens == 64_000
     assert runtime.snapshot_value.budget.catalog_pages == 1
     assert runtime.snapshot_value.budget.document_candidates == 2
@@ -1852,7 +1879,7 @@ def test_chinese_and_english_discovery_tokens_accumulate_from_actual_results() -
         },
         {
             "action": "discover_relevant_documents",
-            "query_text": "retention policy",
+            "query_text": "example policy",
             "limit": 1,
         },
         finalize(),
@@ -1892,7 +1919,7 @@ def test_navigation_remains_legal_after_catalog_and_search_budgets_are_exhausted
             "budget": _budget(
                 catalog_pages=policy.max_catalog_pages,
                 search_rounds=policy.max_search_rounds,
-                unique_evidence=policy.max_unique_evidence,
+                model_visible_items=policy.max_model_visible_items_per_turn,
             )
         }
     )
@@ -1918,6 +1945,53 @@ def test_one_contract_violation_repeats_complete_choices_then_allows_legal_repai
     assert model.session.observations[0]["safe_code"] == "selection_outside_capabilities"
     assert model.session.finalize_only_values == [False, False, False]
     assert runtime.model_action_repairs == [False, True, False]
+
+
+def test_configured_retrieval_repair_limit_allows_exactly_n_then_fails_closed():
+    violation = ModelContractViolationV1(
+        safe_code="selection_outside_capabilities",
+        action_name="search_knowledge",
+    )
+    policy = RoutePolicyV1(max_retrieval_repairs=2)
+    accepted, accepted_runtime, _, _, _ = _orchestrator(
+        [violation, violation, search("A"), finalize()], policy=policy
+    )
+    accepted.run("exec-1")
+
+    assert accepted_runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert accepted_runtime.snapshot_value.budget.retrieval_repairs == 2
+    assert accepted_runtime.model_action_repairs == [False, True, True, False]
+
+    rejected, rejected_runtime, rejected_retrieval, _, _ = _orchestrator(
+        [violation, violation, violation], policy=policy
+    )
+    rejected.run("exec-1")
+
+    assert rejected_runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert rejected_runtime.snapshot_value.budget.retrieval_repairs == 2
+    assert rejected_retrieval.invocations == []
+
+
+def test_turn_deadline_wins_after_retrieval_and_prevents_tool_completion():
+    orchestrator, runtime, retrieval, _, _ = _orchestrator([search("A")])
+    current = [NOW]
+    runtime.snapshot_value = runtime.snapshot_value.model_copy(
+        update={"deadline_at": NOW + timedelta(seconds=10)}
+    )
+    orchestrator._clock = lambda: current[0]
+    original_invoke = retrieval.invoke
+
+    def finish_after_turn_deadline(**kwargs):
+        result = original_invoke(**kwargs)
+        current[0] = NOW + timedelta(seconds=11)
+        return result
+
+    retrieval.invoke = finish_after_turn_deadline
+    orchestrator.run("exec-1")
+
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_FAILED
+    assert "fail:deadline_exceeded" in runtime.calls
+    assert not any(call.startswith("complete:") for call in runtime.calls)
 
 
 def test_context_budget_charges_route_tokens_instead_of_utf8_bytes():
@@ -1958,7 +2032,11 @@ def test_live_sized_semantic_capabilities_fit_the_per_invocation_context_budget(
     snapshot = runtime.snapshot_value.model_copy(
         update={
             "budget": runtime.snapshot_value.budget.model_copy(
-                update={"provider_invocations": 2, "context_tokens": 3000}
+                update={
+                    "provider_invocations": 2,
+                    "context_tokens": 3000,
+                    "model_visible_items": 2,
+                }
             )
         }
     )

@@ -10,6 +10,7 @@ from threading import Barrier
 import pytest
 from sqlalchemy import delete, inspect
 
+from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow
 from atlas_production.infrastructure.persistence.authorization import (
     AtlasAuthorizationRevisionRow,
     AtlasTurnAccessGrantReleaseRow,
@@ -31,6 +32,9 @@ from atlas_production.infrastructure.persistence.conversation import (
     AtlasTurnConversationMemberRow,
     AtlasTurnConversationRow,
 )
+from atlas_production.infrastructure.persistence.payload_policy import (
+    PersistedPayloadPolicyError,
+)
 from atlas_production.infrastructure.persistence.retrieval import (
     AtlasTurnCatalogDocumentRow,
     AtlasTurnEvidenceIdentityRow,
@@ -50,9 +54,16 @@ from atlas_production.infrastructure.postgres_owner.authorization import (
 from atlas_production.infrastructure.postgres_authorization_v1_adapter import (
     PostgresAuthorizationV1Adapter,
 )
+from atlas_production.infrastructure.postgres_conversation_v1_adapter import (
+    PostgresConversationV1Adapter,
+)
 from atlas_production.modules.authorization.public import (
     CreateTurnAccessGrantV1,
     CurrentGrantAuthorizationSnapshotV1,
+)
+from atlas_production.modules.conversation.public import (
+    AppendTurnMemberV1,
+    ConversationMembershipConflict,
 )
 from atlas_production.infrastructure.postgres_owner.context_engineering import (
     ContextMessageInput,
@@ -70,6 +81,7 @@ from atlas_production.infrastructure.postgres_owner.context_engineering import (
 )
 from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
     AppendTurnMemberInput,
+    ArchiveConversationInput,
     ConversationStoreConflict,
     CreateConversationInput,
     PostgresConversationV1Store,
@@ -86,6 +98,7 @@ from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
     RetrievalStoreConflict,
 )
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+from atlas_production.shared.public import AuditEventRecord
 
 
 PREFIX = "atr020-owner-store"
@@ -112,6 +125,7 @@ def test_fresh_baseline_contains_no_superseded_turn_tables(
 @pytest.fixture(autouse=True)
 def clean_owner_rows(postgres_runtime: PostgresRuntime):
     tables = (
+        AtlasAuditEventRow,
         AtlasTurnRetrievalReleaseRow,
         AtlasTurnRetrievalEvidencePackRow,
         AtlasTurnEvidenceIdentityRow,
@@ -196,6 +210,83 @@ def test_conversation_create_replay_and_ordered_membership_cas(
         retry.turn_id: append.turn_id
     }
 
+    archive = ArchiveConversationInput(
+        conversation_id=create.conversation_id,
+        actor_id=create.actor_id,
+        expected_next_ordinal=3,
+        idempotency_key="archive-key",
+    )
+    audit = AuditEventRecord(
+        event_id=f"audit-{PREFIX}-archive",
+        event_type="conversation_archived",
+        actor_id=create.actor_id,
+        target_ref=f"conversation:{create.conversation_id}",
+        project_id=None,
+        message_code="conversation.was_archived",
+        metadata={"status": "archived"},
+        created_at=NOW.isoformat(),
+    )
+    with pytest.raises(ConversationStoreConflict):
+        store.archive(
+            replace(
+                archive,
+                expected_next_ordinal=2,
+                idempotency_key="archive-stale-membership-snapshot",
+            ),
+            audit_event=replace(audit, event_id=f"audit-{PREFIX}-stale-archive"),
+        )
+    assert store.get(create.conversation_id).status == "active"  # type: ignore[union-attr]
+
+    with pytest.raises(PersistedPayloadPolicyError):
+        store.archive(
+            archive,
+            audit_event=replace(
+                audit,
+                metadata={"not_allowlisted": "must rollback archive"},
+            ),
+        )
+    assert store.get(create.conversation_id).status == "active"  # type: ignore[union-attr]
+
+    archived = store.archive(archive, audit_event=audit)
+    assert store.archive(archive, audit_event=audit) == archived
+    assert archived.conversation.status == "archived"
+    assert archived.audit_event_ref == audit.event_id
+    assert store.list_for_actor(create.actor_id) == ()
+    assert store.list_all()[0].status == "archived"
+    assert len(store.candidate_turns(create.conversation_id)) == 2
+    with pytest.raises(ConversationStoreConflict):
+        store.append_turn_member(
+            AppendTurnMemberInput(
+                create.conversation_id,
+                create.actor_id,
+                f"turn-{PREFIX}-after-archive",
+                f"execution-{PREFIX}-after-archive",
+                "user",
+                3,
+                "turn-key-after-archive",
+                reasoning_mode="standard",
+            )
+        )
+    adapter = PostgresConversationV1Adapter(postgres_runtime.session_factory)
+    with pytest.raises(ConversationMembershipConflict):
+        adapter.append_turn_member(
+            actor_id=create.actor_id,
+            command=AppendTurnMemberV1(
+                conversation_id=create.conversation_id,
+                turn_id=f"turn-{PREFIX}-adapter-after-archive",
+                execution_id=f"execution-{PREFIX}-adapter-after-archive",
+                role="user",
+                idempotency_key="turn-key-adapter-after-archive",
+                operation="create_turn",
+                reasoning_mode="standard",
+            ),
+        )
+    with postgres_runtime.session_factory() as session:
+        persisted_audit = session.get(AtlasAuditEventRow, audit.event_id)
+        assert persisted_audit is not None
+        assert persisted_audit.actor_id == create.actor_id
+        assert persisted_audit.target_ref == f"conversation:{create.conversation_id}"
+
 
 def test_authorization_grant_and_release_are_exact_replays(
     postgres_runtime: PostgresRuntime,
@@ -224,7 +315,7 @@ def test_authorization_public_replay_precedes_changed_or_revoked_current_acl(
         authorized = True
         calls = 0
 
-        def current_grant_authorization(self, *, actor_id, conversation_id):
+        def current_grant_authorization(self, *, actor_id, conversation_id, deadline_at=None):
             self.calls += 1
             return CurrentGrantAuthorizationSnapshotV1(
                 actor_id=actor_id,
@@ -302,8 +393,9 @@ def test_context_pack_materializes_summary_sources_and_multi_resource_lineage(
         summary=SummaryInput(
             f"summary-{PREFIX}",
             None,
-            "older summary",
-            2,
+            "older user summary",
+            "older assistant summary",
+            4,
             (
                 SummarySourceInput(
                     f"turn-{PREFIX}-old-root-1", f"turn-{PREFIX}-old-1", "2" * 64
@@ -333,6 +425,11 @@ def test_context_pack_materializes_summary_sources_and_multi_resource_lineage(
     pack = store.materialize(command)
     assert store.materialize(command) == pack
     assert pack.summary is not None
+    assert pack.summary.historical_user_context == "older user summary"
+    assert (
+        pack.summary.assistant_pending_verification_context
+        == "older assistant summary"
+    )
     assert [source.representative_turn_id for source in pack.summary.sources] == [
         f"turn-{PREFIX}-old-1", f"turn-{PREFIX}-old-2"
     ]
@@ -520,12 +617,26 @@ def test_retrieval_exact_pins_replay_scope_evidence_pack_release_and_rollback(
         result_type="knowledge_search_result",
         observation={"result_type": "knowledge_search_result", "evidence": [], "next_cursor": None},
         error_code=None,
-        handles=(ResultHandleInput(
-            f"evidence-handle-{PREFIX}-1", "evidence", f"evidence-ref-{PREFIX}-1",
-            f"identity-{PREFIX}-1", catalog.documents[0].document_handle,
-        ),),
+        handles=(
+            ResultHandleInput(
+                f"evidence-handle-{PREFIX}-1", "evidence", f"evidence-ref-{PREFIX}-1",
+                f"identity-{PREFIX}-1", catalog.documents[0].document_handle,
+            ),
+            ResultHandleInput(
+                f"page-handle-{PREFIX}-1", "page", f"page-ref-{PREFIX}-1",
+                document_handle=catalog.documents[0].document_handle,
+            ),
+            ResultHandleInput(
+                f"visual-handle-{PREFIX}-1", "visual", f"visual-ref-{PREFIX}-1",
+                document_handle=catalog.documents[0].document_handle,
+            ),
+        ),
     )
     first = store.persist_invocation_result(invocation)
+    assert store.count_page_and_visual_handles(
+        execution_id=catalog.execution_id,
+        catalog_ref=catalog.catalog_ref,
+    ) == 2
     replay = store.persist_invocation_result(
         replace(
             invocation,

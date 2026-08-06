@@ -1,4 +1,4 @@
-"""Context-engineering-owner immutable Context/Summary V3 schema."""
+"""Context-engineering-owner immutable Context Pack V3 / Summary V4 schema."""
 
 from __future__ import annotations
 
@@ -159,13 +159,21 @@ class AtlasTurnContextSummaryRow(OrmBase):
         ForeignKey("atlas_turn_context_summaries.summary_ref", ondelete="RESTRICT"),
         nullable=True,
     )
-    text: Mapped[str] = mapped_column(Text, nullable=False)
+    historical_user_context: Mapped[str] = mapped_column(Text, nullable=False)
+    assistant_pending_verification_context: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     digest: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        CheckConstraint("schema_version = 'context-summary-v3'", name="ck_atlas_turn_context_summary_schema"),
+        CheckConstraint("schema_version = 'context-summary-v4'", name="ck_atlas_turn_context_summary_schema"),
+        CheckConstraint(
+            "char_length(historical_user_context) + "
+            "char_length(assistant_pending_verification_context) BETWEEN 1 AND 50000",
+            name="ck_atlas_turn_context_summary_content",
+        ),
         CheckConstraint("token_count BETWEEN 1 AND 6000", name="ck_atlas_turn_context_summary_tokens"),
         CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_context_summary_digest"),
     )

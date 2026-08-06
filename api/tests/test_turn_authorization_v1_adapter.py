@@ -57,7 +57,7 @@ class FakeAuthorizationStore:
         finally:
             self.in_call = False
 
-    def get_grant(self, grant_ref: str):
+    def get_grant(self, grant_ref: str, *, deadline_at=None):
         self.in_call = True
         try:
             if self.grant is None or self.grant.grant_ref != grant_ref:
@@ -97,7 +97,7 @@ class FakeCurrentAuthorizationReader:
         self.resource_calls: list[tuple[str, ...]] = []
         self.grant_calls = 0
 
-    def current_grant_authorization(self, *, actor_id: str, conversation_id: str):
+    def current_grant_authorization(self, *, actor_id: str, conversation_id: str, deadline_at=None):
         assert not self.store.in_call
         self.grant_calls += 1
         return CurrentGrantAuthorizationSnapshotV1(
@@ -108,7 +108,7 @@ class FakeCurrentAuthorizationReader:
             authorized=self.authorized,
         )
 
-    def current_resource_authorizations(self, *, actor_id: str, resource_refs: tuple[str, ...]):
+    def current_resource_authorizations(self, *, actor_id: str, resource_refs: tuple[str, ...], deadline_at=None):
         assert not self.store.in_call
         self.resource_calls.append(resource_refs)
         return self.resources

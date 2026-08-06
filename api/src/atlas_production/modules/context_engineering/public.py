@@ -131,22 +131,42 @@ class ContextSummarySourceV3(_StrictModel):
         return self
 
 
-class ContextSummaryV3(_StrictModel):
+class ContextSummaryV4(_StrictModel):
     summary_ref: OpaqueRef
-    schema_version: Literal["context-summary-v3"] = "context-summary-v3"
+    schema_version: Literal["context-summary-v4"] = "context-summary-v4"
     parent_summary_ref: OpaqueRef | None = None
-    text: str = Field(min_length=1, max_length=50000)
+    historical_user_context: str = Field(max_length=50000)
+    assistant_pending_verification_context: str = Field(max_length=50000)
     token_count: int = Field(ge=1, le=6000)
     sources: list[ContextSummarySourceV3]
     digest: Digest
 
+    @model_validator(mode="after")
+    def require_bounded_combined_text(self) -> "ContextSummaryV4":
+        combined = self.historical_user_context + self.assistant_pending_verification_context
+        if not combined:
+            raise ValueError("summary content must not be empty")
+        if len(combined) > 50000:
+            raise ValueError("combined summary content exceeds 50000 characters")
+        return self
 
-class ContextSummaryInputV3(_StrictModel):
+
+class ContextSummaryInputV4(_StrictModel):
     summary_ref: OpaqueRef
     parent_summary_ref: OpaqueRef | None = None
-    text: str = Field(min_length=1, max_length=50000)
+    historical_user_context: str = Field(max_length=50000)
+    assistant_pending_verification_context: str = Field(max_length=50000)
     token_count: int = Field(ge=1, le=6000)
     sources: list[ContextSummarySourceV3]
+
+    @model_validator(mode="after")
+    def require_bounded_combined_text(self) -> "ContextSummaryInputV4":
+        combined = self.historical_user_context + self.assistant_pending_verification_context
+        if not combined:
+            raise ValueError("summary content must not be empty")
+        if len(combined) > 50000:
+            raise ValueError("combined summary content exceeds 50000 characters")
+        return self
 
 
 class ContextLineageEdgeV3(_StrictModel):
@@ -180,7 +200,7 @@ class ContextPackV3(_StrictModel):
     input_projection_ref: OpaqueRef
     model_user_input: str = Field(min_length=1, max_length=50000)
     recent_tail: list[ContextExchangeV3]
-    summary: ContextSummaryV3 | None = None
+    summary: ContextSummaryV4 | None = None
     dependencies: list[ContextLineageEdgeV3] = Field(max_length=2000)
     token_budget: int = Field(ge=1)
     digest: Digest
@@ -195,7 +215,7 @@ class MaterializeContextPackV3(_StrictModel):
     dependent_turn_id: Identity
     model_user_input: ModelUserInputV3
     recent_tail: list[ContextExchangeV3]
-    summary: ContextSummaryInputV3 | None = None
+    summary: ContextSummaryInputV4 | None = None
     source_lineage: list[ContextLineageEdgeV3] = Field(max_length=2000)
     token_budget: int = Field(ge=1)
     idempotency_key: Identity
@@ -310,9 +330,9 @@ __all__ = [
     "ContextMessageV3",
     "ContextPackReleaseV3",
     "ContextPackV3",
-    "ContextSummaryInputV3",
+    "ContextSummaryInputV4",
     "ContextSummarySourceV3",
-    "ContextSummaryV3",
+    "ContextSummaryV4",
     "ModelUserInputV3",
     "ModelUserTextSegmentV3",
     "MaterializeContextPackV3",

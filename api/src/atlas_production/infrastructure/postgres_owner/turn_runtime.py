@@ -23,7 +23,7 @@ from atlas_production.infrastructure.persistence.turn_runtime import (
     AtlasTurnTerminalIntentRow,
     AtlasTurnTerminalOutcomeRow,
     AtlasTurnToolLedgerRow,
-    AtlasTurnUniqueEvidenceLedgerRow,
+    AtlasTurnModelVisibleItemLedgerRow,
 )
 from atlas_production.modules.turn_runtime.public import (
     AcceptExecutionV1,
@@ -113,10 +113,11 @@ def _budget_model(row: AtlasTurnBudgetCounterRow) -> BudgetSnapshotV1:
         catalog_pages=row.catalog_pages,
         document_candidates=row.document_candidates,
         search_rounds=row.search_rounds,
-        unique_evidence=row.unique_evidence,
+        model_visible_items=row.model_visible_items,
         provider_invocations=row.provider_invocations,
         context_tokens=row.context_tokens,
         tool_tokens=row.tool_tokens,
+        retrieval_repairs=row.retrieval_repairs,
         schema_retries=row.schema_retries,
     )
 
@@ -126,12 +127,17 @@ def _policy_model(row: AtlasTurnExecutionRow) -> RoutePolicyV1:
         max_tool_invocations=row.max_tool_invocations,
         max_catalog_pages=row.max_catalog_pages,
         max_search_rounds=row.max_search_rounds,
-        max_unique_evidence=row.max_unique_evidence,
+        max_model_visible_items_per_turn=row.max_model_visible_items_per_turn,
+        max_retrieval_repairs=row.max_retrieval_repairs,
+        max_selected_anchor_pages_per_round=(
+            row.max_selected_anchor_pages_per_round
+        ),
         max_provider_invocations=row.max_provider_invocations,
         max_reasoning_revision_cycles=row.max_reasoning_revision_cycles,
         max_schema_retries_per_turn=row.max_schema_retries_per_turn,
         context_token_budget=row.context_token_budget,
         tool_token_budget=row.tool_token_budget,
+        tool_execution_timeout_seconds=row.tool_execution_timeout_seconds,
         deadline_seconds=row.deadline_seconds,
     )
 def _route_model(row: AtlasTurnExecutionRow) -> TurnRouteSnapshotV2:
@@ -525,10 +531,11 @@ class PostgresTurnRuntimeOwner:
                         catalog_pages=0,
                         document_candidates=0,
                         search_rounds=0,
-                        unique_evidence=0,
+                        model_visible_items=0,
                         provider_invocations=0,
                         context_tokens=0,
                         tool_tokens=0,
+                        retrieval_repairs=0,
                         schema_retries=0,
                     ),
                     AtlasTurnRuntimeIdempotencyRow(
@@ -736,17 +743,28 @@ class PostgresTurnRuntimeOwner:
                     AtlasTurnBudgetCounterRow.provider_invocations + 1
                     <= changed.max_provider_invocations,
                     command.context_tokens <= changed.context_token_budget,
+                    (
+                        AtlasTurnBudgetCounterRow.retrieval_repairs
+                        < changed.max_retrieval_repairs
+                        if command.contract_repair
+                        else True
+                    ),
                 )
                 .values(
                     provider_invocations=AtlasTurnBudgetCounterRow.provider_invocations + 1,
                     context_tokens=AtlasTurnBudgetCounterRow.context_tokens
                     + command.context_tokens,
+                    retrieval_repairs=(
+                        AtlasTurnBudgetCounterRow.retrieval_repairs + 1
+                        if command.contract_repair
+                        else AtlasTurnBudgetCounterRow.retrieval_repairs
+                    ),
                 )
                 .returning(AtlasTurnBudgetCounterRow)
             )
             if budget is None:
                 raise TurnRuntimeBudgetExceeded(
-                    "provider invocation or per-invocation context token budget exceeded"
+                    "provider invocation, retrieval repair, or per-invocation context token budget exceeded"
                 )
             self._append_event(
                 session,
@@ -855,9 +873,9 @@ class PostgresTurnRuntimeOwner:
                     <= changed.max_catalog_pages,
                     AtlasTurnBudgetCounterRow.search_rounds + command.reserve_search_rounds
                     <= changed.max_search_rounds,
-                    AtlasTurnBudgetCounterRow.unique_evidence
-                    + command.reserve_unique_evidence
-                    <= changed.max_unique_evidence,
+                    AtlasTurnBudgetCounterRow.model_visible_items
+                    + command.reserve_model_visible_items
+                    <= changed.max_model_visible_items_per_turn,
                     AtlasTurnBudgetCounterRow.tool_tokens
                     < changed.tool_token_budget,
                     command.reserve_tool_tokens <= changed.tool_token_budget,
@@ -882,7 +900,7 @@ class PostgresTurnRuntimeOwner:
                         reserve_catalog_pages=command.reserve_catalog_pages,
                         reserve_document_candidates=command.reserve_document_candidates,
                         reserve_search_rounds=command.reserve_search_rounds,
-                        reserve_unique_evidence=command.reserve_unique_evidence,
+                        reserve_model_visible_items=command.reserve_model_visible_items,
                         reserve_tool_tokens=command.reserve_tool_tokens,
                         result_ref=None,
                         result_digest=None,
@@ -916,7 +934,7 @@ class PostgresTurnRuntimeOwner:
 
     def complete_tool(self, command: CompleteToolInvocationV1) -> ExecutionSnapshotV1:
         candidate_ids = tuple(dict.fromkeys(command.document_candidate_handles))
-        evidence_ids = tuple(dict.fromkeys(command.unique_evidence_identities))
+        item_ids = tuple(dict.fromkeys(command.model_visible_item_identities))
         with self._session_factory() as session, session.begin():
             changed = self._cas_execution(
                 session,
@@ -954,12 +972,12 @@ class PostgresTurnRuntimeOwner:
                     )
                 )
             )
-            existing_evidence = set(
+            existing_items = set(
                 session.scalars(
-                    select(AtlasTurnUniqueEvidenceLedgerRow.evidence_identity).where(
-                        AtlasTurnUniqueEvidenceLedgerRow.execution_id == command.execution_id,
-                        AtlasTurnUniqueEvidenceLedgerRow.evidence_identity.in_(
-                            evidence_ids or ("",)
+                    select(AtlasTurnModelVisibleItemLedgerRow.item_identity).where(
+                        AtlasTurnModelVisibleItemLedgerRow.execution_id == command.execution_id,
+                        AtlasTurnModelVisibleItemLedgerRow.item_identity.in_(
+                            item_ids or ("",)
                         ),
                     )
                 )
@@ -967,10 +985,10 @@ class PostgresTurnRuntimeOwner:
             new_candidates = tuple(
                 value for value in candidate_ids if value not in existing_candidates
             )
-            new_evidence = tuple(value for value in evidence_ids if value not in existing_evidence)
+            new_items = tuple(value for value in item_ids if value not in existing_items)
             if (
                 len(new_candidates) > tool.reserve_document_candidates
-                or len(new_evidence) > tool.reserve_unique_evidence
+                or len(new_items) > tool.reserve_model_visible_items
             ):
                 raise TurnRuntimeBudgetExceeded(
                     "tool identities exceed their pre-side-effect reservation"
@@ -979,8 +997,8 @@ class PostgresTurnRuntimeOwner:
                 update(AtlasTurnBudgetCounterRow)
                 .where(
                     AtlasTurnBudgetCounterRow.execution_id == command.execution_id,
-                    AtlasTurnBudgetCounterRow.unique_evidence + len(new_evidence)
-                    <= changed.max_unique_evidence,
+                    AtlasTurnBudgetCounterRow.model_visible_items + len(new_items)
+                    <= changed.max_model_visible_items_per_turn,
                     AtlasTurnBudgetCounterRow.catalog_pages + command.catalog_pages
                     <= changed.max_catalog_pages,
                     AtlasTurnBudgetCounterRow.search_rounds + command.search_rounds
@@ -989,7 +1007,7 @@ class PostgresTurnRuntimeOwner:
                 .values(
                     document_candidates=AtlasTurnBudgetCounterRow.document_candidates
                     + len(new_candidates),
-                    unique_evidence=AtlasTurnBudgetCounterRow.unique_evidence + len(new_evidence),
+                    model_visible_items=AtlasTurnBudgetCounterRow.model_visible_items + len(new_items),
                     catalog_pages=AtlasTurnBudgetCounterRow.catalog_pages + command.catalog_pages,
                     search_rounds=AtlasTurnBudgetCounterRow.search_rounds + command.search_rounds,
                     tool_tokens=AtlasTurnBudgetCounterRow.tool_tokens + command.tool_tokens,
@@ -1008,11 +1026,11 @@ class PostgresTurnRuntimeOwner:
                         first_invocation_ordinal=command.invocation_ordinal,
                     )
                 )
-            for identity in new_evidence:
+            for identity in new_items:
                 session.add(
-                    AtlasTurnUniqueEvidenceLedgerRow(
+                    AtlasTurnModelVisibleItemLedgerRow(
                         execution_id=command.execution_id,
-                        evidence_identity=identity,
+                        item_identity=identity,
                         first_invocation_ordinal=command.invocation_ordinal,
                     )
                 )

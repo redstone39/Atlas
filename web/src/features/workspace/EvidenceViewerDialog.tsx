@@ -7,7 +7,6 @@ import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "../../components/ui/dialog";
@@ -52,48 +51,47 @@ export function EvidenceViewerDialog({
       }}
     >
       <DialogContent
-        className="max-h-[85vh] overflow-y-auto"
+        className="max-h-[85vh] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
         size="wide"
       >
         <DialogHeader>
           <DialogTitle>{t("citationViewer.title")}</DialogTitle>
-          <DialogDescription>{t("citationViewer.description")}</DialogDescription>
         </DialogHeader>
-        {watermark && !loading && evidence && (
-          <p className="text-xs text-muted-foreground">
-            {t("citationViewer.watermarkDisclosure")}
-          </p>
-        )}
-        {loading ? (
-          <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <Spinner />
-            {t("citationViewer.loading")}
-          </div>
-        ) : evidence?.kind === "excerpt" ? (
-          <WatermarkedEvidence watermark={watermark}>
-            <div className="flex flex-col gap-4">
-              <div className="text-sm font-medium">{evidence.evidence.locator_label}</div>
-              {evidence.evidence.snippet && (
-                <div className="rounded-md bg-muted p-3 text-sm">
-                  {evidence.evidence.snippet}
-                </div>
-              )}
-              <div className="whitespace-pre-wrap text-sm leading-6">
-                {evidence.evidence.content}
-              </div>
+        <div
+          className="min-h-0 overflow-y-auto overscroll-contain pr-1"
+          data-slot="evidence-viewer-content"
+        >
+          {loading ? (
+            <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+              <Spinner />
+              {t("citationViewer.loading")}
             </div>
-          </WatermarkedEvidence>
-        ) : pagePreview?.mediaType === "application/pdf" ? (
-          <PdfEvidencePage blob={pagePreview.blob} watermark={watermark} />
-        ) : pagePreview?.mediaType === "image/png" && pageUrl ? (
-          <WatermarkedEvidence watermark={watermark}>
-            <img
-              className="h-auto max-h-[70vh] w-full rounded-md border object-contain"
-              src={pageUrl}
-              alt={t("citationViewer.imagePage")}
-            />
-          </WatermarkedEvidence>
-        ) : null}
+          ) : evidence?.kind === "excerpt" ? (
+            <WatermarkedEvidence watermark={watermark}>
+              <div className="flex flex-col gap-4">
+                <div className="text-sm font-medium">{evidence.evidence.locator_label}</div>
+                {evidence.evidence.snippet && (
+                  <div className="rounded-md bg-muted p-3 text-sm">
+                    {evidence.evidence.snippet}
+                  </div>
+                )}
+                <div className="whitespace-pre-wrap text-sm leading-6">
+                  {evidence.evidence.content}
+                </div>
+              </div>
+            </WatermarkedEvidence>
+          ) : pagePreview?.mediaType === "application/pdf" ? (
+            <PdfEvidencePage blob={pagePreview.blob} watermark={watermark} />
+          ) : pagePreview?.mediaType === "image/png" && pageUrl ? (
+            <WatermarkedEvidence watermark={watermark}>
+              <img
+                className="h-auto max-h-[70vh] w-full rounded-md border object-contain"
+                src={pageUrl}
+                alt={t("citationViewer.imagePage")}
+              />
+            </WatermarkedEvidence>
+          ) : null}
+        </div>
       </DialogContent>
     </Dialog>
   );
@@ -168,7 +166,7 @@ function PdfEvidencePage({
 
   return (
     <WatermarkedEvidence
-      className="min-h-[65vh] overflow-auto rounded-md border bg-muted"
+      className="min-h-[65vh] rounded-md border bg-muted"
       watermark={status === "ready" ? watermark : null}
     >
       {status === "loading" && (

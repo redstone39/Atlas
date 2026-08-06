@@ -74,6 +74,20 @@ already accepted turn may cross the threshold, and the following new turn is
 then rejected. Provider-completed attempts retain their observed usage even
 when Atlas rejects the structured output and performs a bounded repair.
 
+Runtime policy schema v8 also provides:
+
+- `max_model_visible_items_per_turn`: one deduplicated limit shared by
+  evidence, page, visual, and navigation handles;
+- `max_retrieval_repairs`: the bounded retrieval contract-repair count;
+- `max_selected_anchor_pages_per_round`: the maximum expand anchors accepted
+  in one retrieval round;
+- `tool_execution_timeout_seconds`: the per-tool timeout, which must not
+  exceed the overall turn timeout.
+
+Route changes affect only newly accepted executions. Admin diagnostics use the
+policy snapshot stored with the execution and do not reinterpret historical
+usage with the current route.
+
 ## Runtime inputs
 
 - PostgreSQL: `ATLAS_PRODUCTION_DATABASE_URL`

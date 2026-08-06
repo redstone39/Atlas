@@ -19,6 +19,7 @@ import {
   adminWithProjectSession,
   answeredTurn,
   conversationDetail,
+  conversationSummaries,
   cleanupAppTest,
   incompleteReadiness,
   memberSession,
@@ -521,9 +522,9 @@ describe("Atlas production web", () => {
     expect(screen.queryByText("New chats appear here after you send a message."))
       .not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry conversation history" }));
-    const answeredHistory = await screen.findByRole("button", { name: /PCIe lane target/ });
+    const answeredHistory = await screen.findByRole("button", { name: /Example conversation/ });
     expect(answeredHistory).toBeInTheDocument();
-    expect(within(answeredHistory).getByText("answered")).toBeInTheDocument();
+    expect(answeredHistory.querySelector('[data-slot="badge"]')).not.toBeInTheDocument();
     expect(historyAttempts).toBe(2);
   });
 
@@ -646,12 +647,12 @@ describe("Atlas production web", () => {
       .toBe(ask);
 
     fireEvent.change(screen.getByLabelText("Message"), {
-      target: { value: "What is the controlled impedance target for the PCIe reference lane?" },
+      target: { value: "What is the approved value for the selected item?" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
     expect(
       await screen.findByText(
-        "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+        "A synthetic document-backed statement.",
       ),
     ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Message"), {
@@ -699,7 +700,7 @@ describe("Atlas production web", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
   });
 
@@ -711,13 +712,13 @@ describe("Atlas production web", () => {
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("In-depth", { selector: "button" }));
     fireEvent.change(screen.getByLabelText("Message"), {
-      target: { value: "What is the controlled impedance target for the PCIe reference lane?" },
+      target: { value: "What is the approved value for the selected item?" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
 
     expect(
       await screen.findByText(
-        "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+        "A synthetic document-backed statement.",
       ),
     ).toBeInTheDocument();
     const createConversationCall = vi.mocked(global.fetch).mock.calls.find(
@@ -727,7 +728,7 @@ describe("Atlas production web", () => {
     expect(createConversationCall).toBeDefined();
     const body = JSON.parse(String(createConversationCall![1]!.body));
     expect(Object.keys(body)).toEqual(["title", "response_language"]);
-    expect(body.title).toBe("What is the controlled impedance target for the PCIe reference l");
+    expect(body.title).toBe("What is the approved value for the selected item?");
     expect(body.response_language).toBe("en");
     const createTurnCall = vi.mocked(global.fetch).mock.calls.find(
       ([input, init]) =>
@@ -751,10 +752,14 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /PCIe lane target/ }))
-      .toHaveAttribute("data-variant", "secondary");
+    const activeConversationButton = screen.getByRole("button", {
+      name: /Example conversation/,
+    });
+    expect(activeConversationButton).toHaveAttribute("aria-current", "page");
+    expect(activeConversationButton.closest('[data-slot="workspace-conversation-item"]'))
+      .toHaveClass("bg-secondary");
     expect(window.location.pathname).toBe(
       "/workspace/conversations/conv-supported-001",
     );
@@ -791,7 +796,7 @@ describe("Atlas production web", () => {
       expect(replaceState).toHaveBeenCalledWith({}, "", "/workspace");
       expect(await screen.findByLabelText("Message")).toHaveValue("");
       expect(screen.queryByText(
-        "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+        "A synthetic document-backed statement.",
       )).not.toBeInTheDocument();
     },
   );
@@ -806,13 +811,20 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    const newConversationButton = screen.getByRole("button", {
+      name: "New conversation",
+    });
+    expect(newConversationButton).toHaveAttribute("data-variant", "ghost");
+    expect(newConversationButton).not.toHaveAttribute("aria-current");
+    fireEvent.click(newConversationButton);
     await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
+    expect(newConversationButton).toHaveAttribute("data-variant", "secondary");
+    expect(newConversationButton).toHaveAttribute("aria-current", "page");
     expect(screen.getByLabelText("Message")).toHaveValue("");
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
 
     act(() => window.history.back());
@@ -822,14 +834,18 @@ describe("Atlas production web", () => {
       ),
     );
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
+    expect(newConversationButton).toHaveAttribute("data-variant", "ghost");
+    expect(newConversationButton).not.toHaveAttribute("aria-current");
 
     act(() => window.history.forward());
     await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
+    expect(newConversationButton).toHaveAttribute("data-variant", "secondary");
+    expect(newConversationButton).toHaveAttribute("aria-current", "page");
     expect(screen.getByLabelText("Message")).toHaveValue("");
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
   });
 
@@ -863,7 +879,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Message"), {
       target: { value: "Do not show this answer in the next route" },
@@ -1055,7 +1071,7 @@ describe("Atlas production web", () => {
     expect(screen.queryByText("In progress")).not.toBeInTheDocument();
     expect(detailReads).toBe(1);
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
 
     act(() => emitStreamingSegment?.());
@@ -1068,11 +1084,11 @@ describe("Atlas production web", () => {
     act(() => completeRuntimeStream?.());
 
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     expect(detailReads).toBe(2);
     expect(screen.getAllByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toHaveLength(1);
     expect(screen.getByLabelText("Message")).toBeEnabled();
   });
@@ -1182,7 +1198,7 @@ describe("Atlas production web", () => {
     expect(screen.getByText("Processing")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     expect(detailReads).toBe(2);
   });
@@ -1195,21 +1211,21 @@ describe("Atlas production web", () => {
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "New conversation" })).toBeInTheDocument();
     expect(screen.queryByText("Conversations")).not.toBeInTheDocument();
-    expect((await screen.findAllByText("PCIe lane target")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Example conversation")).length).toBeGreaterThan(0);
     expect(screen.getByText("Chat with Atlas")).toBeInTheDocument();
     expect(
-      screen.queryByText("What is the controlled impedance target for the PCIe reference lane?"),
+      screen.queryByText("What is the approved value for the selected item?"),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Example conversation/i }));
     expect(
-      await screen.findByText("What is the controlled impedance target for the PCIe reference lane?"),
+      await screen.findByText("What is the approved value for the selected item?"),
     ).toBeInTheDocument();
     expect(container.querySelector('time[datetime="2026-07-09T00:00:01+00:00"]')).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("Message"), {
-      target: { value: "What is the controlled impedance target for the PCIe reference lane?" },
+      target: { value: "What is the approved value for the selected item?" },
     });
     fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
 
@@ -1217,7 +1233,7 @@ describe("Atlas production web", () => {
     expect(await screen.findAllByText("Atlas")).not.toHaveLength(0);
     expect(
       await screen.findAllByText(
-        "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+        "A synthetic document-backed statement.",
       ),
     ).not.toHaveLength(0);
     expect(
@@ -1276,7 +1292,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/i }));
 
     expect(await screen.findByText("Check sources")).toBeInTheDocument();
     expect(screen.queryByText("Evidence supported")).not.toBeInTheDocument();
@@ -1324,7 +1340,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/i }));
 
     expect(
       await screen.findByRole("heading", { name: "Deployment result", level: 2 }),
@@ -1393,7 +1409,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/i }));
 
     expect(
       await screen.findByRole("region", {
@@ -1421,11 +1437,9 @@ describe("Atlas production web", () => {
         "Engineer One · user-engineer-001 · 2026-07-29T10:20:30.000Z",
       ),
     ).toHaveLength(12);
-    expect(
-      screen.getByText(
-        "The visual watermark is for identification only. It does not prevent downloads or guarantee traceability.",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(
+      /visual watermark is for identification only/,
+    )).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     await waitFor(() =>
@@ -1483,7 +1497,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/i }));
     const evidenceStatus = (await screen.findByText("Check sources"))
       .closest('[data-slot="badge"]');
     expect(evidenceStatus).toHaveAttribute("data-status-semantic", "attention");
@@ -1557,7 +1571,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/i }));
     expect(await screen.findByText(
       "Check sources",
     )).toBeInTheDocument();
@@ -1661,7 +1675,7 @@ describe("Atlas production web", () => {
 
     expect(
       await screen.findByText(
-        "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+        "A synthetic document-backed statement.",
       ),
     ).toBeInTheDocument();
     const turnCalls = fetchMock.mock.calls.filter(
@@ -2505,7 +2519,7 @@ describe("Atlas production web", () => {
       "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
-      "Maximum unique evidence items": 40,
+      "Maximum model-visible items per Turn": 40,
       "Maximum retrieval repairs": 3,
       "Maximum schema retries per turn": 3,
       "Provider invocation timeout": 30,
@@ -2603,7 +2617,7 @@ describe("Atlas production web", () => {
       "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
-      "Maximum unique evidence items": 40,
+      "Maximum model-visible items per Turn": 40,
       "Maximum retrieval repairs": 3,
       "Maximum schema retries per turn": 3,
       "Provider invocation timeout": 45,
@@ -2681,7 +2695,7 @@ describe("Atlas production web", () => {
     ).toHaveValue(2);
     expect(within(dialog).getByLabelText("Maximum catalog pages")).toHaveValue(5);
     expect(within(dialog).getByLabelText("Maximum search rounds")).toHaveValue(6);
-    expect(within(dialog).getByLabelText("Maximum unique evidence items")).toHaveValue(40);
+    expect(within(dialog).getByLabelText("Maximum model-visible items per Turn")).toHaveValue(40);
     expect(within(dialog).getByLabelText("Maximum retrieval repairs")).toHaveValue(3);
     expect(within(dialog).getByLabelText("Maximum schema retries per turn")).toHaveValue(3);
     expect(within(dialog).getByLabelText("Provider invocation timeout")).toHaveValue(60);
@@ -3555,7 +3569,7 @@ describe("Atlas production web", () => {
     const eventTime = container.querySelector('time[datetime="2026-07-08T00:00:00+00:00"]');
     expect(eventTime).toBeInTheDocument();
     expect(eventTime).not.toHaveTextContent(/^\s*$/);
-    expect(screen.queryByText("PCIe lane target")).not.toBeInTheDocument();
+    expect(screen.queryByText("Example conversation")).not.toBeInTheDocument();
     expect(await screen.findByText("abc123def456")).toBeInTheDocument();
     expect(screen.queryByText("atlas_agent_visible_once")).not.toBeInTheDocument();
   });
@@ -3566,7 +3580,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(
-      await screen.findByRole("button", { name: /PCIe lane target/ }),
+      await screen.findByRole("button", { name: /Example conversation/ }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open operation history" })).toBeInTheDocument();
     expect(
@@ -3610,10 +3624,10 @@ describe("Atlas production web", () => {
     render(<App />);
 
     await screen.findByText(
-      "What is the controlled impedance target for the PCIe reference lane?",
+      "What is the approved value for the selected item?",
     );
     fireEvent.click(screen.getByRole("link", { name: "Conversation history" }));
-    expect(await screen.findByRole("button", { name: /PCIe lane target/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/admin/audit/conversations");
   });
 
@@ -3623,11 +3637,11 @@ describe("Atlas production web", () => {
     render(<App />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: /PCIe lane target/ }),
+      await screen.findByRole("button", { name: /Example conversation/ }),
     );
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
 
@@ -3635,7 +3649,7 @@ describe("Atlas production web", () => {
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/audit/conversations"),
     );
-    expect(await screen.findByRole("button", { name: /PCIe lane target/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
 
     act(() => window.history.forward());
     await waitFor(() =>
@@ -3645,7 +3659,7 @@ describe("Atlas production web", () => {
     );
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
   });
@@ -3672,7 +3686,7 @@ describe("Atlas production web", () => {
 
     expect(await screen.findByText("This item is unavailable")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Back to directory" }));
-    expect(await screen.findByRole("button", { name: /PCIe lane target/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/admin/audit/conversations");
   });
 
@@ -3684,7 +3698,7 @@ describe("Atlas production web", () => {
 
     expect(
       await screen.findByRole("button", {
-        name: "Open conversation PCIe lane target",
+        name: "Open conversation Example conversation",
       }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
@@ -3709,7 +3723,7 @@ describe("Atlas production web", () => {
       </StrictMode>,
     );
 
-    expect(await screen.findByRole("button", { name: /PCIe lane target/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
     await waitFor(() => {
       const calls = vi.mocked(global.fetch).mock.calls.map(([input]) => {
         return new URL(String(input), "http://localhost").pathname;
@@ -3735,7 +3749,7 @@ describe("Atlas production web", () => {
     );
 
     await screen.findByText(
-      "What is the controlled impedance target for the PCIe reference lane?",
+      "What is the approved value for the selected item?",
     );
     const detailCalls = vi.mocked(global.fetch).mock.calls.filter(([input]) => {
       return new URL(String(input), "http://localhost").pathname ===
@@ -3786,7 +3800,7 @@ describe("Atlas production web", () => {
 
     await waitFor(() => expect(resolveDetail).toBeDefined());
     fireEvent.click(screen.getByRole("link", { name: "Conversation history" }));
-    expect(await screen.findByRole("button", { name: /PCIe lane target/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
 
     await act(async () => {
       resolveDetail?.(
@@ -3814,20 +3828,20 @@ describe("Atlas production web", () => {
     mockApi(adminSession, readyReadiness);
     const { container } = render(<App />);
 
-    expect((await screen.findAllByText("PCIe lane target")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Example conversation")).length).toBeGreaterThan(0);
     expect(container.querySelector('[data-slot="audit-conversation-layout"]')).toBeInTheDocument();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     const transcript = container.querySelector('[data-slot="audit-transcript"]');
     expect(transcript).toHaveClass("grid", "gap-4");
     expect(transcript?.querySelector('[data-slot="message-scroller"]')).not.toBeInTheDocument();
     const userMessage = screen.getByText(
-      "What is the controlled impedance target for the PCIe reference lane?",
+      "What is the approved value for the selected item?",
     );
     expect(userMessage.closest('[data-slot="message"]')).toHaveAttribute("data-align", "end");
     expect(
       screen
         .getByText(
-          "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+          "A synthetic document-backed statement.",
         )
         .closest('[data-slot="message"]'),
     ).toHaveAttribute("data-align", "start");
@@ -3838,6 +3852,13 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(await screen.findByText("Runtime budget")).toBeInTheDocument();
+    const itemDiagnostic = container.querySelector(
+      '[data-slot="model-visible-item-diagnostic"]',
+    );
+    expect(itemDiagnostic).toHaveTextContent("Model-visible item total");
+    expect(itemDiagnostic).toHaveTextContent("24");
+    expect(itemDiagnostic).toHaveTextContent("37");
+    expect(itemDiagnostic).toHaveTextContent("Within limit");
     expect(screen.getByText("Atlas structured reasoning record")).toBeInTheDocument();
     expect(screen.getByText(/not accuracy, confidence, or factual guarantees/i))
       .toBeInTheDocument();
@@ -3853,8 +3874,8 @@ describe("Atlas production web", () => {
     expect(screen.getByText("Answer guidance digest")).toBeInTheDocument();
     expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
     expect(screen.getByText("Document content discovery path")).toBeInTheDocument();
-    expect(screen.getByText("retention policy")).toBeInTheDocument();
-    const discoveryDocument = screen.getByText("Retention Policy.pdf");
+    expect(screen.getByText("example policy")).toBeInTheDocument();
+    const discoveryDocument = screen.getByText("Example Document.pdf");
     const discoveryTable = discoveryDocument.closest('[data-slot="table"]');
     expect(discoveryTable).toHaveClass("min-w-[56rem]", "table-fixed");
     expect(screen.queryByText("Retention is seven years.")).not.toBeInTheDocument();
@@ -3867,7 +3888,7 @@ describe("Atlas production web", () => {
     });
     expect(within(discoveryPreviewDialog).getByText("Retention is seven years."))
       .toBeInTheDocument();
-    expect(within(discoveryPreviewDialog).getByText("Retention Policy.pdf · p. 4"))
+    expect(within(discoveryPreviewDialog).getByText("Example Document.pdf · p. 4"))
       .toBeInTheDocument();
     expect(screen.getByText("kh_document_revoked")).toBeInTheDocument();
     expect(screen.getByText("access_required")).toBeInTheDocument();
@@ -3885,6 +3906,45 @@ describe("Atlas production web", () => {
         String(input).includes("/export"),
       ),
     ).toBe(false);
+  });
+
+  it("/admin/audit highlights model-visible item overflow using the execution-fixed limit", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname.endsWith("/turns/turn-answer-001/runtime") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse({
+          ...runtimeTraceDetail,
+          model_visible_item_count: 44,
+          model_visible_item_limit: 37,
+          model_visible_item_exceeded: true,
+        });
+      }
+      return normalFetch(input, init);
+    });
+    const { container } = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "View runtime trace" }));
+
+    const itemDiagnostic = await waitFor(() => {
+      const diagnostic = container.querySelector(
+        '[data-slot="model-visible-item-diagnostic"]',
+      );
+      expect(diagnostic).toBeInTheDocument();
+      return diagnostic;
+    });
+    expect(itemDiagnostic).toHaveTextContent("44");
+    expect(itemDiagnostic).toHaveTextContent("37");
+    expect(itemDiagnostic).toHaveTextContent("Exceeded");
   });
 
   it("/admin/audit renders assistant answers as one Markdown document", async () => {
@@ -4245,7 +4305,7 @@ describe("Atlas production web", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to conversation" }));
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
 
@@ -4295,7 +4355,7 @@ describe("Atlas production web", () => {
     act(() => window.history.back());
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("This item is unavailable")).not.toBeInTheDocument();
@@ -4334,7 +4394,7 @@ describe("Atlas production web", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
     expect(detailAttempts).toBe(2);
@@ -4366,7 +4426,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     await screen.findByText(
-      "What is the controlled impedance target for the PCIe reference lane?",
+      "What is the approved value for the selected item?",
     );
     expect(screen.getByRole("button", { name: "View runtime trace" })).toBeInTheDocument();
   });
@@ -4462,7 +4522,7 @@ describe("Atlas production web", () => {
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(
       await screen.findByText(
-        "What is the controlled impedance target for the PCIe reference lane?",
+        "What is the approved value for the selected item?",
       ),
     ).toBeInTheDocument();
 
@@ -4656,13 +4716,289 @@ describe("Atlas production web", () => {
     render(<App />);
 
     const processingButton = (await screen.findByText("Processing conversation"))
-      .closest("button");
-    const completedButton = screen.getByText("Completed conversation").closest("button");
-    expect(processingButton?.querySelector(
+      .closest("button")!;
+    const completedButton = screen.getByText("Completed conversation").closest("button")!;
+    const processingItem = processingButton.closest(
+      '[data-slot="workspace-conversation-item"]',
+    ) as HTMLElement;
+    const completedItem = completedButton.closest(
+      '[data-slot="workspace-conversation-item"]',
+    ) as HTMLElement;
+    expect(processingItem.querySelector(
       '[data-slot="conversation-processing-indicator"]',
-    )).toHaveClass("animate-spin");
-    expect(completedButton?.querySelector(
+    )).toHaveClass("animate-spin", "end-10");
+    expect(processingButton.querySelector(
       '[data-slot="conversation-processing-indicator"]',
+    )).not.toBeInTheDocument();
+    expect(completedItem.querySelector(
+      '[data-slot="conversation-processing-indicator"]',
+    )).not.toBeInTheDocument();
+    expect(processingItem.querySelector('[data-slot="badge"]')).not.toBeInTheDocument();
+    expect(completedItem.querySelector('[data-slot="badge"]')).not.toBeInTheDocument();
+    expect(processingButton).toHaveClass("pr-16");
+    expect(completedButton).toHaveClass("pr-11");
+
+    fireEvent.keyDown(within(processingItem).getByRole("button", {
+      name: "Conversation actions",
+    }), { key: "Enter", code: "Enter" });
+    expect(await screen.findByRole("menuitem", { name: "Delete" })).toHaveAttribute(
+      "data-disabled",
+    );
+  });
+
+  it("deletes an idle conversation from the extensible ellipsis menu", async () => {
+    window.history.pushState({}, "", "/workspace");
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let archiveCalls = 0;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname ===
+          "/api/v1/workspace/conversations/conv-supported-001/archive" &&
+        (init?.method ?? "GET") === "POST"
+      ) {
+        archiveCalls += 1;
+        return jsonResponse({
+          conversation: {
+            ...conversationDetail,
+            status: "archived",
+          },
+          audit_event_ref: "audit-conversation-archive",
+        });
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    const conversationButton = await screen.findByRole("button", {
+      name: /Example conversation/,
+    });
+    const conversationItem = conversationButton.closest(
+      '[data-slot="workspace-conversation-item"]',
+    );
+    const actionsButton = screen.getByRole("button", {
+      name: "Conversation actions",
+    });
+    expect(conversationItem).toHaveClass("relative");
+    expect(conversationButton).toHaveClass("w-full", "pr-11");
+    expect(actionsButton).toHaveClass(
+      "absolute",
+      "end-1",
+      "cursor-pointer",
+      "opacity-0",
+      "group-hover:opacity-70",
+    );
+    fireEvent.keyDown(actionsButton, { key: "Enter", code: "Enter" });
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(1);
+    const deleteMenuItem = within(menu).getByRole("menuitem", { name: "Delete" });
+    expect(deleteMenuItem).toHaveClass("cursor-pointer");
+    fireEvent.click(deleteMenuItem);
+
+    let confirmDialog = await screen.findByRole("alertdialog");
+    expect(within(confirmDialog).getByText(
+      /hidden from your conversation list but retained for administrator audit/,
+    )).toBeInTheDocument();
+    expect(archiveCalls).toBe(0);
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+
+    fireEvent.keyDown(actionsButton, { key: "Enter", code: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    confirmDialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(archiveCalls).toBe(1));
+    await waitFor(() => expect(
+      screen.queryByRole("button", { name: /Example conversation/ }),
+    ).not.toBeInTheDocument());
+    expect(window.location.pathname).toBe("/workspace");
+  });
+
+  it("deleting the open conversation replaces the route and clears the thread", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/workspace/conversations/conv-supported-001",
+    );
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname ===
+          "/api/v1/workspace/conversations/conv-supported-001/archive" &&
+        (init?.method ?? "GET") === "POST"
+      ) {
+        return jsonResponse({
+          conversation: {
+            ...conversationDetail,
+            status: "archived",
+          },
+          audit_event_ref: "audit-conversation-archive",
+        });
+      }
+      return normalFetch(input, init);
+    });
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    render(<App />);
+
+    expect(await screen.findByText(
+      "A synthetic document-backed statement.",
+    )).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", {
+      name: "Conversation actions",
+    }), { key: "Enter", code: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole(
+      "button",
+      { name: "Delete" },
+    ));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
+    expect(replaceState).toHaveBeenCalledWith({}, "", "/workspace");
+    expect(screen.queryByText(
+      "A synthetic document-backed statement.",
+    )).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Message")).toHaveValue("");
+  });
+
+  it("does not replace a newer conversation route when archive settles late", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/workspace/conversations/conv-supported-001",
+    );
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let settleArchive: (response: Response) => void = () => undefined;
+    const delayedArchive = new Promise<Response>((resolve) => {
+      settleArchive = resolve;
+    });
+    const secondarySummary = {
+      ...conversationSummaries[0],
+      conversation_id: "conv-secondary-001",
+      title: "Secondary conversation",
+    };
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/api/v1/workspace/conversations" && method === "GET") {
+        return jsonResponse({
+          conversations: [conversationSummaries[0], secondarySummary],
+        });
+      }
+      if (
+        url.pathname ===
+          "/api/v1/workspace/conversations/conv-supported-001/archive" &&
+        method === "POST"
+      ) {
+        return delayedArchive;
+      }
+      if (
+        url.pathname === "/api/v1/workspace/conversations/conv-secondary-001" &&
+        method === "GET"
+      ) {
+        return jsonResponse({
+          ...conversationDetail,
+          conversation_id: "conv-secondary-001",
+          title: "Secondary conversation",
+          turns: [],
+        });
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    const activeTitle = await screen.findByRole("button", {
+      name: /Example conversation/,
+    });
+    fireEvent.keyDown(
+      within(activeTitle.closest('[data-slot="workspace-conversation-item"]')!)
+        .getByRole("button", { name: "Conversation actions" }),
+      { key: "Enter", code: "Enter" },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole(
+      "button",
+      { name: "Delete" },
+    ));
+    fireEvent.click(await screen.findByRole("button", {
+      name: /Secondary conversation/,
+    }));
+    await waitFor(() => expect(window.location.pathname).toBe(
+      "/workspace/conversations/conv-secondary-001",
+    ));
+
+    await act(async () => {
+      settleArchive(await jsonResponse({
+        conversation: { ...conversationDetail, status: "archived" },
+        audit_event_ref: "audit-conversation-archive",
+      }));
+      await Promise.resolve();
+    });
+
+    expect(window.location.pathname).toBe(
+      "/workspace/conversations/conv-secondary-001",
+    );
+    expect(await screen.findByRole("button", { name: /Secondary conversation/ }))
+      .toBeInTheDocument();
+  });
+
+  it("clears a route opened while that conversation archive is pending", async () => {
+    window.history.pushState({}, "", "/workspace");
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let settleArchive: (response: Response) => void = () => undefined;
+    const delayedArchive = new Promise<Response>((resolve) => {
+      settleArchive = resolve;
+    });
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname ===
+          "/api/v1/workspace/conversations/conv-supported-001/archive" &&
+        (init?.method ?? "GET") === "POST"
+      ) {
+        return delayedArchive;
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    const title = await screen.findByRole("button", { name: /Example conversation/ });
+    fireEvent.keyDown(
+      within(title.closest('[data-slot="workspace-conversation-item"]')!)
+        .getByRole("button", { name: "Conversation actions" }),
+      { key: "Enter", code: "Enter" },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole(
+      "button",
+      { name: "Delete" },
+    ));
+    window.history.pushState(
+      {},
+      "",
+      "/workspace/conversations/conv-supported-001",
+    );
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByText(
+      "A synthetic document-backed statement.",
+    )).toBeInTheDocument();
+
+    await act(async () => {
+      settleArchive(await jsonResponse({
+        conversation: { ...conversationDetail, status: "archived" },
+        audit_event_ref: "audit-conversation-archive",
+      }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
+    expect(screen.queryByText(
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
   });
 
@@ -4672,14 +5008,14 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/ }));
     await waitFor(() =>
       expect(window.location.pathname).toBe(
         "/workspace/conversations/conv-supported-001",
       ),
     );
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Knowledge Library" }));
@@ -4688,12 +5024,12 @@ describe("Atlas production web", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
     expect(await screen.findByLabelText("Message")).toHaveValue("");
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
 
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/ }));
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Knowledge Library" }));
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
@@ -4703,7 +5039,7 @@ describe("Atlas production web", () => {
     expect(composer).toHaveValue("");
     await waitFor(() => expect(composer).toHaveFocus());
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
   });
 
@@ -4715,9 +5051,9 @@ describe("Atlas production web", () => {
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
-    fireEvent.click(screen.getByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Example conversation/ }));
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     expect(pushState).toHaveBeenCalledTimes(1);
     expect(pushState).toHaveBeenCalledWith(
@@ -4748,7 +5084,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/ }));
     await waitFor(() =>
       expect(global.fetch).toHaveBeenCalledWith(
         "/api/v1/workspace/conversations/conv-supported-001",
@@ -4764,7 +5100,7 @@ describe("Atlas production web", () => {
     });
     expect(screen.getByLabelText("Message")).toHaveValue("");
     expect(screen.queryByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).not.toBeInTheDocument();
   });
 
@@ -4774,9 +5110,9 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/ }));
     expect(await screen.findByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Collapse conversation history" }));
     const workspaceSidebar = document.querySelector('[data-slot="workspace-context-sidebar"]');
@@ -4785,7 +5121,7 @@ describe("Atlas production web", () => {
     fireEvent.click(within(workspaceSidebar as HTMLElement).getByRole("button", { name: "Atlas" }));
     expect(workspaceSidebar).toHaveClass("w-72");
     expect(screen.getByText(
-      "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+      "A synthetic document-backed statement.",
     )).toBeInTheDocument();
     expect(window.location.pathname).toBe(
       "/workspace/conversations/conv-supported-001",
@@ -4809,7 +5145,7 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Knowledge Library" })).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /PCIe lane target/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Example conversation/ }));
     expect(await screen.findByText("Conversation history could not be loaded"))
       .toBeInTheDocument();
     expect(window.location.pathname).toBe(

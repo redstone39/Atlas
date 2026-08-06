@@ -602,6 +602,7 @@ class RetrievalOwner(Protocol):
         max_output_tokens: int,
         tokenizer_profile: str,
         max_output_bytes: int = 262_144,
+        deadline_at: AwareDatetime | None = None,
     ) -> RetrievalInvocationEnvelopeV1: ...
 
     def materialize_evidence_pack(
@@ -647,6 +648,13 @@ class RetrievalOwner(Protocol):
         execution_id: Identity,
         catalog_ref: OpaqueRef,
     ) -> list[RelevantDocumentDiscoveryTraceV1]: ...
+
+    def count_page_and_visual_handles(
+        self,
+        *,
+        execution_id: Identity,
+        catalog_ref: OpaqueRef,
+    ) -> int: ...
 
     def release_catalog(
         self,

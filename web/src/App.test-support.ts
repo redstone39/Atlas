@@ -178,7 +178,7 @@ export const operatorSession: SessionState = {
 };
 
 const controlledText =
-  "The controlled impedance target for the PCIe reference lane is 85 ohms differential, with tolerance set by the project stackup note.";
+  "The synthetic reference target is documented in the example source differential, with tolerance set by the project stackup note.";
 
 export const incompleteReadiness: ReadinessState = {
   ready: false,
@@ -202,7 +202,7 @@ export const readyReadiness: ReadinessState = {
 };
 
 const answeredResult = {
-  answer_text: "The PCIe reference lane controlled impedance target is 85 ohms differential.",
+  answer_text: "A synthetic document-backed statement.",
   user_reason: "result.answered_from_validated_evidence",
   citations: [
     {
@@ -212,7 +212,7 @@ const answeredResult = {
       document_title: "Layout Guideline Excerpt",
       locator_label: "Layout Guideline Excerpt, paragraph 1",
       snippet:
-        "controlled impedance target for the PCIe reference lane is 85 ohms differential",
+        "synthetic reference target from the example source",
       viewer_available: true,
     },
   ],
@@ -222,7 +222,7 @@ export const conversationSummaries: ConversationSummary[] = [
   {
     conversation_id: "conv-supported-001",
     owner_actor_id: "user-engineer-001",
-    title: "PCIe lane target",
+    title: "Example conversation",
     status: "active",
     response_language: "en",
     reasoning_mode: "standard",
@@ -318,7 +318,7 @@ export const deniedTurn: ConversationTurnResult = {
 export const conversationDetail: ConversationDetail = {
   conversation_id: "conv-supported-001",
   owner_actor_id: "user-engineer-001",
-  title: "PCIe lane target",
+  title: "Example conversation",
   status: "active",
   response_language: "en",
   reasoning_mode: "standard",
@@ -329,7 +329,7 @@ export const conversationDetail: ConversationDetail = {
       turn_id: "turn-user-001",
       conversation_id: "conv-supported-001",
       role: "user",
-      input_text: "What is the controlled impedance target for the PCIe reference lane?",
+      input_text: "What is the approved value for the selected item?",
       answer_text: null,
       execution_status: "completed",
       reasoning_mode: "standard",
@@ -383,7 +383,7 @@ function workspaceConversationDto(
 
 export function workspaceProjectionDto(
   turn: ConversationTurnResult,
-  userInput = "What is the controlled impedance target for the PCIe reference lane?",
+  userInput = "What is the approved value for the selected item?",
 ) {
   const terminalFailed = turn.execution_status === "failed_closed";
   return {
@@ -557,17 +557,20 @@ export const runtimeTraceDetail: RuntimeTraceDetail = {
     catalog_pages: 1,
     document_candidates: 4,
     search_rounds: 1,
-    unique_evidence: 2,
+    model_visible_items: 2,
     provider_invocations: 2,
     context_tokens: 180,
     tool_tokens: 64,
   },
+  model_visible_item_count: 24,
+  model_visible_item_limit: 37,
+  model_visible_item_exceeded: false,
   document_discovery: [
     {
       invocation_id: "invocation-discovery-001",
       result_ref: "result-discovery-001",
       invocation_ordinal: 1,
-      query_text: "retention policy",
+      query_text: "example policy",
       requested_limit: 20,
       ranking_contract: "equal-reciprocal-rank-v1",
       channels: [
@@ -598,7 +601,7 @@ export const runtimeTraceDetail: RuntimeTraceDetail = {
           processing_revision_ref: "processing-revision-policy-001",
           processing_generation_ref: "processing-generation-policy-001",
           index_generation_ref: "index-generation-policy-001",
-          document_display_name: "Retention Policy.pdf",
+          document_display_name: "Example Document.pdf",
           document_version_label: "2026",
           preview: "Retention is seven years.",
           locator_label: "p. 4",
@@ -794,14 +797,14 @@ export function mockApi(
     revision: number,
     overrides: Partial<Omit<ModelRouteRuntimePolicy, "revision">> = {},
   ) => ({
-    schema_version: "model-route-runtime-policy-v7" as const,
+    schema_version: "model-route-runtime-policy-v8" as const,
     tokenizer_profile: "cl100k_base",
     max_tool_executions: 3,
     max_provider_invocations: 20,
     max_reasoning_revision_cycles: 2,
     max_catalog_pages: 5,
     max_search_rounds: 6,
-    max_unique_evidence: 40,
+    max_model_visible_items_per_turn: 40,
   max_retrieval_repairs: 3,
   max_schema_retries_per_turn: 3,
   max_selected_anchor_pages_per_round: 20,
@@ -849,7 +852,7 @@ export function mockApi(
         max_provider_invocations: 20,
         max_catalog_pages: 5,
         max_search_rounds: 6,
-        max_unique_evidence: 40,
+        max_model_visible_items_per_turn: 40,
   max_retrieval_repairs: 3,
   max_schema_retries_per_turn: 3,
   max_selected_anchor_pages_per_round: 20,
@@ -2297,7 +2300,7 @@ export function mockApi(
       return jsonResponse({
         citation_id: "cit-ev-doc-layout-guidelines-001-001",
         copy_text:
-          "controlled impedance target for the PCIe reference lane is 85 ohms differential",
+          "synthetic reference target from the example source",
         document_title: "Layout Guideline Excerpt",
         locator_label: "Layout Guideline Excerpt, paragraph 1",
         access_decision_id: "access-copy-001",

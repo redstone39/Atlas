@@ -53,8 +53,13 @@ def project_turn_model_capabilities(
 
     if snapshot.catalog_ref is None:
         raise ValueError("capability projection requires an accepted catalog")
-    if contract_repair_remaining not in {0, 1}:
-        raise ValueError("contract repair remaining must be zero or one")
+    expected_repair_remaining = (
+        snapshot.policy.max_retrieval_repairs - snapshot.budget.retrieval_repairs
+    )
+    if contract_repair_remaining != expected_repair_remaining:
+        raise ValueError(
+            "contract repair remaining must match the authoritative runtime budget"
+        )
 
     document_order: list[str] = []
     documents: dict[str, TurnModelDocumentOptionV1] = {}
@@ -205,7 +210,11 @@ def project_turn_model_capabilities(
         and budget.tool_tokens < policy.tool_token_budget
         and max_output_tokens >= 256
     )
-    remaining_evidence = max(0, policy.max_unique_evidence - budget.unique_evidence)
+    remaining_items = max(
+        0,
+        policy.max_model_visible_items_per_turn - budget.model_visible_items,
+    )
+    max_bounded_result_items = min(20, remaining_items // 2)
     catalog_allowed = (
         tool_allowed
         and budget.catalog_pages < policy.max_catalog_pages
@@ -215,16 +224,18 @@ def project_turn_model_capabilities(
         and bool(documents)
         and catalog_document_count > 0
         and budget.search_rounds < policy.max_search_rounds
-        and remaining_evidence > 0
+        and max_bounded_result_items > 0
     )
     inspect_allowed = tool_allowed and bool(evidence)
     inspect_visual_allowed = (
         tool_allowed
-        and remaining_evidence > 0
+        and remaining_items > 0
         and bool(visuals)
     )
     expand_allowed = search_allowed and bool(evidence)
-    navigation_allowed = tool_allowed and bool(documents)
+    navigation_allowed = (
+        tool_allowed and bool(documents) and max_bounded_result_items > 0
+    )
 
     allowed_actions = []
     if catalog_allowed:
@@ -251,12 +262,17 @@ def project_turn_model_capabilities(
         max_page_size=10 if catalog_allowed else 0,
         max_discovery_limit=20 if catalog_allowed else 0,
         max_search_limit=(
-            min(20, remaining_evidence) if search_allowed else 0
+            max_bounded_result_items if search_allowed else 0
         ),
         max_expand_limit=(
-            min(20, remaining_evidence) if expand_allowed else 0
+            max_bounded_result_items if expand_allowed else 0
         ),
-        max_navigation_limit=20 if navigation_allowed else 0,
+        max_expand_anchor_handles=(
+            policy.max_selected_anchor_pages_per_round if expand_allowed else 0
+        ),
+        max_navigation_limit=(
+            max_bounded_result_items if navigation_allowed else 0
+        ),
         max_output_tokens=max_output_tokens if tool_allowed else 0,
     )
     payload = {
@@ -277,6 +293,13 @@ def project_turn_model_capabilities(
         "limits": limits.model_dump(mode="json"),
         "contract_repair_remaining": contract_repair_remaining,
     }
+    projected_identities = set(evidence) | set(visuals) | set(navigation)
+    if len(projected_identities) != budget.model_visible_items:
+        raise ValueError(
+            "projected model-visible items do not match the authoritative runtime total"
+        )
+    if len(projected_identities) > policy.max_model_visible_items_per_turn:
+        raise ValueError("projected model-visible items exceed the execution-fixed limit")
     return TurnModelCapabilitySnapshotV1(**payload, digest=_digest(payload))
 
 

@@ -122,16 +122,12 @@ def _allocate(
     *,
     max_tools: int = 2,
     max_catalog_pages: int = 2,
+    max_retrieval_repairs: int = 3,
+    max_selected_anchor_pages_per_round: int = 7,
     max_schema_retries: int = 1,
     reasoning_mode: str = "standard",
-    max_reasoning_revision_cycles: int | None = None,
 ) -> object:
     execution_id = f"{PREFIX}{suffix}"
-    revision_cycles = (
-        max_reasoning_revision_cycles
-        if max_reasoning_revision_cycles is not None
-        else (1 if reasoning_mode == "deep" else 0)
-    )
     return owner.allocate(
         AllocateExecutionV1(
             execution_id=execution_id,
@@ -143,14 +139,19 @@ def _allocate(
                 max_tool_invocations=max_tools,
                 max_catalog_pages=max_catalog_pages,
                 max_search_rounds=2,
-                max_unique_evidence=2,
-                max_provider_invocations=(
-                    max_tools + 4 * revision_cycles + 6
+                max_model_visible_items_per_turn=2,
+                max_retrieval_repairs=max_retrieval_repairs,
+                max_selected_anchor_pages_per_round=(
+                    max_selected_anchor_pages_per_round
                 ),
-                max_reasoning_revision_cycles=revision_cycles,
+                max_provider_invocations=(
+                    max_tools + (4 if reasoning_mode == "deep" else 0) + 6
+                ),
+                max_reasoning_revision_cycles=(1 if reasoning_mode == "deep" else 0),
                 max_schema_retries_per_turn=max_schema_retries,
                 context_token_budget=20,
                 tool_token_budget=20,
+                tool_execution_timeout_seconds=30,
                 deadline_seconds=120,
             ),
             route=route_snapshot(),
@@ -230,83 +231,6 @@ def test_reasoning_revision_started_trace_and_event_commit_atomically(
     assert event.reasoning_phase == "revising"
     assert event.progress_status == "started"
     assert event.cycle == 1
-
-
-def test_fourth_evaluation_progress_persists_at_max_three_revisions(
-    postgres_runtime: PostgresRuntime,
-) -> None:
-    owner = _owner(postgres_runtime)
-    snapshot = _accept_and_bind(
-        owner,
-        _allocate(
-            owner,
-            "reasoning-fourth-evaluation",
-            reasoning_mode="deep",
-            max_reasoning_revision_cycles=3,
-        ),
-    )
-    evaluations = [
-        ReasoningEvaluationV1(
-            cycle=cycle,
-            verdict="revise_only",
-            finding_codes=["coverage_gap"],
-            summary="A revision is required.",
-            score={
-                "plan_coverage": 1,
-                "evidence_handling": 1,
-                "conflict_handling": 1,
-                "gap_resolution": 1,
-                "revision_completion": 0,
-                "total": 4,
-            },
-        )
-        for cycle in range(1, 5)
-    ]
-    trace = _next_reasoning_trace(
-        None,
-        status="running",
-        plans=[
-            ReasoningPlanV2(
-                generation=1,
-                next_objective="Review evidence.",
-                completion_condition="Evidence reviewed.",
-                items=[
-                    ReasoningPlanItemV2(
-                        item_id="plan-1",
-                        summary="Review evidence.",
-                    )
-                ],
-            )
-        ],
-        evaluations=evaluations,
-        corrections=[],
-    )
-
-    progressed = owner.record_reasoning_progress(
-        RecordReasoningProgressV1(
-            execution_id=snapshot.execution_id,
-            expected_version=snapshot.version,
-            fencing_token=snapshot.lease.fencing_token,
-            trace=trace,
-            phase="evaluating",
-            progress_status="completed",
-            cycle=4,
-            message_code="reasoning.evaluation_completed",
-            message_params={"cycle": 4},
-        )
-    )
-
-    with postgres_runtime.session_factory() as session:
-        event = session.scalar(
-            select(AtlasTurnRuntimeEventRow).where(
-                AtlasTurnRuntimeEventRow.execution_id == snapshot.execution_id,
-                AtlasTurnRuntimeEventRow.sequence == progressed.version,
-            )
-        )
-    assert event is not None
-    assert event.reasoning_phase == "evaluating"
-    assert event.progress_status == "completed"
-    assert event.cycle == 4
 
 
 def test_reasoning_trace_v2_generations_and_standard_null_persist_atomically(
@@ -473,7 +397,7 @@ def _tool_cycle(
             reserve_catalog_pages=1 if ordinal == 1 else 0,
             reserve_document_candidates=1,
             reserve_search_rounds=1 if ordinal == 1 else 0,
-            reserve_unique_evidence=1,
+            reserve_model_visible_items=1,
             reserve_tool_tokens=2,
         )
     )
@@ -487,7 +411,7 @@ def _tool_cycle(
             result_ref=f"result-{ordinal}",
             result_digest=f"{ordinal + 2}" * 64,
             document_candidate_handles=["document-1", "document-1"],
-            unique_evidence_identities=["evidence-1", "evidence-1"],
+            model_visible_item_identities=["evidence-1", "evidence-1"],
             catalog_pages=1 if ordinal == 1 else 0,
             search_rounds=1 if ordinal == 1 else 0,
             tool_tokens=2,
@@ -606,6 +530,68 @@ def test_schema_retry_claim_is_turn_scoped_idempotent_and_bounded(
             )
         )
     assert owner.snapshot(snapshot.execution_id).budget.schema_retries == 1
+
+
+def test_contract_repair_admission_is_execution_fixed_durable_and_bounded(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(
+            owner,
+            "retrieval-repair-bounded",
+            max_retrieval_repairs=2,
+        ),
+    )
+    assert snapshot.policy.max_retrieval_repairs == 2
+    assert snapshot.policy.max_selected_anchor_pages_per_round == 7
+    assert snapshot.policy.tool_execution_timeout_seconds == 30
+    assert snapshot.budget.retrieval_repairs == 0
+
+    initial = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    first = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=initial.version,
+            fencing_token=initial.lease.fencing_token,
+            context_tokens=1,
+            contract_repair=True,
+        )
+    )
+    second = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=first.version,
+            fencing_token=first.lease.fencing_token,
+            context_tokens=1,
+            contract_repair=True,
+        )
+    )
+
+    assert first.budget.retrieval_repairs == 1
+    assert second.budget.retrieval_repairs == 2
+    assert owner.snapshot(snapshot.execution_id).budget.retrieval_repairs == 2
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        owner.request_model_action(
+            RequestModelActionV1(
+                execution_id=snapshot.execution_id,
+                expected_version=second.version,
+                fencing_token=second.lease.fencing_token,
+                context_tokens=1,
+                contract_repair=True,
+            )
+        )
+    reloaded = owner.snapshot(snapshot.execution_id)
+    assert reloaded.version == second.version
+    assert reloaded.budget.retrieval_repairs == 2
 
 
 def test_competing_schema_retry_claims_cannot_overspend(
@@ -893,7 +879,7 @@ def test_dedup_budgets_terminal_rollback_single_outcome_and_release_saga(
     after_second = _tool_cycle(owner, after_first, 2)
     assert after_second.budget.tool_invocations == 2
     assert after_second.budget.document_candidates == 1
-    assert after_second.budget.unique_evidence == 1
+    assert after_second.budget.model_visible_items == 1
     assert after_second.budget.catalog_pages == 1
     assert after_second.budget.search_rounds == 1
     prepared = _prepare(owner, after_second)
@@ -1006,7 +992,7 @@ def test_candidate_reservation_is_per_call_accounting_not_a_turn_ceiling(
         reserve_catalog_pages=1,
         reserve_document_candidates=3,
         reserve_search_rounds=0,
-        reserve_unique_evidence=0,
+        reserve_model_visible_items=0,
         reserve_tool_tokens=1,
     ))
     completed = owner.complete_tool(
@@ -1019,7 +1005,7 @@ def test_candidate_reservation_is_per_call_accounting_not_a_turn_ceiling(
             result_ref="result-three-candidates",
             result_digest="b" * 64,
             document_candidate_handles=["document-1", "document-2", "document-3"],
-            unique_evidence_identities=[],
+            model_visible_item_identities=[],
             catalog_pages=1,
             search_rounds=0,
             tool_tokens=1,
@@ -1052,7 +1038,7 @@ def test_candidate_reservation_is_per_call_accounting_not_a_turn_ceiling(
             reserve_catalog_pages=1,
             reserve_document_candidates=0,
             reserve_search_rounds=0,
-            reserve_unique_evidence=0,
+            reserve_model_visible_items=0,
             reserve_tool_tokens=1,
         )
     )
@@ -1067,7 +1053,7 @@ def test_candidate_reservation_is_per_call_accounting_not_a_turn_ceiling(
                 result_ref="result-over-reservation",
                 result_digest="d" * 64,
                 document_candidate_handles=["new-document"],
-                unique_evidence_identities=[],
+                model_visible_item_identities=[],
                 catalog_pages=1,
                 search_rounds=0,
                 tool_tokens=1,
@@ -1108,7 +1094,7 @@ def test_tool_token_threshold_blocks_only_the_request_after_overshoot(
                 reserve_catalog_pages=0,
                 reserve_document_candidates=0,
                 reserve_search_rounds=0,
-                reserve_unique_evidence=0,
+                reserve_model_visible_items=0,
                 reserve_tool_tokens=20,
             )
         )
@@ -1122,7 +1108,7 @@ def test_tool_token_threshold_blocks_only_the_request_after_overshoot(
                 result_ref=f"result-tool-token-{ordinal}",
                 result_digest=f"{ordinal + 4}" * 64,
                 document_candidate_handles=[],
-                unique_evidence_identities=[],
+                model_visible_item_identities=[],
                 catalog_pages=0,
                 search_rounds=0,
                 tool_tokens=actual_tokens,
@@ -1152,7 +1138,7 @@ def test_tool_token_threshold_blocks_only_the_request_after_overshoot(
                 reserve_catalog_pages=0,
                 reserve_document_candidates=0,
                 reserve_search_rounds=0,
-                reserve_unique_evidence=0,
+                reserve_model_visible_items=0,
                 reserve_tool_tokens=20,
             )
         )
@@ -1193,7 +1179,7 @@ def test_candidate_counter_can_exceed_twenty_without_closing_discovery(
                 reserve_catalog_pages=1,
                 reserve_document_candidates=10,
                 reserve_search_rounds=0,
-                reserve_unique_evidence=0,
+                reserve_model_visible_items=0,
                 reserve_tool_tokens=1,
             )
         )
@@ -1209,7 +1195,7 @@ def test_candidate_counter_can_exceed_twenty_without_closing_discovery(
                 document_candidate_handles=[
                     f"document-{ordinal}-{index}" for index in range(10)
                 ],
-                unique_evidence_identities=[],
+                model_visible_item_identities=[],
                 catalog_pages=1,
                 search_rounds=0,
                 tool_tokens=1,

@@ -69,13 +69,14 @@ def checked(response: httpx.Response, *statuses: int) -> httpx.Response:
 
 def runtime_policy() -> dict[str, object]:
     return {
-        "schema_version": "model-route-runtime-policy-v4",
+        "schema_version": "model-route-runtime-policy-v8",
         "tokenizer_profile": "cl100k_base",
         "max_tool_executions": 12,
-        "max_provider_invocations": 14,
+        "max_provider_invocations": 26,
+        "max_reasoning_revision_cycles": 2,
         "max_catalog_pages": 5,
         "max_search_rounds": 6,
-        "max_unique_evidence": 40,
+        "max_model_visible_items_per_turn": 40,
         "max_retrieval_repairs": 3,
         "max_schema_retries_per_turn": 3,
         "max_selected_anchor_pages_per_round": 20,

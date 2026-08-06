@@ -13,6 +13,7 @@ from atlas_production.modules.citation_preview.public import (
     ProtectedDeclaredEvidenceV1,
 )
 from atlas_production.modules.workspace_turn.public import (
+    WorkspaceConversationArchiveV1,
     WorkspaceConversationCreateV1,
     WorkspaceConversationDetailV1,
     WorkspaceConversationListV1,
@@ -23,6 +24,7 @@ from atlas_production.modules.workspace_turn.public import (
     WorkspaceTurnRetryV1,
     TurnAcceptedV1,
 )
+from atlas_production.modules.conversation.public import ConversationArchiveResultV1
 from atlas_production.modules.conversation_audit.public import (
     AdminConversationListResult,
     RuntimeTraceDetail,
@@ -100,6 +102,23 @@ def create_workspace_conversation(payload: WorkspaceConversationCreateV1, reques
 def list_workspace_conversations(request: Request):
     try:
         return _workspace_turn_application(request).list_conversations(current_user(request))
+    except WorkspaceTurnError as exc:
+        return _workspace_turn_error(exc)
+
+
+@router.post(
+    "/api/v1/workspace/conversations/{conversation_id}/archive",
+    response_model=ConversationArchiveResultV1,
+)
+def archive_workspace_conversation(
+    conversation_id: str,
+    payload: WorkspaceConversationArchiveV1,
+    request: Request,
+):
+    try:
+        return _workspace_turn_application(request).archive_conversation(
+            current_user(request), conversation_id, payload
+        )
     except WorkspaceTurnError as exc:
         return _workspace_turn_error(exc)
 

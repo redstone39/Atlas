@@ -9,9 +9,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from atlas_production.infrastructure.history_authority import (
+    HISTORY_AUTHORITY_POLICY,
+    history_exchange_payload,
+    history_summary_payload,
+)
 from atlas_production.modules.context_engineering.public import (
     ContextExchangeV3,
-    ContextSummaryInputV3,
+    ContextSummaryInputV4,
     RecordResolverProjectionV1,
     RecordRewriteProjectionV1,
     TurnInputProjectionOwner,
@@ -168,6 +173,15 @@ def _verify_route(route: TurnRouteSnapshotV2, tested_route) -> None:
         != route.max_total_tokens_per_conversation
     ):
         raise ProviderProtocolError(safe_code="model_route_revision_conflict")
+
+
+def _stage_system_prompt(stage_instruction: str) -> str:
+    return _canonical(
+        {
+            "history_authority_policy": HISTORY_AUTHORITY_POLICY,
+            "stage_instruction": stage_instruction,
+        }
+    )
 
 
 class ProviderTurnInputProjector:
@@ -373,7 +387,7 @@ class ProviderTurnInputProjector:
         *,
         snapshot: ExecutionSnapshotV1,
         recent_tail: list[ContextExchangeV3],
-        summary: ContextSummaryInputV3 | None,
+        summary: ContextSummaryInputV4 | None,
     ) -> str:
         projection = self._projections.get_input_projection(snapshot.execution_id)
         if projection is None:
@@ -392,23 +406,34 @@ class ProviderTurnInputProjector:
             raise TurnInputProjectionFailure("resolver_failed") from error
 
         resolver_context = {
-            "summary": None if summary is None else summary.text,
+            "summary": (
+                None
+                if summary is None
+                else history_summary_payload(
+                    historical_user_context=summary.historical_user_context,
+                    assistant_pending_verification_context=(
+                        summary.assistant_pending_verification_context
+                    ),
+                )
+            ),
             "recent_exchanges": [
-                {
-                    "user_message": exchange.user_message.text,
-                    "assistant_message": (
+                history_exchange_payload(
+                    user_text=exchange.user_message.text,
+                    assistant_text=(
                         None
                         if exchange.assistant_message is None
                         else exchange.assistant_message.text
                     ),
-                }
+                )
                 for exchange in recent_tail
             ],
         }
         try:
             resolver_request = ProviderConversationRequest(
                 messages=[
-                    ProviderSystemMessage(content=_RESOLVER_SYSTEM_PROMPT),
+                    ProviderSystemMessage(
+                        content=_stage_system_prompt(_RESOLVER_SYSTEM_PROMPT)
+                    ),
                     ProviderUserMessage(
                         content=_canonical(
                             {
@@ -465,7 +490,9 @@ class ProviderTurnInputProjector:
         try:
             rewrite_request = ProviderConversationRequest(
                 messages=[
-                    ProviderSystemMessage(content=_REWRITE_SYSTEM_PROMPT),
+                    ProviderSystemMessage(
+                        content=_stage_system_prompt(_REWRITE_SYSTEM_PROMPT)
+                    ),
                     ProviderUserMessage(
                         content=_canonical(
                             {

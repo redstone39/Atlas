@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 
 from atlas_production.infrastructure.postgres_owner.authorization import (
     CreateGrantInput,
@@ -116,14 +117,26 @@ class _GrantDocumentResourceAdapter:
         return _snapshot(record)
 
     def grant_document_resources(
-        self, *, execution_id: str, grant_ref: str
+        self,
+        *,
+        execution_id: str,
+        grant_ref: str,
+        deadline_at: datetime | None = None,
     ) -> GrantDocumentResourceSnapshotV1:
         return _snapshot(
-            self._store.grant_resources(execution_id=execution_id, grant_ref=grant_ref)
+            self._store.grant_resources(
+                execution_id=execution_id,
+                grant_ref=grant_ref,
+                deadline_at=deadline_at,
+            )
         )
 
     def current_grant_document_resources(
-        self, *, execution_id: str, grant_ref: str
+        self,
+        *,
+        execution_id: str,
+        grant_ref: str,
+        deadline_at: datetime | None = None,
     ) -> GrantDocumentResourceSnapshotV1:
         raise PermissionError("current grant authorization is unavailable")
 
@@ -206,17 +219,24 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
         return _grant_ref(created)
 
     def current_grant_document_resources(
-        self, *, execution_id: str, grant_ref: str
+        self,
+        *,
+        execution_id: str,
+        grant_ref: str,
+        deadline_at: datetime | None = None,
     ) -> GrantDocumentResourceSnapshotV1:
         snapshot = self.grant_document_resources(
-            execution_id=execution_id, grant_ref=grant_ref
+            execution_id=execution_id,
+            grant_ref=grant_ref,
+            deadline_at=deadline_at,
         )
-        grant = self._store.get_grant(grant_ref)
+        grant = self._store.get_grant(grant_ref, deadline_at=deadline_at)
         if grant is None or grant.execution_id != execution_id:
             raise PermissionError("turn grant is unavailable")
         current_grant = self._current_authorization.current_grant_authorization(
             actor_id=grant.actor_id,
             conversation_id=grant.conversation_id,
+            deadline_at=deadline_at,
         )
         if (
             current_grant.actor_id != grant.actor_id
@@ -226,6 +246,7 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
             raise PermissionError("turn grant is no longer authorized")
         decisions = self.current_visibility(
             actor_id=grant.actor_id,
+            deadline_at=deadline_at,
             resources=[
                 LineageResourceV1(
                     resource_ref=item.resource_ref,
@@ -297,7 +318,11 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
         )
 
     def current_visibility(
-        self, *, actor_id: str, resources: list[LineageResourceV1]
+        self,
+        *,
+        actor_id: str,
+        resources: list[LineageResourceV1],
+        deadline_at: datetime | None = None,
     ) -> list[VisibilityDecisionV1]:
         # Several evidence items may legitimately resolve to the same document.
         # Ask the current-authority owner once per document while preserving the
@@ -313,6 +338,7 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
         current_records = self._current_authorization.current_resource_authorizations(
             actor_id=actor_id,
             resource_refs=document_refs,
+            deadline_at=deadline_at,
         )
         by_ref: dict[str, CurrentResourceAuthorizationSnapshotV1] = {}
         duplicate_refs: set[str] = set()

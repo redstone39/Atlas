@@ -64,7 +64,7 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_turn_tool_ledger',
         'atlas_turn_audit_draft_releases',
         'atlas_turn_audit_drafts',
-        'atlas_turn_unique_evidence_ledger',
+        'atlas_turn_model_visible_item_ledger',
     }
 )
 

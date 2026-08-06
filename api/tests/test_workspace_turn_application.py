@@ -19,10 +19,13 @@ from atlas_production.modules.context_engineering.public import (
     RecordResolverProjectionV1,
     RecordRewriteProjectionV1,
     ContextSummarySourceV3,
-    ContextSummaryV3,
+    ContextSummaryV4,
     TurnInputProjectionV1,
 )
 from atlas_production.modules.conversation.public import (
+    ConversationArchiveError,
+    ConversationArchiveResultV1,
+    ConversationMembershipConflict,
     ConversationTurnMemberV1,
     ConversationV1,
 )
@@ -44,6 +47,7 @@ from atlas_production.modules.workspace_turn.public import (
     WorkspaceTurnError,
     WorkspaceTurnProjectionV1,
     WorkspaceTurnRetryV1,
+    _historical_exchange_content_digest,
 )
 from tests.answer_behavior_fixtures import NullAnswerBehavior
 
@@ -64,8 +68,8 @@ CONVERSATION = ConversationV1(
 def _budget():
     return BudgetSnapshotV1(
         tool_invocations=0, catalog_pages=0, document_candidates=0,
-        search_rounds=0, unique_evidence=0, provider_invocations=0,
-        context_tokens=0, tool_tokens=0, schema_retries=0,
+        search_rounds=0, model_visible_items=0, provider_invocations=0,
+        context_tokens=0, tool_tokens=0, retrieval_repairs=0, schema_retries=0,
     )
 
 
@@ -187,6 +191,21 @@ class Conversations:
 
     def list_for_actor(self, _actor_id):
         return [self.conversation]
+
+    def archive(self, *, actor_id, conversation_id, command):
+        assert actor_id == self.conversation.owner_actor_id
+        assert conversation_id == self.conversation.conversation_id
+        assert command.idempotency_key
+        assert command.expected_next_ordinal == (
+            1 if self.member is None else self.member.ordinal + 1
+        )
+        self.conversation = self.conversation.model_copy(
+            update={"status": "archived"}
+        )
+        return ConversationArchiveResultV1(
+            conversation=self.conversation,
+            audit_event_ref="audit-conversation-archived",
+        )
 
     def get(self, _conversation_id):
         return self.conversation
@@ -376,7 +395,10 @@ class ModelRoutes:
                 max_schema_retries_per_turn=3,
                 max_catalog_pages=5,
                 max_search_rounds=6,
-                max_unique_evidence=40,
+                max_model_visible_items_per_turn=40,
+                max_retrieval_repairs=2,
+                max_selected_anchor_pages_per_round=7,
+                tool_execution_timeout_seconds=31,
                 turn_timeout_seconds=240,
             ),
         )
@@ -441,10 +463,11 @@ def _app(
     context_preparer=None,
     conversation_usage=None,
     answer_behavior=None,
+    conversations=None,
 ):
     runtime = Runtime()
     source = KnowledgeSource()
-    conversations = Conversations()
+    conversations = conversations or Conversations()
     selected_contexts = contexts or Contexts()
     application = WorkspaceTurnApplication(
         conversations=conversations,
@@ -503,6 +526,146 @@ def test_list_conversations_projects_empty_conversation_without_status():
     result = application.list_conversations(ACTOR)
 
     assert result.conversations[0].last_turn_status is None
+
+
+def test_archive_conversation_hides_idle_owner_conversation() -> None:
+    application, _runtime, _source = _app(SimpleNamespace())
+
+    result = application.archive_conversation(
+        ACTOR,
+        CONVERSATION.conversation_id,
+        SimpleNamespace(idempotency_key="archive-key"),
+    )
+
+    assert result.conversation.status == "archived"
+    assert result.audit_event_ref == "audit-conversation-archived"
+    assert application.list_conversations(ACTOR).conversations == []
+
+
+def test_archive_conversation_exact_replay_returns_same_result() -> None:
+    application, _runtime, _source = _app(SimpleNamespace())
+    command = SimpleNamespace(idempotency_key="archive-key")
+
+    first = application.archive_conversation(
+        ACTOR, CONVERSATION.conversation_id, command
+    )
+    replay = application.archive_conversation(
+        ACTOR, CONVERSATION.conversation_id, command
+    )
+
+    assert replay == first
+    assert replay.conversation.status == "archived"
+    assert replay.audit_event_ref == "audit-conversation-archived"
+
+
+def test_archive_conversation_rejects_processing_turn() -> None:
+    application, runtime, _source = _app(SimpleNamespace())
+    member = ConversationTurnMemberV1(
+        turn_id="turn-processing",
+        conversation_id=CONVERSATION.conversation_id,
+        execution_id="execution-processing",
+        role="assistant",
+        ordinal=1,
+        created_at=NOW,
+    )
+    application._conversations.member = member
+    runtime.executions[member.execution_id] = SimpleNamespace(
+        state=ExecutionState.AWAITING_MODEL_ACTION
+    )
+
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.archive_conversation(
+            ACTOR,
+            CONVERSATION.conversation_id,
+            SimpleNamespace(idempotency_key="archive-key"),
+        )
+
+    assert error.value.status_code == 409
+    assert application._conversations.conversation.status == "active"
+
+
+def test_archive_conversation_rejects_earlier_processing_turn() -> None:
+    application, runtime, _source = _app(SimpleNamespace())
+    earlier = ConversationTurnMemberV1(
+        turn_id="turn-processing-earlier",
+        conversation_id=CONVERSATION.conversation_id,
+        execution_id="execution-processing-earlier",
+        role="assistant",
+        ordinal=1,
+        created_at=NOW,
+    )
+    latest = ConversationTurnMemberV1(
+        turn_id="turn-terminal-latest",
+        conversation_id=CONVERSATION.conversation_id,
+        execution_id="execution-terminal-latest",
+        role="assistant",
+        ordinal=2,
+        created_at=NOW,
+    )
+    application._conversations.candidate_turns = lambda _conversation_id: [
+        earlier,
+        latest,
+    ]
+    runtime.executions[earlier.execution_id] = SimpleNamespace(
+        state=ExecutionState.AWAITING_MODEL_ACTION
+    )
+    runtime.executions[latest.execution_id] = SimpleNamespace(
+        state=ExecutionState.TERMINAL_COMPLETED
+    )
+
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.archive_conversation(
+            ACTOR,
+            CONVERSATION.conversation_id,
+            SimpleNamespace(idempotency_key="archive-key"),
+        )
+
+    assert error.value.status_code == 409
+    assert application._conversations.conversation.status == "active"
+
+
+def test_archive_conversation_rejects_membership_added_after_runtime_scan() -> None:
+    application, _runtime, _source = _app(SimpleNamespace())
+
+    def append_before_archive(*, actor_id, conversation_id, command):
+        assert actor_id == ACTOR.actor_id
+        assert conversation_id == CONVERSATION.conversation_id
+        assert command.expected_next_ordinal == 1
+        application._conversations.member = ConversationTurnMemberV1(
+            turn_id="turn-concurrent",
+            conversation_id=CONVERSATION.conversation_id,
+            execution_id="execution-concurrent",
+            role="assistant",
+            ordinal=1,
+            created_at=NOW,
+        )
+        raise ConversationArchiveError("conflict")
+
+    application._conversations.archive = append_before_archive
+
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.archive_conversation(
+            ACTOR,
+            CONVERSATION.conversation_id,
+            SimpleNamespace(idempotency_key="archive-key"),
+        )
+
+    assert error.value.status_code == 409
+    assert application._conversations.conversation.status == "active"
+
+
+def test_archive_conversation_hides_non_owned_target() -> None:
+    application, _runtime, _source = _app(SimpleNamespace())
+    other_actor = UserRecord("actor-2", "Other", None, "user", None)
+
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.archive_conversation(
+            other_actor,
+            CONVERSATION.conversation_id,
+            SimpleNamespace(idempotency_key="archive-key"),
+        )
+
+    assert error.value.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -610,12 +773,15 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
         "max_tool_invocations": 12,
         "max_catalog_pages": 5,
         "max_search_rounds": 6,
-        "max_unique_evidence": 40,
+        "max_model_visible_items_per_turn": 40,
+        "max_retrieval_repairs": 2,
+        "max_selected_anchor_pages_per_round": 7,
         "max_provider_invocations": 26,
         "max_reasoning_revision_cycles": 2,
         "max_schema_retries_per_turn": 3,
         "context_token_budget": 272000,
         "tool_token_budget": 64000,
+        "tool_execution_timeout_seconds": 31,
         "deadline_seconds": 240,
     }
     assert runtime.current.route.model_dump() == {
@@ -676,9 +842,8 @@ def test_workspace_projects_only_safe_deep_reasoning_timeline() -> None:
             state=ExecutionState.AWAITING_MODEL_ACTION,
             reasoning_phase="planning",
             progress_status="completed",
-            cycle=4,
             message_code="reasoning.planning_completed",
-            message_params={"cycle": 4, "plan_items": 2},
+            message_params={"plan_items": 2},
             created_at=NOW,
         )
     ]
@@ -691,11 +856,7 @@ def test_workspace_projects_only_safe_deep_reasoning_timeline() -> None:
 
     assert status.reasoning_mode == "deep"
     assert status.reasoning_timeline == projection.reasoning_timeline
-    assert status.reasoning_timeline[0].cycle == 4
-    assert status.reasoning_timeline[0].message_params == {
-        "cycle": 4,
-        "plan_items": 2,
-    }
+    assert status.reasoning_timeline[0].message_params == {"plan_items": 2}
     workspace_payload = projection.model_dump(mode="json")
     assert "reasoning_trace" not in workspace_payload
     assert "score" not in str(workspace_payload).casefold()
@@ -1211,7 +1372,7 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
     assert sentinel not in repr(answer_routing.requests[0])
 
 
-def test_questionable_answer_is_excluded_and_invalidates_contaminated_summary() -> None:
+def test_questionable_answer_is_excluded_and_invalidates_legacy_authority_digest() -> None:
     contexts = Contexts()
     application, runtime, _source = _app(Carrier(), contexts=contexts)
     application.accept_turn(
@@ -1269,7 +1430,7 @@ def test_questionable_answer_is_excluded_and_invalidates_contaminated_summary() 
             segments=[
                 WorkspaceAnswerSegmentV2(
                     segment_id="segment-questionable",
-                    text="unsupported synthetic answer",
+                    text="unsupported synthetic value alpha answer",
                 )
             ],
             citations=[],
@@ -1300,13 +1461,14 @@ def test_questionable_answer_is_excluded_and_invalidates_contaminated_summary() 
             logical_turn_id=questionable.turn_id,
             representative_turn_id=questionable.turn_id,
             representative_content_digest=hashlib.sha256(
-                b"questionable rewritten question\0unsupported synthetic answer"
+                b"questionable rewritten question\0unsupported synthetic value alpha answer"
             ).hexdigest(),
         ),
     ]
-    contaminated_summary = ContextSummaryV3(
+    contaminated_summary = ContextSummaryV4(
         summary_ref="summary-contaminated",
-        text="This summary contains an unsupported synthetic answer.",
+        historical_user_context="The user asked for the pin.",
+        assistant_pending_verification_context="The unsupported value is synthetic value alpha.",
         token_count=8,
         sources=sources,
         digest="c" * 64,
@@ -1353,10 +1515,14 @@ def test_questionable_answer_is_excluded_and_invalidates_contaminated_summary() 
     assert command.recent_tail[0].assistant_message.text == "aligned answer"
     assert command.recent_tail[1].assistant_message is None
     assert command.recent_tail[1].direct_document_ids == []
-    assert command.recent_tail[1].representative_content_digest == hashlib.sha256(
-        b"questionable rewritten question\0"
-    ).hexdigest()
-    assert "unsupported synthetic answer" not in command.model_dump_json()
+    assert command.recent_tail[1].representative_content_digest == (
+        _historical_exchange_content_digest(
+            user_text="questionable rewritten question",
+            assistant_text="",
+            direct_document_ids=[],
+        )
+    )
+    assert "synthetic pending answer" not in command.model_dump_json()
     assert "summary-contaminated" not in command.model_dump_json()
 
 
@@ -1457,18 +1623,23 @@ def test_revocation_rebuild_projection_is_direct_only_and_keeps_all_user_message
         ContextSummarySourceV3(
             logical_turn_id=f"turn-{index}",
             representative_turn_id=f"turn-{index}",
-            representative_content_digest=hashlib.sha256(
-                f"question {index}\0answer {index}".encode()
-            ).hexdigest(),
+            representative_content_digest=_historical_exchange_content_digest(
+                user_text=f"question {index}",
+                assistant_text=f"answer {index}",
+                direct_document_ids=[
+                    "document-revoked" if index == 1 else f"document-{index}"
+                ],
+            ),
             direct_document_ids=[
                 "document-revoked" if index == 1 else f"document-{index}"
             ],
         )
         for index in (1, 2)
     ]
-    previous_summary = ContextSummaryV3(
+    previous_summary = ContextSummaryV4(
         summary_ref="summary-old",
-        text="old summary",
+        historical_user_context="old user summary",
+        assistant_pending_verification_context="old assistant summary",
         token_count=2,
         sources=sources,
         digest="f" * 64,
@@ -1569,13 +1740,16 @@ def test_summary_reuse_does_not_bind_to_prior_route_or_tokenizer_revision() -> N
     source = ContextSummarySourceV3(
         logical_turn_id=prior.turn_id,
         representative_turn_id=prior.turn_id,
-        representative_content_digest=hashlib.sha256(
-            b"prior question\0prior answer"
-        ).hexdigest(),
+        representative_content_digest=_historical_exchange_content_digest(
+            user_text="prior question",
+            assistant_text="prior answer",
+            direct_document_ids=[],
+        ),
     )
-    summary = ContextSummaryV3(
+    summary = ContextSummaryV4(
         summary_ref="summary-prior",
-        text="prior summary",
+        historical_user_context="prior user summary",
+        assistant_pending_verification_context="prior assistant summary",
         token_count=2,
         sources=[source],
         digest="e" * 64,
@@ -1634,6 +1808,45 @@ def test_first_http_response_keeps_owner_failure_execution_observable() -> None:
     assert status.json()["state"] == "terminal_failed"
     assert events.status_code == 200
     assert "event: terminal_failed" in events.text
+
+
+def test_archive_race_during_membership_publication_returns_bounded_conflict() -> None:
+    class ArchiveRaceConversations(Conversations):
+        def append_turn_member(self, *, actor_id, command):
+            self.conversation = self.conversation.model_copy(
+                update={"status": "archived"}
+            )
+            raise ConversationMembershipConflict(
+                "conversation archived before membership publication"
+            )
+
+    conversations = ArchiveRaceConversations()
+    application, runtime, _source = _app(
+        Carrier(), conversations=conversations
+    )
+
+    class Principal:
+        def current_user(self, _token):
+            return ACTOR
+
+    values = {name: object() for name in ApiComposition.__dataclass_fields__}
+    values.update(current_principal=Principal(), workspace_turn=application)
+    client = TestClient(create_app(ApiComposition(**values)))
+
+    conflict = client.post(
+        "/api/v1/workspace/conversations/conversation-1/turns",
+        json={"input_text": "question", "idempotency_key": "archive-race"},
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.json()["error_code"] == "conversation_changed"
+    assert conflict.json()["message_code"] == (
+        "conversation.changed_before_turn_was_accepted"
+    )
+    assert conversations.conversation.status == "archived"
+    execution = next(iter(runtime.executions.values()))
+    assert execution.state is ExecutionState.TERMINAL_FAILED
+    assert conversations.member is None
 
 
 @pytest.mark.parametrize(

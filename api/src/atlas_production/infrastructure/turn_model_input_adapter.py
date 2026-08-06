@@ -9,7 +9,7 @@ from atlas_production.modules.context_engineering.public import ContextEngineeri
 from atlas_production.modules.retrieval.public import KnowledgeToolObservationV1
 from atlas_production.modules.turn_execution.public import (
     AnswerBehaviorOwner,
-    TurnModelHistorySummaryV3,
+    TurnModelHistorySummaryV4,
     TurnModelInputV3,
     TurnModelRecentExchangeV3,
 )
@@ -66,10 +66,15 @@ class PublicOwnerTurnModelInputSource:
                         if item.assistant_message is None
                         else item.assistant_message.text
                     ),
-                    verification_status=(
-                        "not_applicable"
+                    assistant_authority=(
+                        None
                         if item.assistant_message is None
-                        else item.assistant_message.verification_status
+                        else "pending_verification"
+                    ),
+                    assistant_usage_scope=(
+                        None
+                        if item.assistant_message is None
+                        else "dialogue_context_only"
                     ),
                 )
                 for item in context.recent_tail
@@ -77,9 +82,12 @@ class PublicOwnerTurnModelInputSource:
             summary=(
                 None
                 if summary is None
-                else TurnModelHistorySummaryV3(
+                else TurnModelHistorySummaryV4(
                     summary_ref=summary.summary_ref,
-                    text=summary.text,
+                    historical_user_context=summary.historical_user_context,
+                    assistant_pending_verification_context=(
+                        summary.assistant_pending_verification_context
+                    ),
                     digest=summary.digest,
                 )
             ),

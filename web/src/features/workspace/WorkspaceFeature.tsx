@@ -1,10 +1,12 @@
 import {
   BookOpen,
+  Ellipsis,
   MessageSquarePlus,
   PanelLeft,
   Search,
   SendHorizontal,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   useEffect,
@@ -19,9 +21,26 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../../components/ui/alert-dialog";
 import { Bubble, BubbleContent } from "../../components/ui/bubble";
 import { Button } from "../../components/ui/button";
 import { Badge } from "../../components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../../components/ui/dropdown-menu";
 import {
   Field,
   FieldGroup,
@@ -54,7 +73,6 @@ import {
   LoadingState,
   StatusBadge,
   conversationTurnStatusPresentation,
-  resultStatusPresentation,
   serverMessage,
 } from "../../shared/product-ui";
 import { cn } from "../../lib/utils";
@@ -66,7 +84,11 @@ import {
   EvidenceViewerDialog,
   type EvidenceViewerWatermark,
 } from "./EvidenceViewerDialog";
-import { workspaceApi, type DeclaredEvidencePreview } from "./api";
+import {
+  joinResponseSegmentMarkdown,
+  workspaceApi,
+  type DeclaredEvidencePreview,
+} from "./api";
 import { ReasoningTimeline } from "./ReasoningTimeline";
 import type {
   CitationCard,
@@ -127,6 +149,8 @@ export function WorkspaceFeature({
   const [queryError, setQueryError] = useState("");
   const [historyExpanded, setHistoryExpanded] = useState(true);
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
+  const [archivingConversationId, setArchivingConversationId] =
+    useState<string | null>(null);
   const [citationEvidence, setCitationEvidence] = useState<DeclaredEvidencePreview | null>(null);
   const [citationWatermark, setCitationWatermark] =
     useState<EvidenceViewerWatermark | null>(null);
@@ -136,6 +160,8 @@ export function WorkspaceFeature({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const conversationRequestRef = useRef<AbortController | null>(null);
   const liveTurnRequestRef = useRef<AbortController | null>(null);
+  const currentConversationIdRef = useRef(conversationId);
+  currentConversationIdRef.current = conversationId;
   const initialLoading = historyLoading || conversationLoading;
   const canAsk = Boolean(
     query.trim() && !loading && !initialLoading && !reconnectingExecutionId,
@@ -401,6 +427,32 @@ export function WorkspaceFeature({
   async function openConversation(conversationId: string) {
     setMobileHistoryOpen(false);
     onNavigate(workspaceConversationRoute(conversationId));
+  }
+
+  async function archiveConversation(conversation: ConversationSummary) {
+    if (
+      conversation.last_turn_status === "processing" ||
+      archivingConversationId === conversation.conversation_id
+    ) return;
+    setArchivingConversationId(conversation.conversation_id);
+    try {
+      await workspaceApi.archiveWorkspaceConversation(
+        conversation.conversation_id,
+        createIdempotencyKey(),
+      );
+      setConversations((current) => current.filter(
+        (item) => item.conversation_id !== conversation.conversation_id,
+      ));
+      if (currentConversationIdRef.current === conversation.conversation_id) {
+        startNewConversation();
+        onReplace("/workspace");
+      }
+      toast.success(t("workspace.deleteConversationSucceeded"));
+    } catch {
+      toast.error(t("workspace.deleteConversationFailed"));
+    } finally {
+      setArchivingConversationId(null);
+    }
   }
 
   function openKnowledgeLibrary() {
@@ -676,7 +728,9 @@ export function WorkspaceFeature({
             initialLoading={historyLoading}
             loadError={historyLoadError}
             loading={loading}
+            archivingConversationId={archivingConversationId}
             onSelect={openConversation}
+            onDelete={archiveConversation}
             onNew={openNewConversation}
             onOpenKnowledgeLibrary={openKnowledgeLibrary}
             onRetryHistory={() => setHistoryReloadKey((current) => current + 1)}
@@ -709,7 +763,9 @@ export function WorkspaceFeature({
               initialLoading={historyLoading}
               loadError={historyLoadError}
               loading={loading}
+              archivingConversationId={archivingConversationId}
               onSelect={openConversation}
+              onDelete={archiveConversation}
               onNew={openNewConversation}
               onOpenKnowledgeLibrary={openKnowledgeLibrary}
               onRetryHistory={() => setHistoryReloadKey((current) => current + 1)}
@@ -973,7 +1029,9 @@ function ConversationHistorySidebar({
   initialLoading,
   loadError,
   loading,
+  archivingConversationId,
   onSelect,
+  onDelete,
   onNew,
   onOpenKnowledgeLibrary,
   onRetryHistory,
@@ -987,21 +1045,26 @@ function ConversationHistorySidebar({
   initialLoading: boolean;
   loadError: boolean;
   loading: boolean;
+  archivingConversationId: string | null;
   onSelect: (conversationId: string) => void;
+  onDelete: (conversation: ConversationSummary) => void;
   onNew: () => void;
   onOpenKnowledgeLibrary: () => void;
   onRetryHistory: () => void;
   footer?: ReactNode;
 }) {
   const { t } = useTranslation();
+  const [deleteCandidate, setDeleteCandidate] = useState<ConversationSummary | null>(null);
+  const newConversationActive = !knowledgeLibraryActive && activeConversationId === null;
   return (
     <div className={cn("flex h-full min-h-0 flex-col bg-muted/20", className)}>
       {header}
       <div className="flex flex-col gap-1 p-3 pb-1">
         <Button
-          variant={knowledgeLibraryActive ? "ghost" : "secondary"}
+          variant={newConversationActive ? "secondary" : "ghost"}
           className="w-full justify-start"
           onClick={onNew}
+          aria-current={newConversationActive ? "page" : undefined}
         >
           <MessageSquarePlus data-icon="inline-start" />
           {t("workspace.newConversation")}
@@ -1046,31 +1109,72 @@ function ConversationHistorySidebar({
         ) : conversations.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t("workspace.noConversations")}</p>
         ) : null}
-        {!initialLoading && conversations.map((conversation) => (
-          <Button
-            key={conversation.conversation_id}
-            variant={conversation.conversation_id === activeConversationId ? "secondary" : "ghost"}
-            className="h-auto justify-start px-3 py-2 text-left"
-            disabled={loading}
-            onClick={() => onSelect(conversation.conversation_id)}
-          >
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate font-medium">{conversation.title}</span>
-              {conversation.last_turn_status && (
-                <span className="mt-1 flex items-center gap-1.5">
-                  {conversation.last_turn_status === "processing" && (
-                    <Spinner
-                      aria-hidden="true"
-                      className="size-3"
-                      data-slot="conversation-processing-indicator"
-                    />
-                  )}
-                  <StatusBadge {...resultStatusPresentation(conversation.last_turn_status, t)} />
-                </span>
+        {!initialLoading && conversations.map((conversation) => {
+          const active = conversation.conversation_id === activeConversationId;
+          const archiving = conversation.conversation_id === archivingConversationId;
+          return (
+            <div
+              key={conversation.conversation_id}
+              data-slot="workspace-conversation-item"
+              className={cn(
+                "group relative rounded-md transition-colors hover:bg-accent/50 focus-within:bg-accent/50",
+                active && "bg-secondary hover:bg-secondary focus-within:bg-secondary",
               )}
-            </span>
-          </Button>
-        ))}
+            >
+              <Button
+                variant="ghost"
+                className={cn(
+                  "h-auto min-w-0 w-full justify-start px-3 py-2 text-left hover:bg-transparent",
+                  conversation.last_turn_status === "processing" ? "pr-16" : "pr-11",
+                )}
+                disabled={loading || archiving}
+                aria-current={active ? "page" : undefined}
+                onClick={() => onSelect(conversation.conversation_id)}
+              >
+                <span
+                  id={`conversation-title-${conversation.conversation_id}`}
+                  className="truncate font-medium"
+                >
+                  {conversation.title}
+                </span>
+              </Button>
+              {conversation.last_turn_status === "processing" && (
+                <Spinner
+                  className="absolute end-10 top-1/2 size-3 -translate-y-1/2 text-muted-foreground"
+                  data-slot="conversation-processing-indicator"
+                />
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="absolute end-1 top-1/2 -translate-y-1/2 cursor-pointer opacity-0 group-hover:opacity-70 focus-visible:opacity-100 hover:bg-accent hover:opacity-100 data-[state=open]:bg-accent data-[state=open]:opacity-100"
+                    disabled={loading || archiving}
+                    aria-label={t("workspace.conversationActions")}
+                    aria-describedby={`conversation-title-${conversation.conversation_id}`}
+                  >
+                    {archiving ? <Spinner aria-hidden="true" /> : <Ellipsis />}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      className="cursor-pointer hover:bg-destructive/10 hover:text-destructive"
+                      disabled={conversation.last_turn_status === "processing"}
+                      onSelect={() => setDeleteCandidate(conversation)}
+                    >
+                      <Trash2 data-icon="inline-start" />
+                      {t("workspace.deleteConversation")}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          );
+        })}
       </div>
       {footer && (
         <div
@@ -1080,6 +1184,39 @@ function ConversationHistorySidebar({
           {footer}
         </div>
       )}
+      <AlertDialog
+        open={deleteCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteCandidate(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("workspace.deleteConversationConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("workspace.deleteConversationConfirmDescription", {
+                title: deleteCandidate?.title ?? "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="cursor-pointer">
+              {t("workspace.deleteConversationCancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="cursor-pointer"
+              onClick={() => {
+                const conversation = deleteCandidate;
+                setDeleteCandidate(null);
+                if (conversation) onDelete(conversation);
+              }}
+            >
+              {t("workspace.deleteConversationConfirmAction")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -1216,7 +1353,7 @@ function ConversationThread({
                         <BubbleContent className="flex flex-col gap-2">
                           {streamingSegments.length > 0 ? (
                             <AnswerMarkdown
-                              content={streamingSegments.map((segment) => segment.text).join("\n")}
+                              content={joinResponseSegmentMarkdown(streamingSegments)}
                             />
                           ) : (
                             <div className="flex flex-col gap-3">
@@ -1240,7 +1377,7 @@ function ConversationThread({
 
 function answerMarkdownText(turn: ConversationTurn) {
   return turn.answer_text
-    ?? turn.response_segments.map((segment) => segment.text).join("\n");
+    ?? joinResponseSegmentMarkdown(turn.response_segments);
 }
 
 function processingRuntimePhase(turn: ConversationTurn, runtimeProgress: string) {
@@ -1450,7 +1587,7 @@ function mergeStreamingSegment(
     : [...turn.response_segments, segment];
   return {
     ...turn,
-    answer_text: responseSegments.map((current) => current.text).join("\n"),
+    answer_text: joinResponseSegmentMarkdown(responseSegments),
     response_segments: responseSegments,
   };
 }

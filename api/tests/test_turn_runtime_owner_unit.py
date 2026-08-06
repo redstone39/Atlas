@@ -68,7 +68,7 @@ def test_all_persisted_budget_deltas_are_typed_and_nonnegative() -> None:
         "catalog_pages",
         "search_rounds",
         "document_candidate_handles",
-        "unique_evidence_identities",
+        "model_visible_item_identities",
         "tool_tokens",
     } <= fields.keys()
     payload = {
@@ -80,7 +80,7 @@ def test_all_persisted_budget_deltas_are_typed_and_nonnegative() -> None:
         "result_ref": "result-1",
         "result_digest": "a" * 64,
         "document_candidate_handles": [],
-        "unique_evidence_identities": [],
+        "model_visible_item_identities": [],
         "catalog_pages": 0,
         "search_rounds": 0,
         "tool_tokens": 0,

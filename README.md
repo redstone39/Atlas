@@ -67,6 +67,17 @@ inspect the bounded Atlas-owned plan/evaluation trace for incident review. These
 surfaces do not expose Provider reasoning or raw chain-of-thought, and their
 process status and scores are not truth, accuracy, or confidence guarantees.
 
+Conversation history treats prior user text as user-provided context and prior
+assistant text as pending verification. Historical assistant text can help
+resolve dialogue references, but it is not factual evidence for a later answer.
+Evidence, page, visual, and navigation handles share one execution-fixed,
+deduplicated per-turn limit.
+
+Workspace members can remove an idle conversation from their history with the
+Delete action. This archives the conversation; it does not physically delete
+the record. Archived conversations remain available to System Admin through the
+audited administration surface.
+
 ## Local quick start
 
 Requirements:

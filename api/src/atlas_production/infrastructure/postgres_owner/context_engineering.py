@@ -1,4 +1,4 @@
-"""Context-engineering-owned immutable Context/Summary V3 records."""
+"""Context-engineering-owned immutable Context Pack V3 / Summary V4 records."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from atlas_production.infrastructure.persistence.context_engineering import (
 
 SessionFactory = Callable[[], Session]
 CONTEXT_PACK_SCHEMA_VERSION = "context-pack-v3"
-CONTEXT_SUMMARY_SCHEMA_VERSION = "context-summary-v3"
+CONTEXT_SUMMARY_SCHEMA_VERSION = "context-summary-v4"
 
 
 class ContextStoreConflict(RuntimeError):
@@ -115,7 +115,8 @@ class SummarySourceInput:
 class SummaryInput:
     summary_ref: str
     parent_summary_ref: str | None
-    text: str
+    historical_user_context: str
+    assistant_pending_verification_context: str
     token_count: int
     sources: tuple[SummarySourceInput, ...]
 
@@ -167,7 +168,8 @@ class MaterializeContextInput:
 class SummaryRecord:
     summary_ref: str
     parent_summary_ref: str | None
-    text: str
+    historical_user_context: str
+    assistant_pending_verification_context: str
     token_count: int
     sources: tuple[SummarySourceInput, ...]
     digest: str
@@ -229,7 +231,10 @@ def _summary_digest(summary: SummaryInput) -> str:
         {
             "schema_version": CONTEXT_SUMMARY_SCHEMA_VERSION,
             "parent_summary_ref": summary.parent_summary_ref,
-            "text": summary.text,
+            "historical_user_context": summary.historical_user_context,
+            "assistant_pending_verification_context": (
+                summary.assistant_pending_verification_context
+            ),
             "token_count": summary.token_count,
             "sources": [asdict(source) for source in summary.sources],
         }
@@ -270,6 +275,12 @@ def _validate(command: MaterializeContextInput) -> None:
         else set()
     )
     if command.summary is not None:
+        combined_summary = (
+            command.summary.historical_user_context
+            + command.summary.assistant_pending_verification_context
+        )
+        if not 1 <= len(combined_summary) <= 50000:
+            raise ValueError("combined summary content exceeds the hard limit")
         if not 1 <= command.summary.token_count <= 6000:
             raise ValueError("summary token_count exceeds the hard limit")
         if len(summary_representatives) != len(command.summary.sources):
@@ -478,7 +489,12 @@ class PostgresContextEngineeringStore:
                             execution_id=command.execution_id,
                             schema_version=CONTEXT_SUMMARY_SCHEMA_VERSION,
                             parent_summary_ref=command.summary.parent_summary_ref,
-                            text=command.summary.text,
+                            historical_user_context=(
+                                command.summary.historical_user_context
+                            ),
+                            assistant_pending_verification_context=(
+                                command.summary.assistant_pending_verification_context
+                            ),
                             token_count=command.summary.token_count,
                             digest=summary_digest,
                             created_at=_now(),
@@ -722,7 +738,10 @@ class PostgresContextEngineeringStore:
             summary = SummaryRecord(
                 summary_ref=summary_row.summary_ref,
                 parent_summary_ref=summary_row.parent_summary_ref,
-                text=summary_row.text,
+                historical_user_context=summary_row.historical_user_context,
+                assistant_pending_verification_context=(
+                    summary_row.assistant_pending_verification_context
+                ),
                 token_count=summary_row.token_count,
                 sources=self._summary_sources(session, summary_row.summary_ref),
                 digest=summary_row.digest,

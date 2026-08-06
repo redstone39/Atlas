@@ -97,7 +97,12 @@ class ConversationAuditService:
             "audit.admin_opened_bounded_runtime_trace",
         )
         try:
-            snapshot, events, document_discovery = self.workspace.audit_execution(
+            (
+                snapshot,
+                events,
+                document_discovery,
+                _,
+            ) = self.workspace.audit_execution(
                 actor_id=admin.actor_id,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
@@ -118,7 +123,15 @@ class ConversationAuditService:
             applied_guidance_revision=snapshot.applied_guidance_revision,
             applied_guidance_digest=snapshot.applied_guidance_digest,
             budget=BudgetSnapshotV1.model_validate(
-                snapshot.budget.model_dump(exclude={"schema_retries"})
+                snapshot.budget.model_dump(
+                    exclude={"retrieval_repairs", "schema_retries"}
+                )
+            ),
+            model_visible_item_count=snapshot.budget.model_visible_items,
+            model_visible_item_limit=snapshot.policy.max_model_visible_items_per_turn,
+            model_visible_item_exceeded=(
+                snapshot.budget.model_visible_items
+                > snapshot.policy.max_model_visible_items_per_turn
             ),
             document_discovery=document_discovery,
             events=events,

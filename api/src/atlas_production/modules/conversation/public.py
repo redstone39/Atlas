@@ -31,6 +31,26 @@ class ConversationV1(_StrictModel):
     updated_at: AwareDatetime
 
 
+class ConversationArchiveV1(_StrictModel):
+    idempotency_key: Identity
+    expected_next_ordinal: int = Field(ge=1)
+
+
+class ConversationArchiveResultV1(_StrictModel):
+    conversation: ConversationV1
+    audit_event_ref: Identity
+
+
+class ConversationArchiveError(RuntimeError):
+    def __init__(self, reason: Literal["not_found", "conflict"]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class ConversationMembershipConflict(RuntimeError):
+    """A turn membership could not be published against the active conversation."""
+
+
 class ConversationTurnMemberV1(_StrictModel):
     turn_id: Identity
     conversation_id: Identity
@@ -80,6 +100,14 @@ class ConversationOwner(Protocol):
         self, *, actor_id: Identity, command: AppendTurnMemberV1
     ) -> ConversationTurnMemberV1: ...
 
+    def archive(
+        self,
+        *,
+        actor_id: Identity,
+        conversation_id: Identity,
+        command: ConversationArchiveV1,
+    ) -> ConversationArchiveResultV1: ...
+
     def list_for_actor(self, actor_id: Identity) -> list[ConversationV1]: ...
 
     def list_all(self) -> list[ConversationV1]: ...
@@ -107,7 +135,11 @@ class ConversationRetryLineageOwner(Protocol):
 
 __all__ = [
     "AppendTurnMemberV1",
+    "ConversationArchiveError",
+    "ConversationArchiveResultV1",
+    "ConversationArchiveV1",
     "ConversationCreateV1",
+    "ConversationMembershipConflict",
     "ConversationOwner",
     "ConversationRetryLineageOwner",
     "ConversationTurnMemberV1",

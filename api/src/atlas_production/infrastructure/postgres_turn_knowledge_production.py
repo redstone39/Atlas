@@ -8,6 +8,7 @@ values before an Authorization or Retrieval owner transaction can begin.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Callable, Mapping, Protocol, Sequence
@@ -72,6 +73,23 @@ from atlas_production.modules.processing_pipeline.public import (
 
 
 SessionFactory = Callable[[], Session]
+
+
+def _remaining_seconds(deadline_at: datetime | None) -> float | None:
+    if deadline_at is None:
+        return None
+    remaining = (deadline_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        raise TimeoutError("retrieval tool deadline elapsed")
+    return remaining
+
+
+def _apply_statement_deadline(session: Session, deadline_at: datetime | None) -> None:
+    remaining = _remaining_seconds(deadline_at)
+    if remaining is None:
+        return
+    timeout_ms = max(1, int(remaining * 1000))
+    session.execute(select(func.set_config("statement_timeout", f"{timeout_ms}ms", True)))
 
 
 def _digest(value: object) -> str:
@@ -182,9 +200,19 @@ class CurrentResourceState:
 
 
 class ProductionKnowledgeRowSource(Protocol):
-    def grant_authority(self, *, actor_id: str, conversation_id: str) -> GrantAuthorityState: ...
+    def grant_authority(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        deadline_at: datetime | None = None,
+    ) -> GrantAuthorityState: ...
     def grant_resources(
-        self, *, actor_id: str, conversation_id: str
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        deadline_at: datetime | None = None,
     ) -> GrantResourceSnapshot: ...
     def authorized_documents(self, *, actor_id: str) -> tuple[CurrentDocumentResource, ...]: ...
     def authorized_resource_refs(self, *, actor_id: str) -> frozenset[str]: ...
@@ -193,14 +221,18 @@ class ProductionKnowledgeRowSource(Protocol):
     ) -> tuple[ProcessingRevisionPin, ...]: ...
     def resources(self, *, resource_refs: tuple[str, ...]) -> tuple[CurrentDocumentResource, ...]: ...
     def resource_authorizations(
-        self, *, actor_id: str, resource_refs: tuple[str, ...]
+        self,
+        *,
+        actor_id: str,
+        resource_refs: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentResourceState, ...]: ...
     def pinned_documents(
-        self, *, pins: tuple[tuple[str, str, str, str], ...]
+        self, *, pins: tuple[tuple[str, str, str, str], ...], deadline_at: datetime | None = None
     ) -> tuple[CurrentDocumentResource, ...]: ...
-    def evidence(self, *, documents: tuple[CurrentDocumentResource, ...]) -> tuple[CurrentEvidenceResource, ...]: ...
+    def evidence(self, *, documents: tuple[CurrentDocumentResource, ...], deadline_at: datetime | None = None) -> tuple[CurrentEvidenceResource, ...]: ...
     def navigation_map(
-        self, *, document: CurrentDocumentResource
+        self, *, document: CurrentDocumentResource, deadline_at: datetime | None = None
     ) -> DocumentNavigationMapV1 | None: ...
     def lexical_discovery(
         self,
@@ -208,12 +240,14 @@ class ProductionKnowledgeRowSource(Protocol):
         documents: tuple[CurrentDocumentResource, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentDiscoveryMatch, ...]: ...
     def vector_discovery(
         self,
         *,
         documents: tuple[CurrentDocumentResource, ...],
         chunk_ids: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentDiscoveryMatch, ...]: ...
     def read_exact_citation_evidence(
         self,
@@ -238,16 +272,29 @@ class PostgresProductionKnowledgeRowSource:
         self._session_factory = session_factory
         self._filesystem = filesystem
 
-    def grant_authority(self, *, actor_id: str, conversation_id: str) -> GrantAuthorityState:
+    def grant_authority(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        deadline_at: datetime | None = None,
+    ) -> GrantAuthorityState:
         return self.grant_resources(
-            actor_id=actor_id, conversation_id=conversation_id
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            deadline_at=deadline_at,
         ).authority
 
     def grant_resources(
-        self, *, actor_id: str, conversation_id: str
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        deadline_at: datetime | None = None,
     ) -> GrantResourceSnapshot:
         with self._session_factory() as session:
             session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            _apply_statement_deadline(session, deadline_at)
             actor = session.get(AtlasUserRow, actor_id)
             conversation = session.get(AtlasTurnConversationRow, conversation_id)
             authorized = bool(
@@ -507,7 +554,11 @@ class PostgresProductionKnowledgeRowSource:
             return self._current_documents(session, document_ids=matches)
 
     def resource_authorizations(
-        self, *, actor_id: str, resource_refs: tuple[str, ...]
+        self,
+        *,
+        actor_id: str,
+        resource_refs: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentResourceState, ...]:
         wanted = tuple(dict.fromkeys(resource_refs))
         if not wanted:
@@ -516,6 +567,7 @@ class PostgresProductionKnowledgeRowSource:
             # One repeatable-read snapshot closes the ACL/currentness race while
             # remaining fully read-only and lock-free.
             session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            _apply_statement_deadline(session, deadline_at)
             scope = read_effective_document_scope(
                 session, actor_type="user", actor_id=actor_id
             )
@@ -559,7 +611,7 @@ class PostgresProductionKnowledgeRowSource:
             return result
 
     def pinned_documents(
-        self, *, pins: tuple[tuple[str, str, str, str], ...]
+        self, *, pins: tuple[tuple[str, str, str, str], ...], deadline_at: datetime | None = None
     ) -> tuple[CurrentDocumentResource, ...]:
         if not pins:
             return ()
@@ -567,6 +619,7 @@ class PostgresProductionKnowledgeRowSource:
         index_generation_ids = {pin[2] for pin in wanted}
         version_ids = {pin[0] for pin in wanted}
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             versions = session.scalars(
                 select(AtlasDocumentVersionRow).where(
                     AtlasDocumentVersionRow.document_version_id.in_(
@@ -685,7 +738,7 @@ class PostgresProductionKnowledgeRowSource:
             )
         return tuple(result)
 
-    def evidence(self, *, documents: tuple[CurrentDocumentResource, ...]) -> tuple[CurrentEvidenceResource, ...]:
+    def evidence(self, *, documents: tuple[CurrentDocumentResource, ...], deadline_at: datetime | None = None) -> tuple[CurrentEvidenceResource, ...]:
         if not documents:
             return ()
         exact_pairs = {
@@ -693,6 +746,7 @@ class PostgresProductionKnowledgeRowSource:
             for document in documents
         }
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             rows = session.execute(
                 select(
                     AtlasEvidenceRow,
@@ -799,7 +853,7 @@ class PostgresProductionKnowledgeRowSource:
         return tuple(result)
 
     def navigation_map(
-        self, *, document: CurrentDocumentResource
+        self, *, document: CurrentDocumentResource, deadline_at: datetime | None = None
     ) -> DocumentNavigationMapV1 | None:
         prefix = "processing-generation-"
         if not document.processing_generation_ref.startswith(prefix):
@@ -811,6 +865,7 @@ class PostgresProductionKnowledgeRowSource:
         except ValueError:
             return None
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             revision = session.get(
                 AtlasProcessingRevisionRow, document.processing_revision_ref
             )
@@ -897,6 +952,7 @@ class PostgresProductionKnowledgeRowSource:
         documents: tuple[CurrentDocumentResource, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentDiscoveryMatch, ...]:
         if not documents or limit <= 0:
             return ()
@@ -907,6 +963,7 @@ class PostgresProductionKnowledgeRowSource:
         query = func.plainto_tsquery("simple", query_text)
         rank = func.ts_rank_cd(AtlasSearchChunkRow.search_vector, query)
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             rows = session.execute(
                 select(
                     AtlasSearchChunkRow.chunk_id,
@@ -952,6 +1009,7 @@ class PostgresProductionKnowledgeRowSource:
                 (str(chunk_id), str(evidence_id))
                 for chunk_id, evidence_id in rows
             ),
+            deadline_at=deadline_at,
         )
 
     def vector_discovery(
@@ -959,6 +1017,7 @@ class PostgresProductionKnowledgeRowSource:
         *,
         documents: tuple[CurrentDocumentResource, ...],
         chunk_ids: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentDiscoveryMatch, ...]:
         if not documents or not chunk_ids:
             return ()
@@ -967,6 +1026,7 @@ class PostgresProductionKnowledgeRowSource:
             for document in documents
         }
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             rows = session.execute(
                 select(
                     AtlasSearchChunkRow.chunk_id,
@@ -1012,6 +1072,7 @@ class PostgresProductionKnowledgeRowSource:
                 for chunk_id in chunk_ids
                 if chunk_id in by_chunk
             ),
+            deadline_at=deadline_at,
         )
 
     def _ordered_discovery_matches(
@@ -1019,10 +1080,11 @@ class PostgresProductionKnowledgeRowSource:
         *,
         documents: tuple[CurrentDocumentResource, ...],
         chunk_evidence_pairs: tuple[tuple[str, str], ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentDiscoveryMatch, ...]:
         if not chunk_evidence_pairs:
             return ()
-        evidence = self.evidence(documents=documents)
+        evidence = self.evidence(documents=documents, deadline_at=deadline_at)
         by_evidence_id: dict[str, list[CurrentEvidenceResource]] = {}
         for item in evidence:
             by_evidence_id.setdefault(item.evidence_id, []).append(item)
@@ -1377,20 +1439,32 @@ class ProductionCurrentResourceAuthorizationReader:
         self._rows = rows
 
     def current_grant_authorization(
-        self, *, actor_id: str, conversation_id: str
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        deadline_at: datetime | None = None,
     ) -> CurrentGrantAuthorizationSnapshotV1:
         state = self._rows.grant_authority(
-            actor_id=actor_id, conversation_id=conversation_id
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            deadline_at=deadline_at,
         )
         return CurrentGrantAuthorizationSnapshotV1(**asdict(state))
 
     def current_resource_authorizations(
-        self, *, actor_id: str, resource_refs: tuple[str, ...]
+        self,
+        *,
+        actor_id: str,
+        resource_refs: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> tuple[CurrentResourceAuthorizationSnapshotV1, ...]:
         states = {
             state.resource_ref: state
             for state in self._rows.resource_authorizations(
-                actor_id=actor_id, resource_refs=resource_refs
+                actor_id=actor_id,
+                resource_refs=resource_refs,
+                deadline_at=deadline_at,
             )
         }
         digest = _digest(
@@ -1518,6 +1592,7 @@ class PostgresVisualPageRenderer:
         document: CurrentDocumentResource,
         page_number: int,
         normalized_bbox: tuple[int, int, int, int],
+        deadline_at: datetime | None = None,
     ) -> BackendVisualImage:
         prefix = "processing-generation-"
         if (
@@ -1531,6 +1606,7 @@ class PostgresVisualPageRenderer:
         except ValueError:
             raise OSError("visual_page_unavailable") from None
         with self._session_factory() as session:
+            _apply_statement_deadline(session, deadline_at)
             page = session.scalar(
                 select(AtlasEvidencePageArtifactRow).where(
                     AtlasEvidencePageArtifactRow.processing_revision_id
@@ -1573,14 +1649,18 @@ class PostgresVisualPageRenderer:
             opaque_ref, expected_size=expected_size
         ) as stream:
             content = stream.read(expected_size + 1)
+        _remaining_seconds(deadline_at)
         if (
             len(content) != expected_size
             or hashlib.sha256(content).hexdigest() != expected_digest
         ):
             raise OSError("visual_page_integrity_failed")
         rendered = OfficeRendererAdapter().raster_pdf_page(
-            content, normalized_bbox=normalized_bbox
+            content,
+            normalized_bbox=normalized_bbox,
+            timeout_seconds=_remaining_seconds(deadline_at),
         )
+        _remaining_seconds(deadline_at)
         return BackendVisualImage(
             content=rendered.content,
             digest=rendered.sha256,
@@ -1606,8 +1686,11 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
         documents: tuple[BackendCatalogDocument, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendDiscoveryHit]:
-        current, handles_by_id = self._current_documents(documents)
+        current, handles_by_id = self._current_documents(
+            documents, deadline_at=deadline_at
+        )
         if not current:
             return ()
         return tuple(
@@ -1616,6 +1699,7 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
                 documents=current,
                 query_text=query_text,
                 limit=limit,
+                deadline_at=deadline_at,
             )
             if match.evidence.document_id in handles_by_id
         )
@@ -1626,10 +1710,13 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
         documents: tuple[BackendCatalogDocument, ...],
         query_text: str,
         limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendDiscoveryHit]:
         if self._vector_index is None:
             raise OSError("vector_index_unavailable")
-        current, handles_by_id = self._current_documents(documents)
+        current, handles_by_id = self._current_documents(
+            documents, deadline_at=deadline_at
+        )
         if not current:
             return ()
         exact_pairs = {
@@ -1643,10 +1730,12 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
             query_text,
             limit=limit,
             revision_index_pairs=exact_pairs,
+            timeout_seconds=_remaining_seconds(deadline_at),
         )
         matches = self._rows.vector_discovery(
             documents=current,
             chunk_ids=tuple(hit.chunk_id for hit in hits),
+            deadline_at=deadline_at,
         )
         return tuple(
             self._discovery_hit(match, handles_by_id)
@@ -1657,12 +1746,14 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
     def search(
         self, *, documents: tuple[BackendCatalogDocument, ...], query_text: str,
         required_modalities: tuple[str, ...], facet_hints: Mapping[str, object], limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]:
         del facet_hints
-        evidence = self._eligible(documents)
+        evidence = self._eligible(documents, deadline_at=deadline_at)
         terms = tuple(term for term in query_text.casefold().split() if term)
         ranked = []
         for item, document_handle in evidence:
+            _remaining_seconds(deadline_at)
             if required_modalities and item.modality not in required_modalities:
                 continue
             haystack = f"{item.locator_label} {item.snippet} {item.content}".casefold()
@@ -1673,7 +1764,7 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
         return tuple(self._backend(item, handle) for _, _, item, handle in ranked[:limit])
 
     def navigation_map(
-        self, *, document: BackendCatalogDocument
+        self, *, document: BackendCatalogDocument, deadline_at: datetime | None = None
     ) -> DocumentNavigationMapV1 | None:
         current = self._rows.pinned_documents(
             pins=(
@@ -1683,19 +1774,23 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
                     document.index_generation_ref,
                     document.manifest_digest,
                 ),
-            )
+            ),
+            deadline_at=deadline_at,
         )
         if len(current) != 1 or current[0].lifecycle_epoch != document.lifecycle_epoch:
             return None
-        return self._rows.navigation_map(document=current[0])
+        return self._rows.navigation_map(
+            document=current[0], deadline_at=deadline_at
+        )
 
     def inspect(
-        self, *, documents: tuple[BackendCatalogDocument, ...], evidence_refs: tuple[str, ...]
+        self, *, documents: tuple[BackendCatalogDocument, ...], evidence_refs: tuple[str, ...],
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]:
         wanted = set(evidence_refs)
         return tuple(
             self._backend(item, handle)
-            for item, handle in self._eligible(documents)
+            for item, handle in self._eligible(documents, deadline_at=deadline_at)
             if item.evidence_ref in wanted
         )
 
@@ -1742,6 +1837,7 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
         document: BackendCatalogDocument,
         page_number: int,
         normalized_bbox: tuple[int, int, int, int],
+        deadline_at: datetime | None = None,
     ) -> BackendVisualImage:
         if self._visual_pages is None:
             raise OSError("visual_page_renderer_unavailable")
@@ -1751,7 +1847,8 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
                 document.processing_generation_ref,
                 document.index_generation_ref,
                 document.manifest_digest,
-            ),)
+            ),),
+            deadline_at=deadline_at,
         )
         if len(current) != 1 or current[0].lifecycle_epoch != document.lifecycle_epoch:
             raise OSError("visual_page_currentness_changed")
@@ -1759,16 +1856,19 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
             document=current[0],
             page_number=page_number,
             normalized_bbox=normalized_bbox,
+            deadline_at=deadline_at,
         )
 
     def expand(
         self, *, documents: tuple[BackendCatalogDocument, ...],
         anchor_evidence_refs: tuple[str, ...], direction: str, limit: int,
+        deadline_at: datetime | None = None,
     ) -> Sequence[BackendEvidence]:
-        eligible = self._eligible(documents)
+        eligible = self._eligible(documents, deadline_at=deadline_at)
         anchors = {item.evidence_ref: item for item, _ in eligible if item.evidence_ref in anchor_evidence_refs}
         selected: list[tuple[CurrentEvidenceResource, str]] = []
         for item, handle in eligible:
+            _remaining_seconds(deadline_at)
             for anchor in anchors.values():
                 if item.document_id != anchor.document_id or item.evidence_ref == anchor.evidence_ref:
                     continue
@@ -1784,20 +1884,29 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
         return tuple(self._backend(item, handle) for item, handle in selected[:limit])
 
     def _eligible(
-        self, documents: tuple[BackendCatalogDocument, ...]
+        self,
+        documents: tuple[BackendCatalogDocument, ...],
+        *,
+        deadline_at: datetime | None = None,
     ) -> tuple[tuple[CurrentEvidenceResource, str], ...]:
-        current, handles_by_id = self._current_documents(documents)
+        current, handles_by_id = self._current_documents(
+            documents, deadline_at=deadline_at
+        )
         if not current:
             return ()
         return tuple(
             (item, handles_by_id[item.document_id])
-            for item in self._rows.evidence(documents=current)
+            for item in self._rows.evidence(
+                documents=current, deadline_at=deadline_at
+            )
             if item.document_id in handles_by_id
         )
 
     def _current_documents(
         self,
         documents: tuple[BackendCatalogDocument, ...],
+        *,
+        deadline_at: datetime | None = None,
     ) -> tuple[tuple[CurrentDocumentResource, ...], dict[str, str]]:
         current = self._rows.pinned_documents(
             pins=tuple(
@@ -1808,7 +1917,8 @@ class ProductionKnowledgeRetrievalBackend(KnowledgeRetrievalBackend):
                     document.manifest_digest,
                 )
                 for document in documents
-            )
+            ),
+            deadline_at=deadline_at,
         )
         current_by_pin = {
             (

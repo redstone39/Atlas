@@ -76,12 +76,15 @@ class RoutePolicyV1(_StrictModel):
     max_tool_invocations: int = Field(default=12, ge=0)
     max_catalog_pages: int = Field(default=5, ge=0)
     max_search_rounds: int = Field(default=6, ge=0)
-    max_unique_evidence: int = Field(default=40, ge=0)
+    max_model_visible_items_per_turn: int = Field(default=40, ge=0)
+    max_retrieval_repairs: int = Field(default=3, ge=1, le=3)
+    max_selected_anchor_pages_per_round: int = Field(default=20, ge=1, le=20)
     max_provider_invocations: int = Field(default=26, ge=6)
     max_reasoning_revision_cycles: int = Field(default=2, ge=0, le=3)
     max_schema_retries_per_turn: int = Field(default=1, ge=1, le=3)
     context_token_budget: int = Field(default=272000, ge=1)
     tool_token_budget: int = Field(default=64000, ge=1)
+    tool_execution_timeout_seconds: int = Field(default=45, ge=1)
     deadline_seconds: int = Field(default=240, ge=1)
 
     @model_validator(mode="after")
@@ -91,6 +94,8 @@ class RoutePolicyV1(_StrictModel):
             raise ValueError(
                 "provider invocation budget must cover tools, planning, evaluation, revisions, and terminal actions"
             )
+        if self.tool_execution_timeout_seconds > self.deadline_seconds:
+            raise ValueError("turn deadline is shorter than tool timeout")
         return self
 
 
@@ -344,10 +349,11 @@ class BudgetSnapshotV1(_StrictModel):
     catalog_pages: int = Field(ge=0)
     document_candidates: int = Field(ge=0)
     search_rounds: int = Field(ge=0)
-    unique_evidence: int = Field(ge=0)
+    model_visible_items: int = Field(ge=0)
     provider_invocations: int = Field(ge=0)
     context_tokens: int = Field(ge=0)
     tool_tokens: int = Field(ge=0)
+    retrieval_repairs: int = Field(ge=0)
     schema_retries: int = Field(ge=0)
 
 
@@ -519,7 +525,7 @@ class BeginToolInvocationV1(_StrictModel):
     reserve_catalog_pages: int = Field(ge=0)
     reserve_document_candidates: int = Field(ge=0)
     reserve_search_rounds: int = Field(ge=0)
-    reserve_unique_evidence: int = Field(ge=0)
+    reserve_model_visible_items: int = Field(ge=0)
     reserve_tool_tokens: int = Field(ge=0)
 
 
@@ -532,7 +538,9 @@ class CompleteToolInvocationV1(_StrictModel):
     result_ref: OpaqueRef
     result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     document_candidate_handles: list[Identity] = Field(max_length=20)
-    unique_evidence_identities: list[Identity] = Field(max_length=20)
+    # One bounded tool result can expose at most 20 entries, each carrying its
+    # own handle plus an optional page handle.
+    model_visible_item_identities: list[Identity] = Field(max_length=40)
     catalog_pages: int = Field(ge=0)
     search_rounds: int = Field(ge=0)
     tool_tokens: int = Field(ge=0)

@@ -526,7 +526,7 @@ class _DeclaredSubsetStore:
             ],
         }
 
-    def get_catalog(self, *, execution_id, catalog_ref):
+    def get_catalog(self, *, execution_id, catalog_ref, deadline_at=None):
         return SimpleNamespace(execution_id=execution_id, catalog_ref=catalog_ref)
 
     def resolve_claimed_handles(self, *, execution_id, catalog_ref, handles):
@@ -938,6 +938,9 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_ordered_output() -> No
     system_prompt = request.messages[0].content
     assert isinstance(system_prompt, str)
     assert "soft evidence-alignment assessor" in system_prompt
+    assert "evaluate both evidence alignment and evidence coverage" in system_prompt
+    assert "every material, externally verifiable domain claim" in system_prompt
+    assert "sounds familiar, plausible, or like common knowledge" in system_prompt
     assert (
         "faithful paraphrase, summary, comparison, or direct grounded conclusion"
         in system_prompt
@@ -970,8 +973,18 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_ordered_output() -> No
         "does not repair an unsupported or overbroad claim"
         in system_prompt
     )
-    assert "crystal" not in system_prompt.lower()
+    assert "Such a grounded inference may be aligned" in system_prompt
+    assert "every material premise supported" in system_prompt
+    assert "does not replace an authoritative decision" in system_prompt
+    assert "operational recommendations require evidence coverage" in system_prompt
+    assert "A related citation does not support a conclusion" in system_prompt
+    assert "A request to confirm later does not make" in system_prompt
+    assert "operationalizes one side of a visible unresolved conflict" in system_prompt
+    assert "other evidence-required claim with no supporting evidence" in system_prompt
+    assert "evidence-backed inference from unsupported speculation" in system_prompt
+    assert "private_term_gamma" not in system_prompt.lower()
     assert "oscillator" not in system_prompt.lower()
+    assert "synthetic value beta" not in system_prompt.lower()
     assert "applies the evidence to the wrong subject or referent" in system_prompt
     assert "Do not require verbatim wording" in system_prompt
     assert (
@@ -1032,7 +1045,6 @@ def test_evaluator_invalid_output_retries_with_shared_turn_budget() -> None:
     assert routing.calls == 2
     assert runtime.snapshot_value.budget.schema_retries == 1
     assert routing.failure_codes == []
-    assert len(routing.successes) == 2
 
 
 def test_evaluator_schema_repair_does_not_exceed_provider_invocation_budget() -> None:
@@ -1217,7 +1229,6 @@ def test_evaluator_rejects_ordered_outcome_count_mismatch(item_outcomes) -> None
     assert error.value.reason_code == "invalid_output"
     assert routing.calls == 1
     assert routing.failure_codes == []
-    assert len(routing.successes) == 1
 
 
 @pytest.mark.parametrize(

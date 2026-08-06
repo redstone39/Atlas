@@ -16,7 +16,7 @@ from atlas_production.modules.context_engineering.public import (
     ContextExchangeV3,
     ContextLineageEdgeV3,
     ContextMessageV3,
-    ContextSummaryInputV3,
+    ContextSummaryInputV4,
     ContextSummarySourceV3,
     ModelUserInputV3,
     ModelUserTextSegmentV3,
@@ -52,7 +52,7 @@ def _exchange(index: int) -> ContextExchangeV3:
 def _command(
     exchanges: list[ContextExchangeV3],
     *,
-    summary: ContextSummaryInputV3 | None = None,
+    summary: ContextSummaryInputV4 | None = None,
 ) -> MaterializeContextPackV3:
     edges = [
         ContextLineageEdgeV3(
@@ -116,7 +116,7 @@ class _Generator:
 
     def generate(self, **kwargs):
         self.calls.append(kwargs)
-        return "compacted summary", 3
+        return "compacted user summary", "compacted assistant summary", 6
 
 
 class _Projector:
@@ -154,9 +154,10 @@ def test_85_percent_compacts_eligible_history_and_keeps_last_two_exchanges() -> 
         representative_content_digest="0" * 64,
         direct_document_ids=["document-0"],
     )
-    parent = ContextSummaryInputV3(
+    parent = ContextSummaryInputV4(
         summary_ref="summary-0",
-        text="old summary",
+        historical_user_context="old user summary",
+        assistant_pending_verification_context="old assistant summary",
         token_count=2,
         sources=[old_source],
     )
@@ -340,42 +341,60 @@ def test_raw_context_above_hard_cap_still_compacts_before_enforcement() -> None:
 
 
 def _completed(
-    summary: str,
+    historical_user_context: str,
+    assistant_pending_verification_context: str = "",
     *,
     finish_reason: str = "stop",
     usage: dict[str, int] | None = None,
 ):
+    content = "\n".join(
+        value
+        for value in (
+            historical_user_context,
+            assistant_pending_verification_context,
+        )
+        if value
+    )
     return ProviderCompleted(
         provider_request_id="provider-summary",
         model_ref="model-1",
         finish_reason=finish_reason,
         usage=usage or {},
-        output={"summary": summary},
-        assistant_message=ProviderAssistantMessage(content=summary),
+        output={
+            "historical_user_context": historical_user_context,
+            "assistant_pending_verification_context": (
+                assistant_pending_verification_context
+            ),
+        },
+        assistant_message=ProviderAssistantMessage(content=content),
     )
 
 
 def test_summary_prompt_separates_system_rules_from_untrusted_history() -> None:
-    routing = _Routing([_completed("safe summary")])
+    routing = _Routing([_completed("safe user summary", "pending assistant summary")])
     generator = ProviderContextSummaryGenerator(
         routing, record_invocations=False
     )
 
-    text, token_count = generator.generate(
+    user_text, assistant_text, token_count = generator.generate(
         execution_id="exec-1",
         route=Runtime().snapshot_value.route,
         parent_summary=None,
         exchanges=[_exchange(1)],
     )
 
-    assert text == "safe summary"
+    assert user_text == "safe user summary"
+    assert assistant_text == "pending assistant summary"
     assert token_count > 0
     request = routing.requests[0]
     assert isinstance(request.messages[0], ProviderSystemMessage)
     assert isinstance(request.messages[1], ProviderUserMessage)
     assert request.max_output_tokens == 6000
-    assert "untrusted" in request.messages[0].content
+    assert "pending_verification" in request.messages[0].content
+    assert "dialogue_context_only" in request.messages[0].content
+    assert "user_provided_history" in request.messages[0].content
     assert "untrusted_raw_transcript" in request.messages[1].content
+    assert "pending_verification" in request.messages[1].content
     summary_wire = "\n".join(
         str(message.content) for message in request.messages
     )
@@ -425,14 +444,15 @@ def test_summary_output_over_6000_tokens_is_rejected_and_retried() -> None:
         routing, runtime, record_invocations=False
     )
 
-    text, token_count = generator.generate(
+    user_text, assistant_text, token_count = generator.generate(
         execution_id="exec-1",
         route=runtime.snapshot_value.route,
         parent_summary=None,
         exchanges=[_exchange(1)],
     )
 
-    assert text == "bounded summary"
+    assert user_text == "bounded summary"
+    assert assistant_text == ""
     assert token_count <= 6000
     assert len(routing.requests) == 2
     assert runtime.snapshot_value.budget.schema_retries == 1
@@ -453,14 +473,17 @@ def test_completed_invalid_summary_attempts_preserve_usage_for_conversation_quot
     )
     runtime = Runtime()
 
-    text, _ = ProviderContextSummaryGenerator(routing, runtime).generate(
+    user_text, assistant_text, _ = ProviderContextSummaryGenerator(
+        routing, runtime
+    ).generate(
         execution_id="exec-1",
         route=runtime.snapshot_value.route,
         parent_summary=None,
         exchanges=[_exchange(1)],
     )
 
-    assert text == "bounded summary"
+    assert user_text == "bounded summary"
+    assert assistant_text == ""
     assert routing.successes == [
         {"input_tokens": 11, "output_tokens": 7},
         {"input_tokens": 5, "output_tokens": 3},
