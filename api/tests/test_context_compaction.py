@@ -29,6 +29,7 @@ from atlas_production.modules.model_routing.public import (
     ProviderSystemMessage,
     ProviderUserMessage,
 )
+from atlas_production.modules.turn_runtime.public import RoutePolicyV1
 
 from tests.test_turn_model_loop import Runtime
 from tests.answer_behavior_fixtures import NullAnswerBehavior
@@ -97,17 +98,19 @@ class _Sizer:
     def __init__(self, tokens: int | list[int]) -> None:
         self.tokens = [tokens] if isinstance(tokens, int) else tokens
         self.calls = 0
+        self.model_inputs = []
 
-    def _next(self) -> int:
+    def _next(self, model_input) -> int:
+        self.model_inputs.append(model_input)
         value = self.tokens[min(self.calls, len(self.tokens) - 1)]
         self.calls += 1
         return value
 
-    def estimate_initial_request_tokens_unchecked(self, _model_input) -> int:
-        return self._next()
+    def estimate_initial_request_tokens_unchecked(self, model_input) -> int:
+        return self._next(model_input)
 
-    def estimate_initial_request_tokens(self, _model_input) -> int:
-        return self._next()
+    def estimate_initial_request_tokens(self, model_input) -> int:
+        return self._next(model_input)
 
 
 class _Generator:
@@ -145,6 +148,25 @@ def test_below_85_percent_reuses_uncompacted_tail() -> None:
 
     assert prepared == command
     assert generator.calls == []
+
+
+def test_initial_projection_uses_execution_retrieval_repair_remaining() -> None:
+    command = _command([_exchange(index) for index in range(1, 5)])
+    sizer = _Sizer(90000)
+    compactor = SynchronousContextCompactor(
+        turn_model=sizer,
+        summary_generator=_Generator(),
+        input_projector=_Projector(),
+        answer_behavior=NullAnswerBehavior(),
+    )
+    snapshot = Runtime(
+        policy=RoutePolicyV1(max_retrieval_repairs=3)
+    ).snapshot_value
+
+    prepared = compactor.prepare(command, snapshot, catalog_document_count=2)
+
+    assert prepared == command
+    assert sizer.model_inputs[0].capabilities.contract_repair_remaining == 3
 
 
 def test_85_percent_compacts_eligible_history_and_keeps_last_two_exchanges() -> None:

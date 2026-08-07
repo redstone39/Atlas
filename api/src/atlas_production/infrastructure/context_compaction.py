@@ -438,7 +438,10 @@ def _turn_input(
             snapshot,
             catalog_document_count=catalog_document_count,
             observations=[],
-            contract_repair_remaining=1,
+            contract_repair_remaining=(
+                snapshot.policy.max_retrieval_repairs
+                - snapshot.budget.retrieval_repairs
+            ),
         ),
     )
 
