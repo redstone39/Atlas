@@ -40,6 +40,22 @@ credentials must remain readable. Losing them makes those credentials
 unrecoverable. Provider API keys are entered through System Admin; do not add
 Provider-specific keys to `.env`.
 
+## Provider connections
+
+System Admin stores one of three connection profiles:
+
+- `openai_compatible`: an HTTPS base URL, or loopback HTTP for local evaluation;
+- `azure_openai`: a pathless Azure resource root plus a required API protocol
+  version such as `<api-version>`;
+- `anthropic`: the fixed `https://api.anthropic.com` endpoint.
+
+The endpoint, profile, and nullable Azure API version are persisted with the
+connection. The API key is encrypted with the credential master key. Each
+attempt passes these values directly to the in-process LiteLLM carrier; no
+Provider-specific environment credential or global LiteLLM setting is used.
+Route-less execution uses only the eligible route explicitly marked as default.
+Changing or recovering a connection does not implicitly select another route.
+
 ## Reasoning route policy
 
 Model routes carry the bounded runtime policy used by both standard and deep
@@ -102,7 +118,10 @@ usage with the current route.
   `ATLAS_ALLOW_UNSIGNED_PLUGINS`
 - Offline caches: `ATLAS_FASTEMBED_CACHE`, `TIKTOKEN_CACHE_DIR`,
   `ATLAS_EMBEDDING_OFFLINE`
-- Azure transport only: `ATLAS_AZURE_PROXY_URL`
+- Process proxy for API and `celery-processing`: uppercase `HTTP_PROXY`,
+  `HTTPS_PROXY`, and `NO_PROXY`. The Portainer compositions prepend
+  `::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web`
+  to `NO_PROXY`; lowercase proxy inputs are ignored.
 
 The Compose files provide local defaults for internal service addresses.
 `/api/v1/ops/readiness` reports safe blockers without returning credentials or

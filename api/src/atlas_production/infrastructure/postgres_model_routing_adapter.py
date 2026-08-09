@@ -71,7 +71,7 @@ from atlas_production.providers import (
 from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 
 
-ProviderAdapterFactory = Callable[[str, str, str], object]
+ProviderAdapterFactory = Callable[[ProviderConnectionRecord, str], object]
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -276,7 +276,7 @@ class PostgresModelRoutingAdapter:
             raise ModelRoutingError(exc.code, exc.message_code, 503) from exc
 
     def _provider(self, connection: ProviderConnectionRecord, api_key: str):
-        return self.provider_adapter_factory(connection.provider_type, connection.endpoint_url, api_key)
+        return self.provider_adapter_factory(deepcopy(connection), api_key)
 
     def discover_models(self, connection: ProviderConnectionRecord, api_key: str) -> list[str]:
         discover = getattr(self._provider(connection, api_key), "discover_models", None)

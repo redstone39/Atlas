@@ -13,7 +13,7 @@ from atlas_production.providers import (
     NativeJsonSchema,
     ProviderError,
     ROUTE_READINESS_SCHEMA,
-    normalize_provider_endpoint,
+    normalize_provider_connection,
 )
 from .provider_contracts import ProviderConversationOutcome, ProviderConversationRequest
 from atlas_production.shared.public import utc_now_iso
@@ -188,7 +188,11 @@ class ModelRoutingService:
         if not connection_id or not payload.display_name.strip() or not api_key:
             self._invalid("provider.connection_fields_are_invalid")
         try:
-            endpoint = normalize_provider_endpoint(payload.provider_type, payload.endpoint_url)
+            endpoint, api_version = normalize_provider_connection(
+                payload.provider_type,
+                payload.endpoint_url,
+                payload.api_version,
+            )
         except ProviderError as exc:
             self._provider_error(exc)
         operation = "provider_connection_create"
@@ -217,6 +221,7 @@ class ModelRoutingService:
                 display_name=payload.display_name.strip(),
                 provider_type=payload.provider_type,
                 endpoint_url=endpoint,
+                api_version=api_version,
                 status="configured",
                 enabled=False,
                 created_at=now,
@@ -252,6 +257,7 @@ class ModelRoutingService:
                     "discovery_status": (
                         "available" if discovery_available else "unavailable"
                     ),
+                    "api_version": connection.api_version,
                     "request_id": payload.idempotency_key,
                 },
             )
@@ -308,12 +314,24 @@ class ModelRoutingService:
                 if not payload.display_name.strip():
                     self._invalid("provider.connection_display_name_is_invalid")
                 candidate.display_name = payload.display_name.strip()
-            endpoint_changed = payload.endpoint_url is not None
-            if payload.endpoint_url is not None:
+            connection_fields_supplied = (
+                payload.endpoint_url is not None
+                or "api_version" in payload.model_fields_set
+            )
+            if "api_version" in payload.model_fields_set:
+                candidate.api_version = payload.api_version
+            if connection_fields_supplied:
                 try:
-                    candidate.endpoint_url = normalize_provider_endpoint(
-                        candidate.provider_type,
-                        payload.endpoint_url,
+                    candidate.endpoint_url, candidate.api_version = (
+                        normalize_provider_connection(
+                            candidate.provider_type,
+                            (
+                                payload.endpoint_url
+                                if payload.endpoint_url is not None
+                                else candidate.endpoint_url
+                            ),
+                            candidate.api_version,
+                        )
                     )
                 except ProviderError as exc:
                     self._provider_error(exc)
@@ -323,7 +341,7 @@ class ModelRoutingService:
             key_changed = bool(supplied_key)
             enabled_changed = payload.enabled is not None and payload.enabled != current.enabled
             secret = self.repository.get_secret(connection_id)
-            validation_needed = endpoint_changed or key_changed or (
+            validation_needed = connection_fields_supplied or key_changed or (
                 enabled_changed and payload.enabled is True
             )
             if validation_needed and not supplied_key and secret is None:
@@ -337,7 +355,14 @@ class ModelRoutingService:
                 api_key = self.repository.decrypt_secret(current, secret)
             updated_routes: list[ModelRouteRecord] = []
             now = utc_now_iso()
-            if validation_needed:
+            manual_profile_without_enabled_route = (
+                candidate.provider_type in {"azure_openai", "anthropic"}
+                and not any(route.enabled for route in linked)
+            )
+            if manual_profile_without_enabled_route:
+                candidate.status = "configured"
+                candidate.enabled = False
+            elif validation_needed:
                 try:
                     self._validate_connection(candidate, api_key, linked)
                 except ProviderError:
@@ -361,7 +386,10 @@ class ModelRoutingService:
                         route.last_tested_at = now
                         route.revision += 1
                         updated_routes.append(route)
-            if payload.enabled is False:
+            if manual_profile_without_enabled_route:
+                candidate.enabled = False
+                candidate.status = "configured"
+            elif payload.enabled is False:
                 candidate.enabled = False
                 candidate.status = "disabled"
             elif payload.enabled is True and not validation_needed:
@@ -419,6 +447,7 @@ class ModelRoutingService:
                     "connection_id": connection_id,
                     "request_id": payload.idempotency_key,
                     "revision": candidate.revision,
+                    "api_version": candidate.api_version,
                 },
             )
             result = self._commit_with_replay(
@@ -961,14 +990,8 @@ class ModelRoutingService:
         operation = "model_route_test"
         target_ref = f"model-route:{route_id}"
         initial = self._route(route_id)
-        connection_ids = sorted(
-            {
-                initial.connection_id,
-                *(route.connection_id for route in self.repository.list_routes()),
-            }
-        )
         with self.repository.mutation_scope(
-            self._lock_ids(connection_ids, payload.idempotency_key)
+            self._lock_ids([initial.connection_id], payload.idempotency_key)
         ):
             replayed = self._replayed(
                 idempotency_key=payload.idempotency_key,
@@ -999,27 +1022,6 @@ class ModelRoutingService:
             route.last_tested_at = now
             route.revision += 1
             routes = [route]
-            if route.status == "test_failed" and route.is_default:
-                fallback = next(
-                    (
-                        candidate
-                        for candidate in sorted(
-                            self.repository.list_routes(),
-                            key=lambda item: item.route_id,
-                        )
-                        if candidate.route_id != route.route_id
-                        and candidate.enabled
-                        and candidate.status == "test_passed"
-                        and self._has_current_readiness_proof(candidate)
-                        and self._runtime_eligible_fallback(candidate)
-                    ),
-                    None,
-                )
-                if fallback is not None:
-                    route.is_default = False
-                    fallback.is_default = True
-                    fallback.revision += 1
-                    routes.append(fallback)
             audit = ModelRouteAuditCommand(
                 event_type=event_type,
                 actor_id=actor.actor_id,
@@ -1066,7 +1068,7 @@ class ModelRoutingService:
             or route.status != "test_passed"
             or not route.supports_vision
             or not self._has_current_readiness_proof(route)
-            or not self._runtime_eligible_fallback(route)
+            or not self._runtime_eligible(route)
         ):
             return None
         return route
@@ -1266,7 +1268,7 @@ class ModelRoutingService:
             connections=[], secrets=[], routes=[], audits=[audit]
         )[0]
 
-    def _runtime_eligible_fallback(self, route: ModelRouteRecord) -> bool:
+    def _runtime_eligible(self, route: ModelRouteRecord) -> bool:
         connection = self.repository.get_connection(route.connection_id)
         secret = self.repository.get_secret(route.connection_id)
         if (
@@ -1373,6 +1375,7 @@ class ModelRoutingService:
             display_name=connection.display_name,
             provider_type=connection.provider_type,
             endpoint_url=connection.endpoint_url,
+            api_version=connection.api_version,
             credential_configured=(
                 self.repository.get_secret(connection.connection_id) is not None
                 if credential_configured is None

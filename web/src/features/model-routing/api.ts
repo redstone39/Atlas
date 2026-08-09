@@ -44,6 +44,7 @@ export const modelRoutingApi = {
           display_name: input.displayName,
           provider_type: input.providerType,
           endpoint_url: input.endpointUrl,
+          api_version: input.apiVersion,
           api_key: input.apiKey,
           idempotency_key: idempotencyKey(`provider-connection-${input.connectionId}`),
         }),
@@ -56,6 +57,7 @@ export const modelRoutingApi = {
     };
     if (input.displayName !== undefined) body.display_name = input.displayName;
     if (input.endpointUrl !== undefined) body.endpoint_url = input.endpointUrl;
+    if (input.apiVersion !== undefined) body.api_version = input.apiVersion;
     if (input.apiKey) body.api_key = input.apiKey;
     if (input.enabled !== undefined) body.enabled = input.enabled;
     return requestJson<ProviderConnectionStatus>(

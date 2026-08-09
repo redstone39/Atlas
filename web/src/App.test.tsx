@@ -2917,6 +2917,75 @@ describe("Atlas production web", () => {
     expect(second).toHaveAttribute("data-state", "checked");
   });
 
+  it("/admin/models creates Anthropic and versioned Azure connections", async () => {
+    window.history.pushState({}, "", "/admin/models");
+    mockApi(adminSession, incompleteReadiness);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Models" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    let dialog = await screen.findByRole("dialog");
+    await chooseDialogOption(dialog, "Provider type", "Azure OpenAI");
+    expect(within(dialog).getByLabelText("Endpoint URL")).toHaveValue(
+      "https://example.openai.azure.com",
+    );
+    const azureVersion = within(dialog).getByLabelText("API version");
+    expect(azureVersion).toBeRequired();
+    fireEvent.change(within(dialog).getByLabelText("Connection name"), {
+      target: { value: "Azure versioned" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("API key"), {
+      target: { value: "azure-secret-canary" },
+    });
+    expect(within(dialog).getByRole("button", { name: "Save connection" })).toBeDisabled();
+    fireEvent.change(azureVersion, { target: { value: "2024-10-21" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save connection" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
+    dialog = await screen.findByRole("dialog");
+    await chooseDialogOption(dialog, "Provider type", "Anthropic");
+    expect(within(dialog).queryByLabelText("API version")).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Endpoint URL")).toHaveValue(
+      "https://api.anthropic.com",
+    );
+    fireEvent.change(within(dialog).getByLabelText("Connection name"), {
+      target: { value: "Anthropic production" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("API key"), {
+      target: { value: "anthropic-secret-canary" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save connection" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    const createBodies = vi.mocked(global.fetch).mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === "/api/v1/admin/config/provider-connections" &&
+          init?.method === "POST",
+      )
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    expect(createBodies).toEqual([
+      expect.objectContaining({
+        provider_type: "azure_openai",
+        endpoint_url: "https://example.openai.azure.com",
+        api_version: "2024-10-21",
+        api_key: "azure-secret-canary",
+      }),
+      expect.objectContaining({
+        provider_type: "anthropic",
+        endpoint_url: "https://api.anthropic.com",
+        api_key: "anthropic-secret-canary",
+      }),
+    ]);
+    expect(createBodies[1]).not.toHaveProperty("api_version");
+    expect(await screen.findByText("Anthropic production")).toBeInTheDocument();
+    const azureCard = (await screen.findByText("Azure versioned")).closest<HTMLElement>(
+      '[data-slot="card"]',
+    )!;
+    expect(within(azureCard).getByText(/API version: 2024-10-21/)).toBeInTheDocument();
+  });
+
   it("/admin/models shows the canonical credential encryption error in zh-TW", async () => {
     window.history.pushState({}, "", "/admin/models");
     mockApi(adminSession, incompleteReadiness);

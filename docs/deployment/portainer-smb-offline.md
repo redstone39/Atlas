@@ -32,6 +32,12 @@ Before import, verify every `SHA256SUMS` entry and confirm the manifest platform
 matches the Docker host. If an image is missing, re-import the same verified
 archive rather than enabling registry pulls or changing tags.
 
+The generated Compose accepts only uppercase `HTTP_PROXY`, `HTTPS_PROXY`, and
+`NO_PROXY` stack variables. They are passed only to `api` and
+`celery-processing`. Atlas prepends its fixed internal-service bypass list to
+`NO_PROXY`; an operator value extends rather than replaces that list. Lowercase
+proxy inputs are ignored.
+
 The current data lifecycle is `resettable_development`. Different software
 bundle versions do not support in-place application-data migration or software
 rollback. Same-version SMB coordinate changes use the generation procedure in

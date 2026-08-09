@@ -45,6 +45,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
     {
         "access_decision_id",
         "access_decision_ids",
+        "api_version",
         "active",
         "active_processing_generation",
         "admin_global_history_access",

@@ -1056,7 +1056,7 @@ def test_model_attempt_uses_one_detached_joined_snapshot(monkeypatch) -> None:
         connection_id=route.connection_id,
         display_name="Provider A",
         provider_type=route.provider_type,
-        endpoint_url="https://provider.invalid/v1",
+        endpoint_url="https://provider.example/v1",
         status="verified",
         enabled=True,
         revision=7,
@@ -1081,11 +1081,11 @@ def test_model_attempt_uses_one_detached_joined_snapshot(monkeypatch) -> None:
         "atlas_production.infrastructure.postgres_owner.model_routing.ModelRoutingReadModel.tested_route",
         lambda _self: pytest.fail("tested route was read separately"),
     )
-    built: list[tuple[str, str, str]] = []
+    built: list[tuple[ProviderConnectionRecord, str]] = []
     adapter = PostgresModelRoutingAdapter(
         lambda: pytest.fail("unexpected SQL Session"),
-        lambda provider_type, endpoint, api_key: built.append(
-            (provider_type, endpoint, api_key)
+        lambda detached_connection, api_key: built.append(
+            (detached_connection, api_key)
         ) or SimpleNamespace(complete=lambda **_kwargs: None),
     )
     monkeypatch.setattr(
@@ -1104,10 +1104,14 @@ def test_model_attempt_uses_one_detached_joined_snapshot(monkeypatch) -> None:
     assert snapshot_calls == [route.route_id, None]
     assert routed_attempt.route.model_name == "model-A"
     assert attempt.route.model_name == "model-A"
-    assert built == [
-        ("openai_compatible", "https://provider.invalid/v1", "plain-secret"),
-        ("openai_compatible", "https://provider.invalid/v1", "plain-secret")
+    assert [
+        (item.provider_type, item.endpoint_url, api_key)
+        for item, api_key in built
+    ] == [
+        ("openai_compatible", "https://provider.example/v1", "plain-secret"),
+        ("openai_compatible", "https://provider.example/v1", "plain-secret"),
     ]
+    assert all(item is not connection for item, _api_key in built)
     assert "plain-secret" not in repr(attempt)
     assert "ciphertext-not-plaintext" not in repr(snapshot)
 

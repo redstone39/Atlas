@@ -40,6 +40,27 @@ Optional SMB variables are `ATLAS_SMB_DOMAIN` and
 backslashes, commas, or control characters. Use a dedicated SMB account limited
 to the selected share and directory.
 
+## Provider runtime proxy
+
+Only the `api` and `celery-processing` services receive process-wide Provider
+proxy settings:
+
+| Variable | Default | Behavior |
+|---|---|---|
+| `HTTP_PROXY` | empty | Standard process HTTP proxy |
+| `HTTPS_PROXY` | empty | Standard process HTTPS proxy |
+| `NO_PROXY` | empty | Appended after Atlas's fixed internal bypass prefix |
+
+Only uppercase stack variables are accepted. Lowercase `http_proxy`,
+`https_proxy`, and `no_proxy` inputs are ignored. Atlas always prepends
+`::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web`
+to `NO_PROXY`; operators may append organization addresses but cannot replace
+the internal bypass list. Other services do not receive these variables.
+
+Changing proxy variables does not require a new SMB generation. Avoid embedding
+credentials in proxy URLs unless exposure to Portainer and Docker
+administrators is acceptable.
+
 ## Initialization
 
 Confirm `artifact-storage-init` exits `0` and its last JSON record includes:

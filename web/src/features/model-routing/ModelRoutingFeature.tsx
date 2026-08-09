@@ -98,7 +98,14 @@ type ModelManagementTab = "connections" | "models" | "answer-behavior";
 
 const providerDefaults: Record<ProviderType, string> = {
   openai_compatible: "https://api.openai.com/v1",
-  azure_openai: "https://example.openai.azure.com/openai/v1",
+  azure_openai: "https://example.openai.azure.com",
+  anthropic: "https://api.anthropic.com",
+};
+
+const providerLabelKeys: Record<ProviderType, string> = {
+  openai_compatible: "admin.providerOpenAICompatible",
+  azure_openai: "models.providerAzure",
+  anthropic: "models.providerAnthropic",
 };
 
 type RuntimePolicyDraft = Record<
@@ -291,6 +298,7 @@ export function ModelRoutingFeature({
   const [providerType, setProviderType] =
     useState<ProviderType>("openai_compatible");
   const [endpointUrl, setEndpointUrl] = useState(providerDefaults.openai_compatible);
+  const [apiVersion, setApiVersion] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [connectionEnabled, setConnectionEnabled] = useState(true);
 
@@ -464,6 +472,7 @@ export function ModelRoutingFeature({
     setConnectionName("");
     setProviderType("openai_compatible");
     setEndpointUrl(providerDefaults.openai_compatible);
+    setApiVersion("");
     setApiKey("");
     setConnectionEnabled(true);
     setConnectionDialogOpen(true);
@@ -474,6 +483,7 @@ export function ModelRoutingFeature({
     setConnectionName(connection.display_name);
     setProviderType(connection.provider_type);
     setEndpointUrl(connection.endpoint_url);
+    setApiVersion(connection.api_version ?? "");
     setApiKey("");
     setConnectionEnabled(connection.enabled);
     setConnectionDialogOpen(true);
@@ -481,6 +491,7 @@ export function ModelRoutingFeature({
 
   function closeConnectionDialog() {
     setApiKey("");
+    setApiVersion("");
     setConnectionDialogOpen(false);
     setEditingConnection(null);
   }
@@ -531,7 +542,10 @@ export function ModelRoutingFeature({
   }
 
   const canSaveConnection = Boolean(
-    connectionName.trim() && endpointUrl.trim() && (editingConnection || apiKey.trim()),
+    connectionName.trim() &&
+      endpointUrl.trim() &&
+      (providerType !== "azure_openai" || apiVersion.trim()) &&
+      (editingConnection || apiKey.trim()),
   );
   const parsedRuntimePolicy = parseRuntimePolicy(runtimePolicy);
   const runtimePolicyComplete = Object.values(runtimePolicy).every((value) => value.trim());
@@ -656,11 +670,12 @@ export function ModelRoutingFeature({
                               ) : null}
                             </div>
                             <CardDescription className="break-all">
-                              {connection.provider_type === "azure_openai"
-                                ? t("models.providerAzure")
-                                : t("admin.providerOpenAICompatible")}
+                              {t(providerLabelKeys[connection.provider_type])}
                               {" · "}
                               {connection.endpoint_url}
+                              {connection.api_version
+                                ? ` · ${t("models.apiVersion")}: ${connection.api_version}`
+                                : null}
                             </CardDescription>
                           </div>
                           <div className="flex flex-wrap gap-2">
@@ -1062,6 +1077,7 @@ export function ModelRoutingFeature({
                   <SelectGroup>
                     <SelectItem value="openai_compatible">{t("admin.providerOpenAICompatible")}</SelectItem>
                     <SelectItem value="azure_openai">{t("models.providerAzure")}</SelectItem>
+                    <SelectItem value="anthropic">{t("models.providerAnthropic")}</SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
@@ -1071,6 +1087,18 @@ export function ModelRoutingFeature({
               <FieldLabel htmlFor="endpoint-url">{t("admin.endpointUrl")}</FieldLabel>
               <Input id="endpoint-url" value={endpointUrl} onChange={(event) => setEndpointUrl(event.target.value)} />
             </Field>
+            {providerType === "azure_openai" ? (
+              <Field>
+                <FieldLabel htmlFor="api-version">{t("models.apiVersion")}</FieldLabel>
+                <Input
+                  id="api-version"
+                  required
+                  value={apiVersion}
+                  onChange={(event) => setApiVersion(event.target.value)}
+                />
+                <FieldDescription>{t("models.apiVersionDescription")}</FieldDescription>
+              </Field>
+            ) : null}
             <Field>
               <FieldLabel htmlFor="api-key">{t("models.apiKey")}</FieldLabel>
               <Input id="api-key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
@@ -1101,6 +1129,8 @@ export function ModelRoutingFeature({
                         connectionId,
                         displayName: connectionName.trim(),
                         endpointUrl: endpointUrl.trim(),
+                        apiVersion:
+                          providerType === "azure_openai" ? apiVersion.trim() : undefined,
                         apiKey: apiKey.trim() || undefined,
                         enabled: connectionEnabled,
                         expectedRevision: editingConnection.revision,
@@ -1110,6 +1140,8 @@ export function ModelRoutingFeature({
                         displayName: connectionName.trim(),
                         providerType,
                         endpointUrl: endpointUrl.trim(),
+                        apiVersion:
+                          providerType === "azure_openai" ? apiVersion.trim() : undefined,
                         apiKey: apiKey.trim(),
                       }),
                   closeConnectionDialog,

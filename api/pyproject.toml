@@ -10,6 +10,7 @@ dependencies = [
     "fastembed==0.8.0",
     "fastapi>=0.116,<0.117",
     "httpx>=0.28,<0.29",
+    "litellm==1.95.0",
     "pillow==12.3.0",
     "pikepdf==10.10.0",
     "pypdf==6.0.0",

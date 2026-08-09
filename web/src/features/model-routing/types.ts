@@ -1,6 +1,6 @@
 import type { MessageReference } from "../../shared/user-messages";
 
-export type ProviderType = "openai_compatible" | "azure_openai";
+export type ProviderType = "openai_compatible" | "azure_openai" | "anthropic";
 
 export interface ModelRouteRuntimePolicyInput {
   schema_version: "model-route-runtime-policy-v8";
@@ -33,6 +33,7 @@ export interface ProviderConnectionStatus extends MessageReference {
   display_name: string;
   provider_type: ProviderType;
   endpoint_url: string;
+  api_version: string | null;
   credential_configured: boolean;
   status:
     | "credential_required"
@@ -70,6 +71,7 @@ export interface ProviderConnectionCreateInput {
   displayName: string;
   providerType: ProviderType;
   endpointUrl: string;
+  apiVersion?: string;
   apiKey: string;
 }
 
@@ -77,6 +79,7 @@ export interface ProviderConnectionUpdateInput {
   connectionId: string;
   displayName?: string;
   endpointUrl?: string;
+  apiVersion?: string;
   apiKey?: string;
   enabled?: boolean;
   expectedRevision: number;

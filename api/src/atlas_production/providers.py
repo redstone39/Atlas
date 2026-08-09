@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import hashlib
 import ipaddress
 import json
-import os
+import math
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import litellm
+from litellm import exceptions as litellm_exceptions
 
-from atlas_production.modules.model_routing.records import ModelRouteRecord
+from atlas_production.modules.model_routing.records import (
+    ModelRouteRecord,
+    ProviderConnectionRecord,
+)
 from atlas_production.modules.model_routing.provider_contracts import (
     ProviderAssistantMessage,
     ProviderAssistantToolCallMessage,
@@ -166,25 +172,6 @@ def build_native_json_schema(name: str, application_schema: dict[str, Any]) -> N
     )
 
 
-def conversation_http_payload(
-    route: ModelRouteRecord,
-    request: ProviderConversationRequest,
-    response_schema: NativeJsonSchema,
-) -> dict[str, Any]:
-    """Return the exact JSON body counted by preflight and sent on the wire."""
-    return {
-        "model": route.model_name,
-        "temperature": 0,
-        **request.to_payload(),
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": response_schema.name,
-                "strict": True,
-                "schema": response_schema.schema,
-            },
-        },
-    }
 
 
 def _normalize_schema_node(
@@ -490,13 +477,24 @@ def normalize_provider_endpoint(provider_type: str, endpoint_url: str) -> str:
                 normalized_path = normalized_path[: -len(operation_suffix)].rstrip("/")
                 break
     elif provider_type == "azure_openai":
-        if path in {"", "/openai", "/openai/v1"}:
-            normalized_path = "/openai/v1"
-        else:
+        if path:
             raise ProviderError(
                 "provider_endpoint_invalid",
                 'provider.endpoint_is_invalid',
             )
+        normalized_path = ""
+    elif provider_type == "anthropic":
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname.lower() != "api.anthropic.com"
+            or port is not None
+            or path
+        ):
+            raise ProviderError(
+                "provider_endpoint_invalid",
+                'provider.endpoint_is_invalid',
+            )
+        normalized_path = ""
     else:
         raise ProviderError(
             "provider_type_unsupported",
@@ -505,172 +503,383 @@ def normalize_provider_endpoint(provider_type: str, endpoint_url: str) -> str:
     return urlunsplit((parsed.scheme, netloc, normalized_path, "", "")).rstrip("/")
 
 
-class _HttpProvider:
-    auth_header: str
-    auth_prefix: str = ""
+def normalize_provider_connection(
+    provider_type: str,
+    endpoint_url: str,
+    api_version: str | None,
+) -> tuple[str, str | None]:
+    endpoint = normalize_provider_endpoint(provider_type, endpoint_url)
+    normalized_version = api_version.strip() if api_version is not None else None
+    if provider_type == "azure_openai":
+        if not normalized_version:
+            raise ProviderError(
+                "provider_connection_fields_invalid",
+                'provider.connection_fields_are_invalid',
+            )
+    elif normalized_version:
+        raise ProviderError(
+            "provider_connection_fields_invalid",
+            'provider.connection_fields_are_invalid',
+        )
+    else:
+        normalized_version = None
+    return endpoint, normalized_version
 
+
+def _safe_litellm_error_metadata(
+    exc: BaseException,
+) -> tuple[str | None, int | None, int | None]:
+    request_id = getattr(exc, "request_id", None)
+    if not isinstance(request_id, str) or not request_id.strip():
+        request_id = None
+    else:
+        request_id = request_id.strip()
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        status = None
+    retry_after: Any = getattr(exc, "retry_after", None)
+    if retry_after is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if isinstance(headers, Mapping):
+            retry_after = headers.get("retry-after")
+    if isinstance(retry_after, str):
+        try:
+            retry_after = float(retry_after)
+        except ValueError:
+            retry_after = None
+    retry_after_ms: int | None = None
+    if (
+        isinstance(retry_after, (int, float))
+        and not isinstance(retry_after, bool)
+        and math.isfinite(retry_after)
+        and retry_after >= 0
+    ):
+        retry_after_ms = int(retry_after * 1_000)
+    return request_id, status, retry_after_ms
+
+
+_MAPPED_LITELLM_EXCEPTIONS = (
+    litellm_exceptions.AuthenticationError,
+    litellm_exceptions.PermissionDeniedError,
+    litellm_exceptions.RateLimitError,
+    litellm_exceptions.Timeout,
+    litellm_exceptions.BadRequestError,
+    litellm_exceptions.UnprocessableEntityError,
+    litellm_exceptions.NotFoundError,
+    litellm_exceptions.ContentPolicyViolationError,
+    litellm_exceptions.ContextWindowExceededError,
+    litellm_exceptions.RejectedRequestError,
+    litellm_exceptions.APIConnectionError,
+    litellm_exceptions.ServiceUnavailableError,
+    litellm_exceptions.BadGatewayError,
+    litellm_exceptions.InternalServerError,
+    litellm_exceptions.APIError,
+)
+
+
+def _mapped_litellm_error(exc: BaseException) -> ProviderInvocationError:
+    request_id, status, retry_after_ms = _safe_litellm_error_metadata(exc)
+    if isinstance(
+        exc,
+        (
+            litellm_exceptions.AuthenticationError,
+            litellm_exceptions.PermissionDeniedError,
+        ),
+    ):
+        error_type = ProviderAuthenticationError
+        safe_code = "provider_authentication_error"
+    elif isinstance(exc, litellm_exceptions.RateLimitError):
+        error_type = ProviderRateLimitError
+        safe_code = "provider_rate_limit"
+    elif isinstance(exc, litellm_exceptions.Timeout):
+        error_type = ProviderTimeoutError
+        safe_code = "provider_timeout"
+    elif isinstance(
+        exc,
+        (
+            litellm_exceptions.BadRequestError,
+            litellm_exceptions.UnprocessableEntityError,
+            litellm_exceptions.NotFoundError,
+            litellm_exceptions.ContentPolicyViolationError,
+            litellm_exceptions.ContextWindowExceededError,
+            litellm_exceptions.RejectedRequestError,
+        ),
+    ):
+        error_type = ProviderRequestRejectedError
+        safe_code = "provider_request_rejected"
+    else:
+        error_type = ProviderTransportError
+        safe_code = "provider_transport_error"
+    return error_type(
+        safe_code=safe_code,
+        cause=exc,
+        provider_request_id=request_id,
+        provider_status=status,
+        retry_after_ms=retry_after_ms,
+    )
+
+
+def _normalized_usage(raw_usage: Any) -> dict[str, int]:
+    if not isinstance(raw_usage, dict):
+        raise TypeError("usage is invalid")
+    allowed_keys = {
+        "prompt_tokens",
+        "completion_tokens",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+    }
+    usage: dict[str, int] = {}
+    for key in allowed_keys:
+        if key not in raw_usage:
+            continue
+        value = raw_usage[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise TypeError("token usage is invalid")
+        usage[key] = value
+    anthropic_cached_tokens = raw_usage.get("cache_read_input_tokens")
+    if anthropic_cached_tokens is not None:
+        if (
+            isinstance(anthropic_cached_tokens, bool)
+            or not isinstance(anthropic_cached_tokens, int)
+            or anthropic_cached_tokens < 0
+        ):
+            raise TypeError("cached token usage is invalid")
+        existing = usage.get("cached_input_tokens")
+        if existing is not None and existing != anthropic_cached_tokens:
+            raise TypeError("cached token usage conflicts")
+        usage["cached_input_tokens"] = anthropic_cached_tokens
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    if prompt_details is not None:
+        if not isinstance(prompt_details, dict):
+            raise TypeError("prompt token details are invalid")
+        cached_tokens = prompt_details.get("cached_tokens")
+        if cached_tokens is not None:
+            if (
+                isinstance(cached_tokens, bool)
+                or not isinstance(cached_tokens, int)
+                or cached_tokens < 0
+            ):
+                raise TypeError("cached token usage is invalid")
+            existing = usage.get("cached_input_tokens")
+            if existing is not None and existing != cached_tokens:
+                raise TypeError("cached token usage conflicts")
+            usage["cached_input_tokens"] = cached_tokens
+    return usage
+
+
+def _normalize_litellm_response(
+    data: Any,
+    *,
+    route: ModelRouteRecord,
+    request: ProviderConversationRequest,
+    response_schema: NativeJsonSchema,
+) -> ProviderConversationOutcome:
+    provider_request_id: str | None = None
+    try:
+        if not isinstance(data, dict):
+            raise TypeError("response is not an object")
+        choices = data["choices"]
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise TypeError("exactly one choice is required")
+        first = choices[0]
+        if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
+            raise TypeError("message is missing")
+        message = first["message"]
+        finish_reason = first.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise TypeError("finish reason is invalid")
+        provider_request_id = data.get("id")
+        if provider_request_id is not None:
+            if (
+                not isinstance(provider_request_id, str)
+                or not provider_request_id.strip()
+            ):
+                raise TypeError("provider request id is invalid")
+            provider_request_id = provider_request_id.strip()
+        model_ref = data.get("model", route.model_name)
+        if not isinstance(model_ref, str) or not model_ref.strip():
+            raise TypeError("model ref is invalid")
+        model_ref = model_ref.strip()
+        token_usage = _normalized_usage(data.get("usage", {}))
+        refusal = message.get("refusal")
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        has_refusal = isinstance(refusal, str) and bool(refusal.strip())
+        has_content = isinstance(content, str) and bool(content.strip())
+        has_tool_calls = tool_calls is not None
+        if refusal is not None and not has_refusal:
+            raise TypeError("refusal is invalid")
+        if sum((has_refusal, has_content, has_tool_calls)) > 1:
+            raise TypeError("response contains mixed terminal states")
+        if has_refusal:
+            return ProviderRefused(
+                provider_request_id=provider_request_id,
+                model_ref=model_ref,
+                finish_reason=finish_reason,
+                usage=token_usage,
+                reason_code="provider_refusal",
+                message_code='provider.refused_the_request',
+            )
+        if has_tool_calls:
+            if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+                raise TypeError("exactly one tool call is required")
+            raw_call = tool_calls[0]
+            if (
+                not isinstance(raw_call, dict)
+                or raw_call.get("type") != "function"
+                or not isinstance(raw_call.get("function"), dict)
+            ):
+                raise TypeError("tool call is invalid")
+            call_id = raw_call.get("id")
+            function = raw_call["function"]
+            name = function.get("name")
+            arguments_json = function.get("arguments")
+            if (
+                not isinstance(call_id, str)
+                or not call_id.strip()
+                or not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(arguments_json, str)
+                or not arguments_json.strip()
+            ):
+                raise TypeError("tool call fields are invalid")
+            try:
+                arguments = json.loads(arguments_json)
+            except json.JSONDecodeError as exc:
+                raise ProviderOutputDecodeError(
+                    safe_code="provider_output_decode_error",
+                    cause=exc,
+                    provider_request_id=provider_request_id,
+                ) from exc
+            if not isinstance(arguments, dict):
+                raise ProviderOutputSchemaError(
+                    safe_code="provider_output_schema_error",
+                    provider_request_id=provider_request_id,
+                )
+            tool = next((tool for tool in request.tools if tool.name == name), None)
+            if tool is None:
+                raise ProviderOutputSchemaError(
+                    safe_code="provider_output_schema_error",
+                    provider_request_id=provider_request_id,
+                )
+            try:
+                validate_json_schema_value(arguments, tool.parameters)
+            except ValueError as exc:
+                raise ProviderOutputSchemaError(
+                    safe_code="provider_output_schema_error",
+                    cause=exc,
+                    provider_request_id=provider_request_id,
+                ) from exc
+            call = ProviderFunctionCall(
+                call_id=call_id.strip(),
+                name=name.strip(),
+                arguments=arguments,
+                arguments_json=arguments_json,
+            )
+            return ProviderToolCall(
+                provider_request_id=provider_request_id,
+                model_ref=model_ref,
+                finish_reason=finish_reason,
+                usage=token_usage,
+                call=call,
+                assistant_message=ProviderAssistantToolCallMessage(tool_calls=[call]),
+            )
+        if finish_reason != "stop":
+            reason = {
+                "length": "max_output_tokens",
+                "content_filter": "content_filter",
+                "stop": "provider_stop",
+            }.get(finish_reason, "unknown")
+            return ProviderIncomplete(
+                provider_request_id=provider_request_id,
+                model_ref=model_ref,
+                finish_reason=finish_reason,
+                usage=token_usage,
+                reason=reason,
+            )
+        if not has_content:
+            raise ValueError("content is empty")
+        try:
+            output = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ProviderOutputDecodeError(
+                safe_code="provider_output_decode_error",
+                cause=exc,
+                provider_request_id=provider_request_id,
+            ) from exc
+        try:
+            validate_json_schema_value(output, response_schema.schema)
+        except ValueError as exc:
+            raise ProviderOutputSchemaError(
+                safe_code="provider_output_schema_error",
+                cause=exc,
+                provider_request_id=provider_request_id,
+            ) from exc
+        assert isinstance(output, dict)
+        return ProviderCompleted(
+            provider_request_id=provider_request_id,
+            model_ref=model_ref,
+            finish_reason=finish_reason,
+            usage=token_usage,
+            output=output,
+            assistant_message=ProviderAssistantMessage(content=content),
+        )
+    except ProviderInvocationError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise ProviderOutputDecodeError(
+            safe_code="provider_output_decode_error",
+            cause=exc,
+            provider_request_id=provider_request_id,
+        ) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ProviderProtocolError(
+            safe_code="provider_protocol_error",
+            cause=exc,
+            provider_request_id=provider_request_id,
+        ) from exc
+
+
+class LiteLLMProvider:
     def __init__(
         self,
-        *,
-        endpoint_url: str,
+        connection: ProviderConnectionRecord,
         api_key: str,
-        timeout_seconds: float = 30.0,
-        client: httpx.Client | None = None,
+        completion: Callable[..., Any] = litellm.completion,
     ) -> None:
-        self.endpoint_url = normalize_provider_endpoint(self.provider_type, endpoint_url)
+        endpoint, api_version = normalize_provider_connection(
+            connection.provider_type,
+            connection.endpoint_url,
+            connection.api_version,
+        )
+        if not api_key:
+            raise ProviderConfigurationError(
+                safe_code="provider_credential_unavailable",
+            )
+        self.provider_type = connection.provider_type
+        self.api_base = endpoint
+        self.api_version = api_version
         self.api_key = api_key
-        self.timeout_seconds = timeout_seconds
-        self.client = client
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            self.auth_header: f"{self.auth_prefix}{self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _default_client(self) -> httpx.Client:
-        options: dict[str, Any] = {"trust_env": False}
-        if self.provider_type == "azure_openai":
-            proxy_url = os.environ.get("ATLAS_AZURE_PROXY_URL", "").strip()
-            if proxy_url:
-                try:
-                    parsed = urlsplit(proxy_url)
-                    _ = parsed.port
-                except (TypeError, ValueError):
-                    raise ProviderConfigurationError(
-                        safe_code="provider_proxy_configuration_invalid",
-                    ) from None
-                if (
-                    parsed.scheme not in {"http", "https"}
-                    or not parsed.hostname
-                    or parsed.path not in {"", "/"}
-                    or parsed.query
-                    or parsed.fragment
-                ):
-                    raise ProviderConfigurationError(
-                        safe_code="provider_proxy_configuration_invalid",
-                    ) from None
-                options["proxy"] = proxy_url
-        return httpx.Client(**options)
-
-    def _request(self, method: str, suffix: str, **kwargs: Any) -> httpx.Response:
-        normalized_suffix = suffix.strip("/")
-        endpoint_path = urlsplit(self.endpoint_url).path.rstrip("/")
-        request_url = (
-            self.endpoint_url
-            if endpoint_path.endswith(f"/{normalized_suffix}")
-            else f"{self.endpoint_url}/{normalized_suffix}"
-        )
-        try:
-            if self.client is not None:
-                response = self.client.request(
-                    method,
-                    request_url,
-                    headers=self._headers(),
-                    timeout=self.timeout_seconds,
-                    **kwargs,
-                )
-            else:
-                with self._default_client() as client:
-                    response = client.request(
-                        method,
-                        request_url,
-                        headers=self._headers(),
-                        timeout=self.timeout_seconds,
-                        **kwargs,
-                    )
-            response.raise_for_status()
-            return response
-        except httpx.TimeoutException as exc:
-            raise ProviderError(
-                "provider_timeout",
-                'provider.request_timed_out',
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise ProviderError(
-                "provider_http_error",
-                'provider.rejected_the_request',
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ProviderError(
-                "provider_invocation_error",
-                'provider.invocation_failed',
-            ) from exc
-
-    def _conversation_request(
-        self, payload: dict[str, Any], *, timeout_seconds: float
-    ) -> httpx.Response:
-        normalized_suffix = "chat/completions"
-        endpoint_path = urlsplit(self.endpoint_url).path.rstrip("/")
-        request_url = (
-            self.endpoint_url
-            if endpoint_path.endswith(f"/{normalized_suffix}")
-            else f"{self.endpoint_url}/{normalized_suffix}"
-        )
-        try:
-            if self.client is not None:
-                response = self.client.request(
-                    "POST",
-                    request_url,
-                    headers=self._headers(),
-                    timeout=timeout_seconds,
-                    json=payload,
-                )
-            else:
-                with self._default_client() as client:
-                    response = client.request(
-                        "POST",
-                        request_url,
-                        headers=self._headers(),
-                        timeout=timeout_seconds,
-                        json=payload,
-                    )
-            response.raise_for_status()
-            return response
-        except httpx.TimeoutException as exc:
-            raise ProviderTimeoutError(
-                safe_code="provider_timeout",
-                cause=exc,
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            request_id = exc.response.headers.get("x-request-id")
-            if status in {401, 403}:
-                error_type = ProviderAuthenticationError
-                safe_code = "provider_authentication_error"
-            elif status == 429:
-                error_type = ProviderRateLimitError
-                safe_code = "provider_rate_limit"
-            elif 400 <= status < 500:
-                error_type = ProviderRequestRejectedError
-                safe_code = "provider_request_rejected"
-            else:
-                error_type = ProviderTransportError
-                safe_code = "provider_transport_error"
-            retry_after_ms = None
-            retry_after = exc.response.headers.get("retry-after")
-            if retry_after is not None:
-                try:
-                    retry_after_ms = max(0, int(float(retry_after) * 1_000))
-                except ValueError:
-                    retry_after_ms = None
-            raise error_type(
-                safe_code=safe_code,
-                cause=exc,
-                provider_request_id=request_id,
-                provider_status=status,
-                retry_after_ms=retry_after_ms,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ProviderTransportError(
-                safe_code="provider_transport_error",
-                cause=exc,
-            ) from exc
+        self.completion = completion
 
     def discover_models(self) -> list[str]:
-        response = self._request("GET", "models")
+        if self.provider_type != "openai_compatible":
+            raise ProviderError(
+                "provider_discovery_unavailable",
+                'model.provider_model_discovery_is_unavailable',
+            )
+        request_url = f"{self.api_base}/models"
         try:
-            data = response.json()
+            with httpx.Client() as client:
+                response = client.get(
+                    request_url,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
             raw_models = data["data"]
             if not isinstance(raw_models, list):
                 raise TypeError("data is not a list")
@@ -684,11 +893,11 @@ class _HttpProvider:
             if not models:
                 raise ValueError("no usable models")
             return sorted(models, key=str.casefold)
-        except (ValueError, KeyError, TypeError) as exc:
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
             raise ProviderError(
                 "provider_discovery_unavailable",
                 'model.provider_model_discovery_is_unavailable',
-            ) from exc
+            ) from None
 
     def complete(
         self,
@@ -700,222 +909,79 @@ class _HttpProvider:
         if not isinstance(response_schema, NativeJsonSchema) or not isinstance(
             request, ProviderConversationRequest
         ):
-            raise ProviderProtocolError(
-                safe_code="provider_protocol_error",
+            raise ProviderProtocolError(safe_code="provider_protocol_error")
+        model = {
+            "openai_compatible": f"openai/{route.model_name}",
+            "azure_openai": f"azure/{route.model_name}",
+            "anthropic": f"anthropic/{route.model_name}",
+        }.get(self.provider_type)
+        if model is None:
+            raise ProviderConfigurationError(
+                safe_code="provider_type_unsupported",
             )
-        payload = conversation_http_payload(route, request, response_schema)
+        if self.provider_type == "anthropic":
+            schema_supported = litellm.supports_response_schema(
+                model=model,
+                custom_llm_provider="anthropic",
+            )
+            if schema_supported is not True:
+                raise ProviderConfigurationError(
+                    safe_code="provider_schema_unsupported",
+                )
+        payload = request.to_payload()
         route_timeout = request.timeout_seconds or getattr(
             getattr(route, "runtime_policy", None),
             "provider_invocation_timeout_seconds",
-            self.timeout_seconds,
+            30.0,
         )
-        response = self._conversation_request(
-            payload, timeout_seconds=float(route_timeout)
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": payload["messages"],
+            "tools": payload["tools"],
+            "tool_choice": request.tool_choice,
+            "parallel_tool_calls": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_schema.name,
+                    "strict": True,
+                    "schema": response_schema.schema,
+                },
+            },
+            "temperature": 0,
+            "timeout": float(route_timeout),
+            "num_retries": 0,
+            "stream": False,
+            "api_key": self.api_key,
+            "api_base": self.api_base,
+        }
+        if self.provider_type == "anthropic":
+            kwargs["max_tokens"] = request.max_output_tokens
+        else:
+            kwargs["max_completion_tokens"] = request.max_output_tokens
+        if self.provider_type == "azure_openai":
+            kwargs["api_version"] = self.api_version
         try:
-            data = response.json()
-            if not isinstance(data, dict):
-                raise TypeError("response is not an object")
-            choices = data["choices"]
-            if not isinstance(choices, list) or len(choices) != 1:
-                raise TypeError("exactly one choice is required")
-            first = choices[0]
-            if not isinstance(first, dict) or not isinstance(first.get("message"), dict):
-                raise TypeError("message is missing")
-            message = first["message"]
-            finish_reason = first.get("finish_reason")
-            if finish_reason is not None and not isinstance(finish_reason, str):
-                raise TypeError("finish reason is invalid")
-            provider_request_id = data.get("id")
-            if provider_request_id is not None and (
-                not isinstance(provider_request_id, str) or not provider_request_id.strip()
-            ):
-                raise TypeError("provider request id is invalid")
-            model_ref = data.get("model", route.model_name)
-            if not isinstance(model_ref, str) or not model_ref.strip():
-                raise TypeError("model ref is invalid")
-            usage = data.get("usage", {})
-            if not isinstance(usage, dict):
-                raise TypeError("usage is invalid")
-            token_usage = {
-                key: value
-                for key, value in usage.items()
-                if isinstance(key, str)
-                and key.endswith("_tokens")
-                and isinstance(value, int)
-                and not isinstance(value, bool)
-                and value >= 0
-            }
-            prompt_details = usage.get("prompt_tokens_details")
-            if isinstance(prompt_details, dict):
-                cached_tokens = prompt_details.get("cached_tokens")
-                if (
-                    isinstance(cached_tokens, int)
-                    and not isinstance(cached_tokens, bool)
-                    and cached_tokens >= 0
-                ):
-                    token_usage["cached_input_tokens"] = cached_tokens
-            refusal = message.get("refusal")
-            content = message.get("content")
-            tool_calls = message.get("tool_calls")
-            has_refusal = isinstance(refusal, str) and bool(refusal.strip())
-            has_content = isinstance(content, str) and bool(content.strip())
-            has_tool_calls_field = tool_calls is not None
-            if refusal is not None and not has_refusal:
-                raise TypeError("refusal is invalid")
-            if sum((has_refusal, has_content, has_tool_calls_field)) > 1:
-                raise TypeError("response contains mixed terminal states")
-            if has_refusal:
-                return ProviderRefused(
-                    provider_request_id=provider_request_id,
-                    model_ref=model_ref,
-                    finish_reason=finish_reason,
-                    usage=token_usage,
-                    reason_code="provider_refusal",
-                    message_code='provider.refused_the_request',
-                )
-            if has_tool_calls_field:
-                if not isinstance(tool_calls, list) or len(tool_calls) != 1:
-                    raise TypeError("exactly one tool call is required")
-                raw_call = tool_calls[0]
-                if (
-                    not isinstance(raw_call, dict)
-                    or raw_call.get("type") != "function"
-                    or not isinstance(raw_call.get("function"), dict)
-                ):
-                    raise TypeError("tool call is invalid")
-                call_id = raw_call.get("id")
-                function = raw_call["function"]
-                name = function.get("name")
-                arguments_json = function.get("arguments")
-                if (
-                    not isinstance(call_id, str)
-                    or not call_id.strip()
-                    or not isinstance(name, str)
-                    or not name.strip()
-                    or not isinstance(arguments_json, str)
-                    or not arguments_json.strip()
-                ):
-                    raise TypeError("tool call fields are invalid")
-                try:
-                    arguments = json.loads(arguments_json)
-                except json.JSONDecodeError as exc:
-                    raise ProviderOutputDecodeError(
-                        safe_code="provider_output_decode_error",
-                        cause=exc,
-                        provider_request_id=provider_request_id,
-                    ) from exc
-                if not isinstance(arguments, dict):
-                    raise ProviderOutputSchemaError(
-                        safe_code="provider_output_schema_error",
-                        provider_request_id=provider_request_id,
-                    )
-                tool = next((tool for tool in request.tools if tool.name == name), None)
-                if tool is None:
-                    raise ProviderOutputSchemaError(
-                        safe_code="provider_output_schema_error",
-                        provider_request_id=provider_request_id,
-                    )
-                try:
-                    validate_json_schema_value(arguments, tool.parameters)
-                except ValueError as exc:
-                    raise ProviderOutputSchemaError(
-                        safe_code="provider_output_schema_error",
-                        cause=exc,
-                        provider_request_id=provider_request_id,
-                    ) from exc
-                call = ProviderFunctionCall(
-                    call_id=call_id,
-                    name=name,
-                    arguments=arguments,
-                    arguments_json=arguments_json,
-                )
-                assistant_message = ProviderAssistantToolCallMessage(tool_calls=[call])
-                return ProviderToolCall(
-                    provider_request_id=provider_request_id,
-                    model_ref=model_ref,
-                    finish_reason=finish_reason,
-                    usage=token_usage,
-                    call=call,
-                    assistant_message=assistant_message,
-                )
-            if finish_reason != "stop":
-                reason = {
-                    "length": "max_output_tokens",
-                    "content_filter": "content_filter",
-                    "stop": "provider_stop",
-                }.get(finish_reason, "unknown")
-                return ProviderIncomplete(
-                    provider_request_id=provider_request_id,
-                    model_ref=model_ref,
-                    finish_reason=finish_reason,
-                    usage=token_usage,
-                    reason=reason,
-                )
-            if not has_content:
-                raise ValueError("content is empty")
-            try:
-                output = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ProviderOutputDecodeError(
-                    safe_code="provider_output_decode_error",
-                    cause=exc,
-                    provider_request_id=provider_request_id,
-                ) from exc
-            try:
-                validate_json_schema_value(output, response_schema.schema)
-            except ValueError as exc:
-                raise ProviderOutputSchemaError(
-                    safe_code="provider_output_schema_error",
-                    cause=exc,
-                    provider_request_id=provider_request_id,
-                ) from exc
-            assert isinstance(output, dict)
-            assistant_message = ProviderAssistantMessage(content=content)
-            return ProviderCompleted(
-                provider_request_id=provider_request_id,
-                model_ref=model_ref,
-                finish_reason=finish_reason,
-                usage=token_usage,
-                output=output,
-                assistant_message=assistant_message,
-            )
-        except ProviderInvocationError:
-            raise
-        except json.JSONDecodeError as exc:
-            raise ProviderOutputDecodeError(
-                safe_code="provider_output_decode_error",
-                cause=exc,
-            ) from exc
-        except (ValueError, KeyError, TypeError) as exc:
+            response = self.completion(**kwargs)
+        except _MAPPED_LITELLM_EXCEPTIONS as exc:
+            raise _mapped_litellm_error(exc) from exc
+        try:
+            data = response.model_dump()
+        except (AttributeError, TypeError, ValueError) as exc:
             raise ProviderProtocolError(
                 safe_code="provider_protocol_error",
                 cause=exc,
             ) from exc
-
-
-class OpenAICompatibleProvider(_HttpProvider):
-    provider_type = "openai_compatible"
-    auth_header = "Authorization"
-    auth_prefix = "Bearer "
-
-
-class AzureOpenAIProvider(_HttpProvider):
-    provider_type = "azure_openai"
-    auth_header = "api-key"
+        return _normalize_litellm_response(
+            data,
+            route=route,
+            request=request,
+            response_schema=response_schema,
+        )
 
 
 def default_provider_adapter_factory(
-    provider_type: str,
-    endpoint_url: str,
+    connection: ProviderConnectionRecord,
     api_key: str,
-):
-    if provider_type == "openai_compatible":
-        return OpenAICompatibleProvider(endpoint_url=endpoint_url, api_key=api_key)
-    if provider_type == "azure_openai":
-        return AzureOpenAIProvider(endpoint_url=endpoint_url, api_key=api_key)
-    raise ProviderError("provider_type_unsupported", 'provider.type_is_not_supported')
-
-
-# Kept as a non-environment composition alias for callers that inject the provider seam.
-default_provider_factory = default_provider_adapter_factory
+) -> LiteLLMProvider:
+    return LiteLLMProvider(connection, api_key)

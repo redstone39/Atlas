@@ -351,6 +351,7 @@ def test_audit_jsonb_serializer_closes_metadata_and_bounds_safe_summaries() -> N
     metadata = _audit_metadata_payload(
         {
             "reason": "authorized_scope",
+            "api_version": "2024-10-21",
             "change_id": "local-pilot-target-v1",
             "evidence_count": 2,
             "logical_identity": "conversation-1:turn-request-1:input",
@@ -363,6 +364,7 @@ def test_audit_jsonb_serializer_closes_metadata_and_bounds_safe_summaries() -> N
         }
     )
     assert metadata["change_id"] == "local-pilot-target-v1"
+    assert metadata["api_version"] == "2024-10-21"
     assert metadata["request_fingerprint"] == "a" * 64
     assert metadata["verification_mode"] == "full_hash"
     assert metadata["viewer_item_id"] == "viewer-item-1"

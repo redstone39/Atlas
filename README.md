@@ -148,6 +148,14 @@ Before storing Provider credentials, configure
 keys are entered through System Admin and are not read from Provider-specific
 environment variables.
 
+System Admin connections use one of three closed profiles:
+`openai_compatible`, `azure_openai`, or `anthropic`. Azure connections require
+the resource-root endpoint and an API protocol version; Anthropic uses
+`https://api.anthropic.com`. Atlas persists these connection settings and
+invokes LiteLLM in-process with the stored credential. Route-less execution
+uses only the eligible route explicitly marked as default and never falls back
+to another route.
+
 See [Configuration](docs/configuration.md) for generation and recovery
 requirements.
 

@@ -66,7 +66,7 @@ from atlas_production.modules.retrieval.public import (
     ModelVisibleEvidenceObservationV1,
     VisualImagePayloadV1,
 )
-from atlas_production.providers import ProviderError, conversation_http_payload
+from atlas_production.providers import ProviderError
 from atlas_production.modules.turn_runtime.public import RoutePolicyV1, TurnRouteSnapshotV2
 from tests.test_turn_model_loop import Runtime
 
@@ -1007,19 +1007,6 @@ def test_evaluator_uses_one_fresh_no_tool_call_and_strict_ordered_output() -> No
         "item_outcomes",
     }
     assert "id" not in json.dumps(routing.schemas[0].schema["properties"])
-    wire = conversation_http_payload(
-        SimpleNamespace(model_name="configured-model"),
-        request,
-        routing.schemas[0],
-    )
-    assert wire["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "provisional_declared_evidence_decision_v3",
-            "strict": True,
-            "schema": routing.schemas[0].schema,
-        },
-    }
 
 
 def test_evaluator_invalid_output_retries_with_shared_turn_budget() -> None:

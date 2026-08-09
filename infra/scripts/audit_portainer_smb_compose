@@ -20,16 +20,15 @@ REQUIRED = {
     "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
     "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
 }
-PROXY_INPUTS = {
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-}
-STANDARD_PROXY_ENVIRONMENT = PROXY_INPUTS
-AZURE_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
+OPERATOR_PROXY_INPUTS = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+LOWERCASE_PROXY_INPUTS = {"http_proxy", "https_proxy", "no_proxy"}
+ALL_PROXY_INPUTS = OPERATOR_PROXY_INPUTS | LOWERCASE_PROXY_INPUTS
+PROXY_CONSUMERS = {"api", "celery-processing"}
+INTERNAL_NO_PROXY = (
+    "::1,127.0.0.1,localhost,postgres,redis,qdrant,"
+    "plugin-runner,office-renderer,api,web"
+)
+LEGACY_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
 
 
 def resolve(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -57,75 +56,75 @@ def fail(message: str) -> None:
 
 
 environment = dict(os.environ)
-for name in PROXY_INPUTS:
+for name in ALL_PROXY_INPUTS:
     environment.pop(name, None)
 environment.update(REQUIRED)
 resolved = resolve(environment)
 if resolved.returncode != 0:
     fail("Compose could not resolve with the documented variables")
 model = json.loads(resolved.stdout)
+if model.get("name") != "atlas-production-p1":
+    fail("Compose project identity is not atlas-production-p1")
 services = model["services"]
 
-proxy_consumers = {"api", "celery-processing"}
 for name, service in services.items():
     service_environment = service.get("environment", {})
-    if STANDARD_PROXY_ENVIRONMENT & set(service_environment):
-        fail(f"standard proxy environment leaked into service {name}")
-    if name in proxy_consumers:
-        if AZURE_PROXY_ENVIRONMENT not in service_environment:
-            fail(f"{name} is missing the optional proxy contract")
-        if service_environment[AZURE_PROXY_ENVIRONMENT] != "":
-            fail(f"{name} did not preserve direct Azure behavior by default")
-    elif AZURE_PROXY_ENVIRONMENT in service_environment:
-        fail(f"Azure proxy setting leaked into unrelated service {name}")
-
-http_only_environment = dict(environment)
-http_only_environment["http_proxy"] = "http://fallback-proxy.example.internal:8080"
-http_only_resolved = resolve(http_only_environment)
-if http_only_resolved.returncode != 0:
-    fail("Compose could not resolve the lowercase HTTP proxy fallback")
-http_only_services = json.loads(http_only_resolved.stdout)["services"]
-for name in proxy_consumers:
-    if (
-        http_only_services[name]["environment"][AZURE_PROXY_ENVIRONMENT]
-        != http_only_environment["http_proxy"]
-    ):
-        fail(f"{name} did not apply the HTTP proxy fallback")
+    if LEGACY_PROXY_ENVIRONMENT in service_environment:
+        fail(f"legacy Azure proxy setting remains in service {name}")
+    if LOWERCASE_PROXY_INPUTS & set(service_environment):
+        fail(f"lowercase proxy environment leaked into service {name}")
+    if name in PROXY_CONSUMERS:
+        if service_environment.get("HTTPS_PROXY") != "":
+            fail(f"{name} did not preserve direct HTTPS behavior by default")
+        if service_environment.get("HTTP_PROXY") != "":
+            fail(f"{name} did not preserve direct HTTP behavior by default")
+        if service_environment.get("NO_PROXY") != f"{INTERNAL_NO_PROXY},":
+            fail(f"{name} is missing the mandatory internal NO_PROXY prefix")
+    elif OPERATOR_PROXY_INPUTS & set(service_environment):
+        fail(f"standard proxy setting leaked into unrelated service {name}")
 
 lowercase_environment = dict(environment)
 lowercase_environment.update({
-    "http_proxy": "http://http-proxy.example.internal:8080",
-    "https_proxy": "http://https-proxy.example.internal:8443",
+    "http_proxy": "http://lower-http-proxy.example:8080",
+    "https_proxy": "http://lower-https-proxy.example:8443",
+    "no_proxy": "lowercase.example",
 })
 lowercase_resolved = resolve(lowercase_environment)
 if lowercase_resolved.returncode != 0:
-    fail("Compose could not resolve lowercase optional proxy inputs")
-lowercase_model = json.loads(lowercase_resolved.stdout)
-lowercase_services = lowercase_model["services"]
-for name in proxy_consumers:
+    fail("Compose could not resolve while lowercase host proxy variables were present")
+lowercase_services = json.loads(lowercase_resolved.stdout)["services"]
+for name in PROXY_CONSUMERS:
     service_environment = lowercase_services[name]["environment"]
-    if service_environment[AZURE_PROXY_ENVIRONMENT] != lowercase_environment["https_proxy"]:
-        fail(f"{name} did not prefer the lowercase HTTPS proxy for Azure")
+    if service_environment.get("HTTPS_PROXY") != "":
+        fail(f"{name} accepted lowercase HTTPS proxy compatibility")
+    if service_environment.get("HTTP_PROXY") != "":
+        fail(f"{name} accepted lowercase HTTP proxy compatibility")
+    if service_environment.get("NO_PROXY") != f"{INTERNAL_NO_PROXY},":
+        fail(f"{name} accepted lowercase NO_PROXY compatibility")
 
 uppercase_environment = dict(lowercase_environment)
 uppercase_environment.update({
-    "HTTP_PROXY": "http://upper-http-proxy.example.internal:8080",
-    "HTTPS_PROXY": "http://upper-https-proxy.example.internal:8443",
+    "HTTP_PROXY": "http://upper-http-proxy.example:8080",
+    "HTTPS_PROXY": "http://upper-https-proxy.example:8443",
+    "NO_PROXY": "operator.example",
 })
 uppercase_resolved = resolve(uppercase_environment)
 if uppercase_resolved.returncode != 0:
     fail("Compose could not resolve uppercase optional proxy inputs")
 uppercase_services = json.loads(uppercase_resolved.stdout)["services"]
-for name in proxy_consumers:
-    if (
-        uppercase_services[name]["environment"][AZURE_PROXY_ENVIRONMENT]
-        != uppercase_environment["HTTPS_PROXY"]
-    ):
-        fail(f"{name} did not apply uppercase HTTPS proxy precedence")
+for name in PROXY_CONSUMERS:
+    service_environment = uppercase_services[name]["environment"]
+    if service_environment.get("HTTP_PROXY") != uppercase_environment["HTTP_PROXY"]:
+        fail(f"{name} did not map uppercase HTTP_PROXY")
+    if service_environment.get("HTTPS_PROXY") != uppercase_environment["HTTPS_PROXY"]:
+        fail(f"{name} did not map uppercase HTTPS_PROXY")
+    expected_no_proxy = f"{INTERNAL_NO_PROXY},{uppercase_environment['NO_PROXY']}"
+    if service_environment.get("NO_PROXY") != expected_no_proxy:
+        fail(f"{name} did not preserve and extend the mandatory NO_PROXY prefix")
 
-if lowercase_model["volumes"]["atlas-production-artifacts"] != model["volumes"][
-    "atlas-production-artifacts"
-]:
+if json.loads(uppercase_resolved.stdout)["volumes"]["atlas-production-artifacts"] != model[
+    "volumes"
+]["atlas-production-artifacts"]:
     fail("proxy-only configuration changed SMB volume identity or DriverOpts")
 
 artifact_consumers = {

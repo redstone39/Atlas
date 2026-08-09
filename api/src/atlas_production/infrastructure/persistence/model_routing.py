@@ -157,6 +157,7 @@ class AtlasProviderConnectionRow(OrmBase):
     display_name: Mapped[str] = mapped_column(String, nullable=False)
     provider_type: Mapped[str] = mapped_column(String, nullable=False)
     endpoint_url: Mapped[str] = mapped_column(Text, nullable=False)
+    api_version: Mapped[str | None] = mapped_column(String, nullable=True)
     auth_method: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -477,7 +478,9 @@ def runtime_joined_snapshot(
             == AtlasProviderConnectionRow.provider_type,
         )
     )
-    if route_id is not None:
+    if route_id is None:
+        query = query.filter(AtlasModelRouteRow.is_default.is_(True))
+    else:
         query = query.filter(AtlasModelRouteRow.route_id == route_id)
     route_row, connection_row, secret_row = query.order_by(
         AtlasModelRouteRow.is_default.desc(),

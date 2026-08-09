@@ -8,8 +8,9 @@ import tiktoken
 class ProviderConnectionRecord:
     connection_id: str
     display_name: str
-    provider_type: str
+    provider_type: Literal["openai_compatible", "azure_openai", "anthropic"]
     endpoint_url: str
+    api_version: str | None = None
     auth_method: str = "api_key"
     status: str = "credential_required"
     enabled: bool = False

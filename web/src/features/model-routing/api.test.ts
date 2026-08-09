@@ -87,12 +87,14 @@ describe("provider connection and model routing API boundary", () => {
       connectionId: "connection-a",
       displayName: "Connection A",
       providerType: "azure_openai",
-      endpointUrl: "https://example.openai.azure.com/openai/v1",
+      endpointUrl: "https://example.openai.azure.com",
+      apiVersion: "2024-10-21",
       apiKey: "secret-canary",
     });
     await modelRoutingApi.updateProviderConnection({
       connectionId: "connection-a",
       displayName: "Connection A updated",
+      apiVersion: "2024-12-01-preview",
       apiKey: "",
       expectedRevision: 3,
     });
@@ -132,7 +134,8 @@ describe("provider connection and model routing API boundary", () => {
           connection_id: "connection-a",
           display_name: "Connection A",
           provider_type: "azure_openai",
-          endpoint_url: "https://example.openai.azure.com/openai/v1",
+          endpoint_url: "https://example.openai.azure.com",
+          api_version: "2024-10-21",
           api_key: "secret-canary",
           idempotency_key: expect.stringMatching(/^provider-connection-connection-a-/),
         },
@@ -142,6 +145,7 @@ describe("provider connection and model routing API boundary", () => {
         method: "PATCH",
         body: {
           display_name: "Connection A updated",
+          api_version: "2024-12-01-preview",
           expected_revision: 3,
           idempotency_key: expect.stringMatching(/^provider-connection-connection-a-/),
         },
@@ -208,6 +212,31 @@ describe("provider connection and model routing API boundary", () => {
       .map((request) => JSON.stringify(request.body));
     expect(routeBodies.join(" ")).not.toContain("secret_ref");
     expect(routeBodies.join(" ")).not.toContain("endpoint_url");
+  });
+
+  it("omits Azure api_version for non-Azure provider profiles", async () => {
+    const fetchMock = successfulFetch();
+
+    await modelRoutingApi.createProviderConnection({
+      connectionId: "connection-anthropic",
+      displayName: "Anthropic",
+      providerType: "anthropic",
+      endpointUrl: "https://api.anthropic.com",
+      apiKey: "secret-canary",
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).toEqual({
+      connection_id: "connection-anthropic",
+      display_name: "Anthropic",
+      provider_type: "anthropic",
+      endpoint_url: "https://api.anthropic.com",
+      api_key: "secret-canary",
+      idempotency_key: expect.stringMatching(
+        /^provider-connection-connection-anthropic-/,
+      ),
+    });
+    expect(body).not.toHaveProperty("api_version");
   });
 
   it("keeps page/registry on the public contract without root facades", () => {

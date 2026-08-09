@@ -533,6 +533,7 @@ def upgrade() -> None:
     sa.Column('display_name', sa.String(), nullable=False),
     sa.Column('provider_type', sa.String(), nullable=False),
     sa.Column('endpoint_url', sa.Text(), nullable=False),
+    sa.Column('api_version', sa.String(), nullable=True),
     sa.Column('auth_method', sa.String(), nullable=False),
     sa.Column('status', sa.String(), nullable=False),
     sa.Column('enabled', sa.Boolean(), nullable=False),

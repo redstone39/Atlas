@@ -18,8 +18,9 @@ class StrictMessageReferenceModel(MessageReferenceModel):
 class ProviderConnectionCreateRequest(StrictModel):
     connection_id: str
     display_name: str
-    provider_type: Literal["openai_compatible", "azure_openai"]
+    provider_type: Literal["openai_compatible", "azure_openai", "anthropic"]
     endpoint_url: str
+    api_version: str | None = None
     api_key: SecretStr
     idempotency_key: str
 
@@ -27,6 +28,7 @@ class ProviderConnectionCreateRequest(StrictModel):
 class ProviderConnectionUpdateRequest(StrictModel):
     display_name: str | None = None
     endpoint_url: str | None = None
+    api_version: str | None = None
     api_key: SecretStr | None = None
     enabled: bool | None = None
     expected_revision: int
@@ -41,8 +43,9 @@ class ProviderConnectionTestRequest(StrictModel):
 class ProviderConnectionStatus(StrictMessageReferenceModel):
     connection_id: str
     display_name: str
-    provider_type: Literal["openai_compatible", "azure_openai"]
+    provider_type: Literal["openai_compatible", "azure_openai", "anthropic"]
     endpoint_url: str
+    api_version: str | None = None
     credential_configured: bool
     status: Literal[
         "credential_required",

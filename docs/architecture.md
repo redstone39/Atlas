@@ -53,6 +53,20 @@ Architecture ownership and dependency direction are executable in
 - Protected previews do not provide public URLs, persistent viewer tokens, or
   cross-page document navigation.
 
+## Provider and model routing
+
+The model-routing owner persists Provider connections, encrypted credentials,
+model routes, explicit default selection, readiness, and attempt state.
+Connections use the closed profiles `openai_compatible`, `azure_openai`, and
+`anthropic`; Azure additionally persists its required API protocol version.
+
+LiteLLM 1.95.0 is an in-process completion carrier, not a routing authority.
+Each attempt supplies the stored key, endpoint, and applicable Azure version
+directly to one synchronous completion call with SDK retries disabled. Atlas
+does not use LiteLLM Proxy, Router, global credentials, environment credential
+fallback, or automatic route fallback. A route-less execution fails closed
+unless the persisted explicit default is currently eligible.
+
 ## Reasoning execution
 
 - A conversation records its default `standard|deep` mode. Each accepted

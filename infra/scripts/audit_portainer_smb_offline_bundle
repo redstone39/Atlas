@@ -27,15 +27,15 @@ REQUIRED = {
 AUDIT_PLATFORM = "linux/arm64"
 AUDIT_PLATFORM_TAG = "linux-arm64"
 EXPECTED_LOCK_SERVICES = {"postgres", "qdrant", "redis"}
-PROXY_INPUTS = {
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-}
-AZURE_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
+OPERATOR_PROXY_INPUTS = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+LOWERCASE_PROXY_INPUTS = {"http_proxy", "https_proxy", "no_proxy"}
+ALL_PROXY_INPUTS = OPERATOR_PROXY_INPUTS | LOWERCASE_PROXY_INPUTS
+PROXY_CONSUMERS = {"api", "celery-processing"}
+INTERNAL_NO_PROXY = (
+    "::1,127.0.0.1,localhost,postgres,redis,qdrant,"
+    "plugin-runner,office-renderer,api,web"
+)
+LEGACY_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
 
 
 def fail(message: str) -> None:
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
 
     output = Path(directory) / "bundle"
     builder_environment = dict(os.environ)
-    for name in PROXY_INPUTS:
+    for name in ALL_PROXY_INPUTS:
         builder_environment.pop(name, None)
     generated = subprocess.run(
         [
@@ -131,20 +131,65 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     if resolved.returncode != 0:
         fail("generated image-only Compose did not resolve")
     model = json.loads(resolved.stdout)
+    if model.get("name") != "infra":
+        fail("offline Compose project identity is not infra")
     services = model["services"]
-    proxy_consumers = {"api", "celery-processing"}
     for name, service in services.items():
         service_environment = service.get("environment", {})
-        if PROXY_INPUTS & set(service_environment):
-            fail(f"standard proxy environment leaked into offline service {name}")
-        if name in proxy_consumers:
-            if service_environment.get(AZURE_PROXY_ENVIRONMENT) != "":
-                fail(f"{name} did not preserve direct Azure behavior by default")
-        elif AZURE_PROXY_ENVIRONMENT in service_environment:
-            fail(f"Azure proxy setting leaked into offline service {name}")
+        if LEGACY_PROXY_ENVIRONMENT in service_environment:
+            fail(f"legacy Azure proxy setting remains in offline service {name}")
+        if LOWERCASE_PROXY_INPUTS & set(service_environment):
+            fail(f"lowercase proxy environment leaked into offline service {name}")
+        if name in PROXY_CONSUMERS:
+            if service_environment.get("HTTPS_PROXY") != "":
+                fail(f"{name} did not preserve direct HTTPS behavior by default")
+            if service_environment.get("HTTP_PROXY") != "":
+                fail(f"{name} did not preserve direct HTTP behavior by default")
+            if service_environment.get("NO_PROXY") != f"{INTERNAL_NO_PROXY},":
+                fail(f"{name} is missing the mandatory internal NO_PROXY prefix")
+        elif OPERATOR_PROXY_INPUTS & set(service_environment):
+            fail(f"standard proxy setting leaked into offline service {name}")
 
-    proxy_environment = dict(environment)
-    proxy_environment["https_proxy"] = "http://proxy.example.internal:8080"
+    lowercase_environment = dict(environment)
+    lowercase_environment.update({
+        "http_proxy": "http://lower-proxy.example:8080",
+        "https_proxy": "http://lower-proxy.example:8443",
+        "no_proxy": "lowercase.example",
+    })
+    lowercase_resolved = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(output / "docker-compose.yml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=REPOSITORY,
+        env=lowercase_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if lowercase_resolved.returncode != 0:
+        fail("generated image-only Compose rejected unrelated lowercase host inputs")
+    lowercase_model = json.loads(lowercase_resolved.stdout)
+    for name in PROXY_CONSUMERS:
+        service_environment = lowercase_model["services"][name]["environment"]
+        if service_environment.get("HTTPS_PROXY") != "":
+            fail(f"offline {name} accepted lowercase HTTPS proxy compatibility")
+        if service_environment.get("HTTP_PROXY") != "":
+            fail(f"offline {name} accepted lowercase HTTP proxy compatibility")
+        if service_environment.get("NO_PROXY") != f"{INTERNAL_NO_PROXY},":
+            fail(f"offline {name} accepted lowercase NO_PROXY compatibility")
+
+    proxy_environment = dict(lowercase_environment)
+    proxy_environment.update({
+        "HTTP_PROXY": "http://proxy.example:8080",
+        "HTTPS_PROXY": "http://proxy.example:8443",
+        "NO_PROXY": "operator.example",
+    })
     proxy_resolved = subprocess.run(
         [
             "docker",
@@ -162,14 +207,18 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         check=False,
     )
     if proxy_resolved.returncode != 0:
-        fail("generated image-only Compose rejected optional proxy input")
+        fail("generated image-only Compose rejected uppercase proxy input")
     proxy_model = json.loads(proxy_resolved.stdout)
-    for name in proxy_consumers:
-        if (
-            proxy_model["services"][name]["environment"][AZURE_PROXY_ENVIRONMENT]
-            != proxy_environment["https_proxy"]
+    for name in PROXY_CONSUMERS:
+        service_environment = proxy_model["services"][name]["environment"]
+        if service_environment.get("HTTP_PROXY") != proxy_environment["HTTP_PROXY"]:
+            fail(f"offline {name} did not map uppercase HTTP_PROXY")
+        if service_environment.get("HTTPS_PROXY") != proxy_environment["HTTPS_PROXY"]:
+            fail(f"offline {name} did not map uppercase HTTPS_PROXY")
+        if service_environment.get("NO_PROXY") != (
+            f"{INTERNAL_NO_PROXY},{proxy_environment['NO_PROXY']}"
         ):
-            fail(f"offline {name} did not resolve the optional Azure proxy")
+            fail(f"offline {name} did not extend the mandatory NO_PROXY prefix")
     if proxy_model["volumes"]["atlas-production-artifacts"] != model["volumes"][
         "atlas-production-artifacts"
     ]:
@@ -213,11 +262,18 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     compose_text = (output / "docker-compose.yml").read_text(encoding="utf-8")
     if "${ATLAS_SMB_PASSWORD:?set SMB password}" not in compose_text:
         fail("operator SMB variable contract was not preserved")
-    if (
-        "${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
-        not in compose_text
+    expected_proxy_interpolations = {
+        "HTTP_PROXY: ${HTTP_PROXY:-}",
+        "HTTPS_PROXY: ${HTTPS_PROXY:-}",
+        "NO_PROXY: "
+        f"{INTERNAL_NO_PROXY},${{NO_PROXY:-}}",
+    }
+    if not all(value in compose_text for value in expected_proxy_interpolations):
+        fail("uppercase standard proxy interpolation contract was not preserved")
+    if LEGACY_PROXY_ENVIRONMENT in compose_text or any(
+        f"${{{name}" in compose_text for name in LOWERCASE_PROXY_INPUTS
     ):
-        fail("optional Azure proxy interpolation contract was not preserved")
+        fail("legacy or lowercase proxy compatibility remains in generated Compose")
     if str(REPOSITORY) in compose_text or "context:" in compose_text:
         fail("generated Compose retained a packaging-host path")
     embedding_init = services["embedding-model-init"]

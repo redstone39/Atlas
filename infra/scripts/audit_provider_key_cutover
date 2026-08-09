@@ -32,6 +32,7 @@ INSTRUCTION_FILES = (
     REPO_ROOT / "docs/architecture.md",
     REPO_ROOT / "docs/configuration.md",
 )
+PROVIDER_FILE = REPO_ROOT / "api/src/atlas_production/providers.py"
 
 
 def active_source_files(root: Path):
@@ -98,6 +99,40 @@ def main() -> int:
             ],
         )
     )
+    provider_text = PROVIDER_FILE.read_text(encoding="utf-8")
+    for label, pattern in (
+        (
+            "legacy direct Provider adapter",
+            re.compile(
+                r"\b(?:_HttpProvider|OpenAICompatibleProvider|AzureOpenAIProvider|conversation_http_payload|default_provider_factory)\b"
+            ),
+        ),
+        ("LiteLLM Router", re.compile(r"\blitellm\.Router\b")),
+        (
+            "LiteLLM module-global credential assignment",
+            re.compile(r"\blitellm\.(?:api_key|api_base|api_version)\s*="),
+        ),
+        (
+            "Provider credential/base/version environment fallback",
+            re.compile(
+                r"\bos\.(?:getenv|environ).*?(?:OPENAI|AZURE|ANTHROPIC|LITELLM).*?(?:KEY|BASE|VERSION)",
+                re.S,
+            ),
+        ),
+    ):
+        if pattern.search(provider_text):
+            findings.append(f"{PROVIDER_FILE.relative_to(REPO_ROOT)}: {label}")
+    for required in (
+        "class LiteLLMProvider:",
+        '"num_retries": 0',
+        '"stream": False',
+        '"api_key": self.api_key',
+        '"api_base": self.api_base',
+    ):
+        if required not in provider_text:
+            findings.append(
+                f"{PROVIDER_FILE.relative_to(REPO_ROOT)}: missing required carrier invariant {required}"
+            )
 
     for path in INSTRUCTION_FILES:
         if not path.exists():

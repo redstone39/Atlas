@@ -17,14 +17,18 @@ services:
 
   api:
     environment:
-      ATLAS_AZURE_PROXY_URL: ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web,${NO_PROXY:-}
     depends_on:
       artifact-storage-init:
         condition: service_completed_successfully
 
   celery-processing:
     environment:
-      ATLAS_AZURE_PROXY_URL: ${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web,${NO_PROXY:-}
     depends_on:
       artifact-storage-init:
         condition: service_completed_successfully

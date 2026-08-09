@@ -13,9 +13,10 @@ upstream license and attribution files.
 ## Python runtime dependencies
 
 - MIT family: `alembic` (MIT), `fastapi` (MIT), `jsonschema` (MIT),
-  `docling` (MIT), `openpyxl` (MIT), `python-docx` (MIT), `python-pptx`
-  (MIT), `onnxruntime` (MIT), `sqlalchemy` (MIT), `tiktoken` (MIT), and
-  `pillow` (MIT-CMU).
+  `docling` (MIT), `litellm` (MIT, pinned `1.95.0` as the in-process completion
+  carrier), `openpyxl` (MIT), `python-docx` (MIT), `python-pptx` (MIT),
+  `onnxruntime` (MIT), `sqlalchemy` (MIT), `tiktoken` (MIT), and `pillow`
+  (MIT-CMU).
 - BSD family: `celery` (BSD-3-Clause), `httpx` (BSD-3-Clause), `pypdf`
   (BSD-3-Clause), `uvicorn` (BSD-3-Clause), and `torchvision` (BSD family).
 - Apache family: `fastembed` (Apache-2.0), `python-multipart`
