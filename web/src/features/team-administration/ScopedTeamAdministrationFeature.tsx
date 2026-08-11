@@ -1,4 +1,4 @@
-import { Copy, MailPlus, ShieldCheck, Trash2, UserRoundPlus, UsersRound } from "lucide-react";
+import { Copy, FileText, MailPlus, ShieldCheck, Trash2, UserRoundPlus, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -42,7 +42,8 @@ import {
 } from "../../shared/product-ui";
 import {
   adminTeamDetailRoute,
-  type AppRoute,
+  documentLibraryDestination,
+  type AppDestination,
   type AppRouteMatch,
 } from "../../shared/routes";
 import type { TeamScopeRole } from "../../shared/identity-access-contracts";
@@ -64,7 +65,7 @@ export function ScopedTeamAdministrationFeature({
   onRefresh,
 }: {
   detail: Extract<AppRouteMatch, { kind: "admin-team-detail" }> | null;
-  onNavigate: (route: AppRoute) => void;
+  onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -400,10 +401,21 @@ export function ScopedTeamAdministrationFeature({
         ]}
         onNavigate={onNavigate}
       />
-      <PageHeader
-        title={selectedTeam.name}
-        description={t("teams.membersForTeamDescription", { team: selectedTeam.name })}
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageHeader
+          title={selectedTeam.name}
+          description={t("teams.membersForTeamDescription", { team: selectedTeam.name })}
+        />
+        <Button
+          variant="outline"
+          onClick={() =>
+            onNavigate(documentLibraryDestination("team", selectedTeam.team_id))
+          }
+        >
+          <FileText data-icon="inline-start" />
+          {t("documentLibrary.manageTargetDocuments")}
+        </Button>
+      </div>
 
       {actionError && (
         <Alert variant="destructive">

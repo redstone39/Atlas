@@ -120,6 +120,13 @@ const adminListScenarios = [
     emptyTitle: "No users found",
   },
   {
+    route: "/admin/directory",
+    listPath: "/api/v1/admin/directory-connections",
+    heading: "Directory sources",
+    loadingTitle: "Loading directory sources",
+    emptyTitle: "No directory sources",
+  },
+  {
     route: "/admin/teams",
     listPath: "/api/v1/admin/teams",
     heading: "Teams",
@@ -333,7 +340,7 @@ describe("Atlas production web", () => {
     });
     render(<App />);
     await screen.findByRole("heading", { name: "Atlas" });
-    fireEvent.change(screen.getByLabelText("Email"), {
+    fireEvent.change(screen.getByLabelText("Email or username"), {
       target: { value: "admin@example.test" },
     });
     fireEvent.change(screen.getByLabelText("Password"), {
@@ -351,11 +358,11 @@ describe("Atlas production web", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Atlas" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Email")).toHaveValue("");
+    expect(screen.getByLabelText("Email or username")).toHaveValue("");
     expect(screen.getByLabelText("Password")).toHaveValue("");
     const signIn = screen.getByRole("button", { name: /sign in/i });
     expect(signIn).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Email"), {
+    fireEvent.change(screen.getByLabelText("Email or username"), {
       target: { value: "admin@example.test" },
     });
     fireEvent.change(screen.getByLabelText("Password"), {
@@ -366,6 +373,16 @@ describe("Atlas production web", () => {
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(screen.getByText("Atlas Admin")).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/auth/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          identifier: "admin@example.test",
+          password: "TestLoginPassword!42",
+        }),
+      }),
+    );
   });
 
   it("can switch the production UI between English and Traditional Chinese", async () => {
@@ -396,7 +413,7 @@ describe("Atlas production web", () => {
     expect(screen.queryByText(
       "Atlas selects and retrieves relevant sources in multiple steps from the documents you can currently access.",
     )).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Knowledge scope" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
     expect(screen.queryByText("Conversations")).not.toBeInTheDocument();
     const composer = screen.getByLabelText("Message");
@@ -588,18 +605,54 @@ describe("Atlas production web", () => {
     expect(messageScrollerSource).not.toContain("content-visibility:auto");
   });
 
-  it("uses one radius token and warm semantic theme tokens", () => {
+  it("uses one radius token and neutral light theme tokens", () => {
     const styles = readFileSync("src/styles.css", "utf8");
 
-    expect(styles).toContain("--radius: 0.75rem;");
+    expect(styles).toContain("--radius: 0.5rem;");
     expect(styles).toContain("--radius-md: var(--radius);");
     expect(styles).toContain("--radius-lg: var(--radius);");
     expect(styles).toContain("--radius-xl: var(--radius);");
+    expect(styles).toContain("--radius-2xl: var(--radius);");
     expect(styles).toContain("cursor: pointer;");
     expect(styles).toContain("cursor: text;");
     expect(styles).not.toContain('[data-slot$="-item"]');
-    expect(styles).toContain("--background: 42 38% 96%;");
-    expect(styles).not.toContain("--background: 210 40% 98%;");
+    expect(styles).toContain("--background: 0 0% 98%;");
+    expect(styles).not.toContain("--background: 42 38% 96%;");
+    const lightThemeTokens = {
+      "--background": "0 0% 98%",
+      "--foreground": "0 0% 9%",
+      "--card": "0 0% 100%",
+      "--card-foreground": "0 0% 9%",
+      "--popover": "0 0% 100%",
+      "--popover-foreground": "0 0% 9%",
+      "--primary": "0 0% 9%",
+      "--primary-foreground": "0 0% 98%",
+      "--secondary": "0 0% 96.1%",
+      "--secondary-foreground": "0 0% 9%",
+      "--muted": "0 0% 96.1%",
+      "--muted-foreground": "0 0% 45.1%",
+      "--accent": "0 0% 93.5%",
+      "--accent-foreground": "0 0% 9%",
+      "--border": "0 0% 89.8%",
+      "--input": "0 0% 89.8%",
+      "--sidebar": "0 0% 96.5%",
+      "--sidebar-foreground": "0 0% 18%",
+      "--sidebar-primary": "0 0% 9%",
+      "--sidebar-primary-foreground": "0 0% 98%",
+      "--sidebar-accent": "0 0% 92.5%",
+      "--sidebar-accent-foreground": "0 0% 9%",
+      "--sidebar-border": "0 0% 88%",
+      "--ring": "168 44% 32%",
+      "--sidebar-ring": "168 44% 32%",
+      "--destructive": "0 73% 41%",
+      "--destructive-foreground": "0 0% 100%",
+      "--evidence": "173 70% 27%",
+      "--warning": "33 88% 34%",
+      "--info": "203 80% 36%",
+    } as const;
+    for (const [token, value] of Object.entries(lightThemeTokens)) {
+      expect(styles).toContain(`${token}: ${value};`);
+    }
     for (const token of [
       "--background",
       "--foreground",
@@ -687,7 +740,15 @@ describe("Atlas production web", () => {
     const { unmount } = render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
+    const emptyScopeTrigger = await screen.findByRole("button", {
+      name: "Knowledge scope",
+    });
+    await waitFor(() => expect(emptyScopeTrigger).toBeEnabled());
+    fireEvent.click(emptyScopeTrigger);
+    expect(
+      screen.getByRole("dialog", { name: "Select knowledge scope" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByRole("button", { name: /^send$/i })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Hello" } });
     expect(screen.getByRole("button", { name: /^send$/i })).toBeEnabled();
@@ -704,7 +765,7 @@ describe("Atlas production web", () => {
     )).toBeInTheDocument();
   });
 
-  it("/workspace creates conversations without a caller-selected knowledge scope", async () => {
+  it("/workspace creates a default-all conversation when no scope is selected", async () => {
     window.history.pushState({}, "", "/workspace");
     mockApi(memberSession, readyReadiness);
     render(<App />);
@@ -727,9 +788,10 @@ describe("Atlas production web", () => {
     );
     expect(createConversationCall).toBeDefined();
     const body = JSON.parse(String(createConversationCall![1]!.body));
-    expect(Object.keys(body)).toEqual(["title", "response_language"]);
+    expect(Object.keys(body)).toEqual(["title", "response_language", "tag_refs"]);
     expect(body.title).toBe("What is the approved value for the selected item?");
     expect(body.response_language).toBe("en");
+    expect(body.tag_refs).toEqual([]);
     const createTurnCall = vi.mocked(global.fetch).mock.calls.find(
       ([input, init]) =>
         String(input).endsWith("/turns") && init?.method === "POST",
@@ -742,9 +804,151 @@ describe("Atlas production web", () => {
     );
   });
 
+  it("/workspace freezes selected project and team refs on conversation create", async () => {
+    window.history.pushState({}, "", "/workspace");
+    mockApi(memberSession, readyReadiness);
+    render(<App />);
+
+    const scopeTrigger = await screen.findByRole("button", {
+      name: "Knowledge scope",
+    });
+    await waitFor(() => expect(scopeTrigger).toBeEnabled());
+    fireEvent.click(scopeTrigger);
+
+    let scopeDialog = screen.getByRole("dialog", {
+      name: "Select knowledge scope",
+    });
+    const scopeSearch = within(scopeDialog).getByLabelText(
+      "Search knowledge scope",
+    );
+    fireEvent.change(scopeSearch, { target: { value: "not-a-scope" } });
+    expect(
+      within(scopeDialog).getByText("No matching knowledge scopes"),
+    ).toBeInTheDocument();
+    fireEvent.change(scopeSearch, {
+      target: { value: "Signal Integrity Alpha" },
+    });
+    expect(
+      within(scopeDialog).getByText("Signal Integrity Alpha"),
+    ).toBeInTheDocument();
+    expect(within(scopeDialog).queryByText("Platform")).not.toBeInTheDocument();
+    fireEvent.click(
+      within(scopeDialog).getByRole("checkbox", {
+        name: /Signal Integrity Alpha/,
+      }),
+    );
+    fireEvent.click(within(scopeDialog).getByRole("button", { name: "Apply" }));
+
+    fireEvent.click(scopeTrigger);
+    scopeDialog = screen.getByRole("dialog", {
+      name: "Select knowledge scope",
+    });
+    expect(
+      within(scopeDialog).getByRole("checkbox", {
+        name: /Signal Integrity Alpha/,
+      }),
+    ).toBeChecked();
+    fireEvent.change(
+      within(scopeDialog).getByLabelText("Search knowledge scope"),
+      { target: { value: "Platform" } },
+    );
+    fireEvent.click(
+      within(scopeDialog).getByRole("checkbox", { name: /Platform/ }),
+    );
+    fireEvent.click(within(scopeDialog).getByRole("button", { name: "Apply" }));
+    expect(scopeTrigger).toHaveTextContent("2 scopes selected");
+
+    fireEvent.click(scopeTrigger);
+    scopeDialog = screen.getByRole("dialog", {
+      name: "Select knowledge scope",
+    });
+    fireEvent.click(
+      within(scopeDialog).getByRole("checkbox", {
+        name: /Signal Integrity Alpha/,
+      }),
+    );
+    fireEvent.click(within(scopeDialog).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(scopeTrigger);
+    scopeDialog = screen.getByRole("dialog", {
+      name: "Select knowledge scope",
+    });
+    expect(
+      within(scopeDialog).getByRole("checkbox", {
+        name: /Signal Integrity Alpha/,
+      }),
+    ).toBeChecked();
+    expect(
+      within(scopeDialog).getByRole("checkbox", { name: /Platform/ }),
+    ).toBeChecked();
+    fireEvent.click(within(scopeDialog).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "What is the controlled impedance target?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    expect(
+      await screen.findByText("A synthetic document-backed statement."),
+    ).toBeInTheDocument();
+
+    const createConversationCall = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === "/api/v1/workspace/conversations" &&
+        init?.method === "POST",
+    );
+    expect(createConversationCall).toBeDefined();
+    expect(JSON.parse(String(createConversationCall![1]!.body))).toEqual({
+      title: "What is the controlled impedance target?",
+      response_language: "en",
+      tag_refs: [
+        {
+          tag_type: "project",
+          tag_id: "proj-signal-integrity-alpha",
+        },
+        { tag_type: "team", tag_id: "team-platform" },
+      ],
+    });
+    expect(window.location.pathname).toBe(
+      "/workspace/conversations/conv-supported-001",
+    );
+    expect(screen.queryByLabelText("Knowledge scope")).not.toBeInTheDocument();
+  });
+
+  it("/workspace keeps default-all create available when scope options fail", async () => {
+    window.history.pushState({}, "", "/workspace");
+    mockApi(memberSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/v1/workspace/tag-scope") {
+        return Promise.reject(new Error("scope unavailable"));
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    expect(await screen.findByText("Could not load this list")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "Use every source I can access" },
+    });
+    expect(screen.getByRole("button", { name: /^send$/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    expect(
+      await screen.findByText("A synthetic document-backed statement."),
+    ).toBeInTheDocument();
+
+    const createConversationCall = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === "/api/v1/workspace/conversations" &&
+        init?.method === "POST",
+    );
+    expect(JSON.parse(String(createConversationCall![1]!.body)).tag_refs)
+      .toEqual([]);
+  });
   it("loads a canonical Workspace conversation route directly", async () => {
     window.history.pushState(
       {},
+
       "",
       "/workspace/conversations/conv-supported-001",
     );
@@ -1216,12 +1420,13 @@ describe("Atlas production web", () => {
     expect(
       screen.queryByText("What is the approved value for the selected item?"),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Knowledge scope" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Example conversation/i }));
     expect(
       await screen.findByText("What is the approved value for the selected item?"),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Knowledge scope" })).not.toBeInTheDocument();
     expect(container.querySelector('time[datetime="2026-07-09T00:00:01+00:00"]')).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("Message"), {
@@ -3029,6 +3234,108 @@ describe("Atlas production web", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it("/admin/directory creates, tests, searches, imports, and exposes read-only directory profiles", async () => {
+    window.history.pushState({}, "", "/admin/directory");
+    mockApi(adminSession, readyReadiness);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Directory sources" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add directory" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Display name"), {
+      target: { value: "Main AD" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Host"), {
+      target: { value: "ad.example.test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Bind DN"), {
+      target: { value: "CN=Atlas,OU=Services,DC=example,DC=test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Bind password"), {
+      target: { value: "bind-secret-canary" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("User base DN"), {
+      target: { value: "OU=People,DC=example,DC=test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Custom CA certificate (PEM)"), {
+      target: { value: "-----BEGIN CERTIFICATE-----\\nca-secret-canary" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save directory" }));
+
+    const connectionCard = (await screen.findAllByText("Main AD"))
+      .map((element) => element.closest<HTMLElement>('[data-slot="card"]'))
+      .find((element): element is HTMLElement => element !== null)!;
+    expect(connectionCard).not.toHaveTextContent("bind-secret-canary");
+    expect(connectionCard).not.toHaveTextContent("ca-secret-canary");
+    fireEvent.click(within(connectionCard).getByRole("button", { name: "Test connection" }));
+    expect(await screen.findByText(/Directory connection test passed/i)).toBeInTheDocument();
+    fireEvent.click(within(connectionCard).getByRole("button", { name: "Edit directory" }));
+    const editDialog = await screen.findByRole("dialog");
+    expect(
+      within(editDialog).getByRole("combobox", { name: "Directory type" }),
+    ).toBeEnabled();
+    await chooseDialogOption(editDialog, "Directory type", "LDAP");
+    expect(within(editDialog).getByLabelText("Login attribute")).toHaveValue("uid");
+    expect(within(editDialog).getByLabelText("Stable ID attribute")).toHaveValue("entryUUID");
+    fireEvent.click(within(editDialog).getByRole("button", { name: "Save directory" }));
+    await waitFor(() => {
+      const updateCall = vi.mocked(global.fetch).mock.calls.find(
+        ([input, init]) =>
+          String(input).startsWith("/api/v1/admin/directory-connections/") &&
+          init?.method === "PATCH",
+      );
+      expect(JSON.parse(String(updateCall?.[1]?.body))).toMatchObject({
+        provider_type: "ldap",
+        login_attribute: "uid",
+        stable_id_attribute: "entryUUID",
+      });
+    });
+
+    fireEvent.change(screen.getByLabelText("Name, email, or username"), {
+      target: { value: "a" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(await screen.findByText("Grace Hopper")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada Lovelace" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Grace Hopper" }));
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    expect(await screen.findByText(/Directory users imported/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Users" }));
+    expect(await screen.findByRole("heading", { name: "Users" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Search users"), {
+      target: { value: "compiler" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(await screen.findByText("Grace Hopper")).toBeInTheDocument();
+    expect(screen.queryByText("Ada Lovelace")).not.toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/admin/users?q=compiler"),
+      ),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByText("Grace Hopper"));
+    expect(await screen.findByRole("heading", { name: "Grace Hopper" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit profile" })).not.toBeInTheDocument();
+    expect(screen.getByText("grace")).toBeInTheDocument();
+    expect(screen.getByText("Compiler")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh profile" }));
+    expect(await screen.findByText("Directory profile refreshed.")).toBeInTheDocument();
+
+    const createCall = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === "/api/v1/admin/directory-connections" &&
+        init?.method === "POST",
+    );
+    const createBody = JSON.parse(String(createCall?.[1]?.body));
+    expect(createBody).toMatchObject({
+      bind_password: "bind-secret-canary",
+      custom_ca_pem: "-----BEGIN CERTIFICATE-----\\nca-secret-canary",
+    });
+  });
+
   it("/admin/users owns invite and user lifecycle controls", async () => {
     // acceptance-scenario:SYS-01
     window.history.pushState({}, "", "/admin/users");
@@ -3634,6 +3941,11 @@ describe("Atlas production web", () => {
       "/api/v1/admin/audit/events",
       expect.any(Object),
     );
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        String(input).startsWith("/api/v1/admin/conversations"),
+      ),
+    ).toBe(false);
     expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
     const eventTime = container.querySelector('time[datetime="2026-07-08T00:00:00+00:00"]');
     expect(eventTime).toBeInTheDocument();
@@ -3643,15 +3955,44 @@ describe("Atlas production web", () => {
     expect(screen.queryByText("atlas_agent_visible_once")).not.toBeInTheDocument();
   });
 
-  it("/admin/audit opens directly on conversation history without a landing layer", async () => {
+  it("/admin/audit is a zero-prefetch record type landing", async () => {
     window.history.pushState({}, "", "/admin/audit");
     mockApi(adminSession, readyReadiness);
     render(<App />);
 
+    expect(await screen.findByRole("heading", { name: "Audit" })).toBeInTheDocument();
+    expect(await screen.findByText("Conversation history")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Review conversations and open runtime details when needed.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Operation history")).toBeInTheDocument();
+    expect(screen.getByText("Review recent management activity.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open conversation history" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open operation history" }),
+    ).toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        String(input).startsWith("/api/v1/admin/conversations"),
+      ),
+    ).toBe(false);
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(
+        ([input]) => String(input) === "/api/v1/admin/audit/events",
+      ),
+    ).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open conversation history" }),
+    );
+    expect(window.location.pathname).toBe("/admin/audit/conversations");
     expect(
       await screen.findByRole("button", { name: /Example conversation/ }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open operation history" })).toBeInTheDocument();
     expect(
       vi.mocked(global.fetch).mock.calls.some(([input]) =>
         String(input).startsWith("/api/v1/admin/conversations"),
@@ -3662,8 +4003,6 @@ describe("Atlas production web", () => {
         ([input]) => String(input) === "/api/v1/admin/audit/events",
       ),
     ).toBe(false);
-    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
-    expect(window.location.pathname).toBe("/admin/audit");
   });
 
   it("fails closed before protected audit fetches for a non-admin detail route", async () => {
@@ -3701,10 +4040,13 @@ describe("Atlas production web", () => {
   });
 
   it("restores the audit collection and transcript through browser history", async () => {
-    window.history.pushState({}, "", "/admin/audit/conversations");
+    window.history.pushState({}, "", "/admin/audit");
     mockApi(adminSession, readyReadiness);
     render(<App />);
 
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open conversation history" }),
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: /Example conversation/ }),
     );
@@ -3718,7 +4060,38 @@ describe("Atlas production web", () => {
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/audit/conversations"),
     );
-    expect(await screen.findByRole("button", { name: /Example conversation/ })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: /Example conversation/ }),
+    ).toBeInTheDocument();
+
+    const protectedFetchCount = vi.mocked(global.fetch).mock.calls.filter(
+      ([input]) =>
+        String(input).startsWith("/api/v1/admin/conversations") ||
+        String(input) === "/api/v1/admin/audit/events",
+    ).length;
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/audit"));
+    expect(
+      await screen.findByRole("button", { name: "Open conversation history" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open operation history" }),
+    ).toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.filter(
+        ([input]) =>
+          String(input).startsWith("/api/v1/admin/conversations") ||
+          String(input) === "/api/v1/admin/audit/events",
+      ),
+    ).toHaveLength(protectedFetchCount);
+
+    act(() => window.history.forward());
+    await waitFor(() =>
+      expect(window.location.pathname).toBe("/admin/audit/conversations"),
+    );
+    expect(
+      await screen.findByRole("button", { name: /Example conversation/ }),
+    ).toBeInTheDocument();
 
     act(() => window.history.forward());
     await waitFor(() =>
@@ -5383,6 +5756,391 @@ describe("Atlas production web", () => {
     expect(attempts).toBe(2);
   });
 
+  it("contextual document management opens the selected Project", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/projects/proj-admin-live/profile",
+    );
+    mockApi(projectAdminSession, readyReadiness);
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Admin Live Project" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage documents" }));
+
+    await waitFor(() =>
+      expect(window.location.pathname + window.location.search).toBe(
+        "/admin/document-library?scope_type=project&scope_id=proj-admin-live",
+      ),
+    );
+    expect(await screen.findByLabelText("Target")).toHaveTextContent(
+      "Project: Admin Live Project",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Upload to")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Project: Admin Live Project"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("contextual document management opens the selected Team", async () => {
+    window.history.pushState({}, "", "/admin/teams/team-si/members");
+    mockApi(teamAdminSession, readyReadiness);
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Signal Integrity" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage documents" }));
+
+    await waitFor(() =>
+      expect(window.location.pathname + window.location.search).toBe(
+        "/admin/document-library?scope_type=team&scope_id=team-si",
+      ),
+    );
+    expect(await screen.findByLabelText("Target")).toHaveTextContent(
+      "Team: Signal Integrity",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Upload to")).toBeInTheDocument();
+    expect(within(dialog).getByText("Team: Signal Integrity")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("contextual document management preserves the selected Team for System Admin", async () => {
+    window.history.pushState({}, "", "/admin/teams/team-si/profile");
+    mockApi(adminWithProjectSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let delayDocumentScopes = false;
+    let resolveDocumentScopes: (response: Response) => void = () => {};
+    const delayedDocumentScopes = new Promise<Response>((resolve) => {
+      resolveDocumentScopes = resolve;
+    });
+    global.fetch = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), "http://localhost");
+        if (
+          delayDocumentScopes &&
+          url.pathname === "/api/v1/admin/teams" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return delayedDocumentScopes;
+        }
+        return normalFetch(input, init);
+      },
+    );
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Signal Integrity" }),
+    ).toBeInTheDocument();
+    delayDocumentScopes = true;
+    fireEvent.click(screen.getByRole("button", { name: "Manage documents" }));
+
+    await waitFor(() =>
+      expect(window.location.pathname + window.location.search).toBe(
+        "/admin/document-library?scope_type=team&scope_id=team-si",
+      ),
+    );
+    expect(
+      await screen.findByText("Loading document library"),
+    ).toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.filter(([input, init]) => {
+        const url = new URL(String(input), "http://localhost");
+        return (
+          url.pathname === "/api/v1/admin/document-library" &&
+          (init?.method ?? "GET") === "GET"
+        );
+      }),
+    ).toHaveLength(0);
+
+    resolveDocumentScopes(
+      await jsonResponse({
+        teams: [
+          {
+            team_id: "team-platform",
+            name: "Platform",
+            parent_team_id: null,
+            status: "active",
+            created_at: "2026-07-08T00:00:00Z",
+            inherit_parent_documents: true,
+          },
+          {
+            team_id: "team-si",
+            name: "Signal Integrity",
+            parent_team_id: "team-platform",
+            status: "active",
+            created_at: "2026-07-08T00:00:00Z",
+            inherit_parent_documents: true,
+          },
+        ],
+        memberships: [],
+      }),
+    );
+
+    expect(await screen.findByLabelText("Target")).toHaveTextContent(
+      "Team: Signal Integrity",
+    );
+    await waitFor(() => {
+      const listUrls = vi.mocked(global.fetch).mock.calls
+        .filter(([, init]) => (init?.method ?? "GET") === "GET")
+        .map(([input]) => new URL(String(input), "http://localhost"))
+        .filter((url) => url.pathname === "/api/v1/admin/document-library");
+      expect(listUrls).toHaveLength(1);
+      expect(listUrls[0]?.searchParams.get("scope_type")).toBe("team");
+      expect(listUrls[0]?.searchParams.get("scope_id")).toBe("team-si");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Team: Signal Integrity")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    );
+    expect(
+      await within(dialog).findByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("Document Library upload preserves draft on failure", async () => {
+    window.history.pushState({}, "", "/admin/document-library");
+    mockApi(adminWithProjectSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let uploadAttempts = 0;
+    let resolveFirstUpload!: (response: Response) => void;
+    const firstUpload = new Promise<Response>((resolve) => {
+      resolveFirstUpload = resolve;
+    });
+    global.fetch = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), "http://localhost");
+        if (
+          url.pathname === "/api/v1/admin/document-library" &&
+          init?.method === "POST"
+        ) {
+          uploadAttempts += 1;
+          if (uploadAttempts === 1) return firstUpload;
+        }
+        return normalFetch(input, init);
+      },
+    );
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Document Library" }),
+    ).toBeInTheDocument();
+    fireEvent.click(await screen.findByLabelText("Target"));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: "Team: Signal Integrity",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "Supports PDF, Word, PowerPoint, Excel, TXT, and CSV; one file per upload, up to 250 MiB.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    );
+    const uploadFile = new File(["%PDF-1.4"], "retry-upload.pdf", {
+      type: "application/pdf",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Document file"), {
+      target: { files: [uploadFile] },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Document description"), {
+      target: { value: "Preserve this draft" },
+    });
+    fireEvent.click(within(dialog).getByText("Allow member download"));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Upload document" }),
+    );
+    const uploadingLabel = await screen.findByText("Uploading…");
+    expect(uploadingLabel.closest("button")).toBeDisabled();
+    const pendingDialog = uploadingLabel.closest('[role="dialog"]') as HTMLElement;
+    expect(
+      within(pendingDialog).getByRole("button", { name: "Cancel" }),
+    ).toBeDisabled();
+    expect(
+      within(pendingDialog).queryByRole("button", { name: "Close" }),
+    ).not.toBeInTheDocument();
+    fireEvent.keyDown(pendingDialog, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBe(pendingDialog);
+    const overlay = document.querySelector('[data-slot="dialog-overlay"]');
+    expect(overlay).not.toBeNull();
+    fireEvent.pointerDown(overlay!);
+    fireEvent.click(overlay!);
+    expect(screen.getByRole("dialog")).toBe(pendingDialog);
+    resolveFirstUpload(
+      await jsonResponse(
+        {
+          message_code: "artifact.storage_is_temporarily_unavailable",
+          message_params: {},
+        },
+        503,
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("dialog")).getByRole("alert"),
+      ).toHaveTextContent(
+        "Storage is temporarily unavailable. Try again later.",
+      ),
+    );
+    const retryDialog = screen.getByRole("dialog");
+    expect(within(retryDialog).getByLabelText("Document file")).toHaveProperty(
+      "files.0",
+      uploadFile,
+    );
+    expect(within(retryDialog).getByLabelText("Document description")).toHaveValue(
+      "Preserve this draft",
+    );
+    expect(
+      within(retryDialog).getByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    ).toBeChecked();
+    expect(
+      within(retryDialog).getByRole("checkbox", {
+        name: "Allow member download",
+      }),
+    ).toBeChecked();
+
+    fireEvent.click(
+      within(retryDialog).getByRole("button", { name: "Upload document" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(uploadAttempts).toBe(2);
+  });
+
+  it("Document Library upload closes after acceptance before refresh failure", async () => {
+    window.history.pushState({}, "", "/admin/document-library");
+    mockApi(adminWithProjectSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let uploadAccepted = false;
+    global.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), "http://localhost");
+        if (
+          url.pathname === "/api/v1/admin/document-library" &&
+          init?.method === "POST"
+        ) {
+          uploadAccepted = true;
+          return normalFetch(input, init);
+        }
+        if (
+          uploadAccepted &&
+          url.pathname === "/api/v1/admin/document-library" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return jsonResponse(
+            {
+              message_code: "artifact.storage_is_temporarily_unavailable",
+              message_params: {},
+            },
+            503,
+          );
+        }
+        return normalFetch(input, init);
+      },
+    );
+    render(<App />);
+
+    fireEvent.click(await screen.findByLabelText("Target"));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: "Project: Admin Live Project",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    const uploadFile = new File(["%PDF-1.4"], "accepted-upload.pdf", {
+      type: "application/pdf",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Document file"), {
+      target: { files: [uploadFile] },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Upload document" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText("Could not load this list")).toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.filter(
+        ([input, init]) =>
+          new URL(String(input), "http://localhost").pathname ===
+            "/api/v1/admin/document-library" && init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("Document Library requires one target before upload", async () => {
+    window.history.pushState({}, "", "/admin/document-library");
+    mockApi(adminWithProjectSession, readyReadiness);
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Document Library" }),
+    ).toBeInTheDocument();
+    const uploadButton = await screen.findByRole("button", {
+      name: "Upload document",
+    });
+    expect(uploadButton).toBeDisabled();
+    expect(
+      screen.getByText("Select one Team or Project before uploading."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Target"));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: "Project: Admin Live Project",
+      }),
+    );
+    expect(uploadButton).toBeEnabled();
+    expect(
+      screen.queryByText("Select one Team or Project before uploading."),
+    ).not.toBeInTheDocument();
+  });
+
   it("canonical Project admin keeps Project and Document Library access", async () => {
     // acceptance-scenario:P-OWNER-01 acceptance-scenario:P-OWNER-02
     const projectScopedAdminSession = {
@@ -5401,7 +6159,7 @@ describe("Atlas production web", () => {
     expect(screen.queryByRole("button", { name: /create project/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Document Library" }));
     expect(await screen.findByRole("heading", { name: "Document Library" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Target")).toHaveTextContent("Admin Live Project");
+    expect(await screen.findByLabelText("Target")).toHaveTextContent("Admin Live Project");
     expect(await screen.findByRole("button", { name: "Manage" })).toBeInTheDocument();
   });
 
@@ -5688,7 +6446,16 @@ describe("Atlas production web", () => {
     fireEvent.change(within(dialog).getByLabelText("Document description"), {
       target: { value: "Feature-owned upload" },
     });
-    fireEvent.click(within(dialog).getByText("Project: Admin Live Project"));
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    );
     fireEvent.click(within(dialog).getByText("Allow member download"));
     fireEvent.click(within(dialog).getByRole("button", { name: "Upload document" }));
     await waitFor(() =>
@@ -5804,6 +6571,76 @@ describe("Atlas production web", () => {
       ),
     );
   });
+
+  it.each([
+    {
+      label: "Team Admin",
+      session: teamAdminSession,
+      allowedTitle: "Uploader-owned Team note",
+      allowedDocumentId: "doc-team-uploader-owned",
+      deniedTitle: null,
+      excludedTitle: "Uploader-owned Project note",
+      deniedDocumentId: "doc-project-uploader-owned",
+    },
+    {
+      label: "Project Admin",
+      session: projectAdminSession,
+      allowedTitle: "Uploader-owned Project note",
+      allowedDocumentId: "doc-project-uploader-owned",
+      deniedTitle: "Uploader-owned Team note",
+      excludedTitle: null,
+      deniedDocumentId: "doc-team-uploader-owned",
+    },
+  ])(
+    "scope admins download owner-scoped documents when member download is disabled: $label",
+    async ({
+      session,
+      allowedTitle,
+      allowedDocumentId,
+      deniedTitle,
+      deniedDocumentId,
+      excludedTitle,
+    }) => {
+      window.history.pushState({}, "", "/admin/document-library");
+      mockApi(session, readyReadiness);
+      render(<App />);
+
+      expect(
+        await screen.findByRole("heading", { name: "Document Library" }),
+      ).toBeInTheDocument();
+      const allowedRow = (await screen.findByText(allowedTitle)).closest("tr");
+      expect(allowedRow).not.toBeNull();
+      const download = within(allowedRow!).getByRole("button", {
+        name: "Download",
+      });
+      if (excludedTitle) {
+        expect(screen.queryByText(excludedTitle)).not.toBeInTheDocument();
+      }
+      if (deniedTitle) {
+        const deniedRow = screen.getByText(deniedTitle).closest("tr");
+        expect(deniedRow).not.toBeNull();
+        expect(
+          within(deniedRow!).queryByRole("button", { name: "Download" }),
+        ).not.toBeInTheDocument();
+      }
+
+      fireEvent.click(download);
+      expect(
+        screen.getAllByRole("button", { name: "Download" }),
+      ).toHaveLength(1);
+
+      await waitFor(() =>
+        expect(global.fetch).toHaveBeenCalledWith(
+          `/api/v1/library/documents/${allowedDocumentId}/content`,
+          { credentials: "include", method: "HEAD" },
+        ),
+      );
+      expect(global.fetch).not.toHaveBeenCalledWith(
+        `/api/v1/library/documents/${deniedDocumentId}/content`,
+        { credentials: "include", method: "HEAD" },
+      );
+    },
+  );
 
   it("Team uploader Document Library hides non-executable policy and lifecycle controls", async () => {
     window.history.pushState({}, "", "/admin/document-library");

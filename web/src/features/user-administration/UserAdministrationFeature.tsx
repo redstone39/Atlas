@@ -1,4 +1,4 @@
-import { Clipboard, RotateCcw, Save, UserPlus, UserX } from "lucide-react";
+import { Clipboard, FilterX, RefreshCw, RotateCcw, Save, Search, UserPlus, UserX } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -35,6 +35,14 @@ import {
   FieldTitle,
 } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 import { Spinner } from "../../components/ui/spinner";
 import { useIsMobile } from "../../hooks/use-mobile";
 import type { MessageReference } from "../../shared/user-messages";
@@ -58,7 +66,7 @@ import {
   serverMessage,
 } from "../../shared/product-ui";
 import { userAdministrationApi } from "./api";
-import type { UserAdminSummary } from "./types";
+import type { UserAdminFilters, UserAdminSummary } from "./types";
 import {
   adminUserDetailRoute,
   type AppRoute,
@@ -96,6 +104,17 @@ export function UserAdministrationFeature({
   const [actionError, setActionError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [appliedFilters, setAppliedFilters] = useState<UserAdminFilters>({});
+  const [filterQuery, setFilterQuery] = useState("");
+  const [filterSource, setFilterSource] = useState<"" | "local" | "directory">("");
+  const [filterActive, setFilterActive] = useState<"" | "true" | "false">("");
+  const [filterProfileStatus, setFilterProfileStatus] =
+    useState<"" | "current" | "stale" | "missing" | "disabled">("");
+  const [filterConnectionId, setFilterConnectionId] = useState("");
+  const [filterGroup, setFilterGroup] = useState("");
+  const [filterDepartment, setFilterDepartment] = useState("");
+  const [filterTitle, setFilterTitle] = useState("");
+  const [filterEmployeeId, setFilterEmployeeId] = useState("");
 
   useEffect(() => {
     void refreshUsers();
@@ -126,11 +145,11 @@ export function UserAdministrationFeature({
     }
   }, [editableUsers, detail?.actorId]);
 
-  async function refreshUsers() {
+  async function refreshUsers(filters: UserAdminFilters = appliedFilters) {
     setLoading(true);
     setLoadError("");
     try {
-      const userResult = await userAdministrationApi.listUsers();
+      const userResult = await userAdministrationApi.listUsers(filters);
       setUsers(userResult.users);
       return userResult.users;
     } catch (err) {
@@ -176,6 +195,24 @@ export function UserAdministrationFeature({
       const message = err instanceof Error ? err.message : t("admin.actionFailed");
       setActionError(message);
       toast.error(serverMessage(message, t));
+    } finally {
+      setPendingAction("");
+    }
+  }
+  async function refreshDirectoryProfile(user: UserAdminSummary) {
+    setPendingAction(`directory-refresh-${user.actor_id}`);
+    setActionError("");
+    try {
+      await userAdministrationApi.refreshDirectoryProfile(user.actor_id);
+      toast.success(t("users.directoryProfileRefreshed"));
+      await refreshUsers();
+      await onRefresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t("admin.actionFailed");
+      setActionError(message);
+      toast.error(serverMessage(message, t));
+      await refreshUsers();
+      await onRefresh();
     } finally {
       setPendingAction("");
     }
@@ -227,6 +264,59 @@ export function UserAdministrationFeature({
   function closeInviteDialog() {
     resetInviteDraft();
     setShowInviteForm(false);
+  }
+  function currentFilterDraft(): UserAdminFilters {
+    return {
+      q: filterQuery.trim() || undefined,
+      account_source: filterSource || undefined,
+      active: filterActive ? filterActive === "true" : undefined,
+      directory_profile_status: filterProfileStatus || undefined,
+      directory_connection_id: filterConnectionId.trim() || undefined,
+      directory_group: filterGroup.trim() || undefined,
+      department: filterDepartment.trim() || undefined,
+      title: filterTitle.trim() || undefined,
+      employee_id: filterEmployeeId.trim() || undefined,
+    };
+  }
+
+  function applyFilters() {
+    const filters = currentFilterDraft();
+    setAppliedFilters(filters);
+    void refreshUsers(filters);
+  }
+
+  function clearFilters() {
+    setFilterQuery("");
+    setFilterSource("");
+    setFilterActive("");
+    setFilterProfileStatus("");
+    setFilterConnectionId("");
+    setFilterGroup("");
+    setFilterDepartment("");
+    setFilterTitle("");
+    setFilterEmployeeId("");
+    setAppliedFilters({});
+    void refreshUsers({});
+  }
+
+  function sourceBadge(user: UserAdminSummary) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        <Badge variant="outline">{t(`users.source.${user.account_source}`)}</Badge>
+        {user.directory_profile ? (
+          <StatusBadge
+            semantic={
+              user.directory_profile.status === "current"
+                ? "success"
+                : user.directory_profile.status === "stale"
+                  ? "attention"
+                  : "inactive"
+            }
+            label={t(`users.directoryStatus.${user.directory_profile.status}`)}
+          />
+        ) : null}
+      </div>
+    );
   }
 
   function openUserEditor(user: UserAdminSummary) {
@@ -336,16 +426,18 @@ export function UserAdministrationFeature({
                 title={selectedUser.display_name}
                 description={userContactLabel(selectedUser)}
               />
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setEditDisplayName(selectedUser.display_name);
-                  setShowEditUser(true);
-                }}
-              >
-                <Save data-icon="inline-start" />
-                {t("admin.editProfile")}
-              </Button>
+              {selectedUser.account_source === "local" ? (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEditDisplayName(selectedUser.display_name);
+                    setShowEditUser(true);
+                  }}
+                >
+                  <Save data-icon="inline-start" />
+                  {t("admin.editProfile")}
+                </Button>
+              ) : null}
             </div>
             {actionError && (
               <Alert variant="destructive">
@@ -369,6 +461,10 @@ export function UserAdministrationFeature({
                 <div>
                   <div className="text-sm text-muted-foreground">{t("users.systemRole")}</div>
                   <Badge variant="outline">{selectedUser.system_role}</Badge>
+                </div>
+                <div>
+                  <div className="text-sm text-muted-foreground">{t("users.accountSource")}</div>
+                  {sourceBadge(selectedUser)}
                 </div>
                 <div>
                   <div className="text-sm text-muted-foreground">{t("users.status")}</div>
@@ -399,6 +495,48 @@ export function UserAdministrationFeature({
                 <div className="sm:col-span-2">{userActions(selectedUser)}</div>
               </CardContent>
             </Card>
+            {selectedUser.directory_profile ? (
+              <Card>
+                <CardHeader>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <CardTitle>{t("users.directoryProfile")}</CardTitle>
+                      <div className="mt-1 text-sm text-muted-foreground">
+                        {selectedUser.directory_profile.connection_display_name}
+                      </div>
+                    </div>
+                    <Button
+                      variant="outline"
+                      disabled={pendingAction === `directory-refresh-${selectedUser.actor_id}`}
+                      onClick={() => void refreshDirectoryProfile(selectedUser)}
+                    >
+                      {pendingAction === `directory-refresh-${selectedUser.actor_id}` ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <RefreshCw data-icon="inline-start" />
+                      )}
+                      {t("users.refreshDirectoryProfile")}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-4 sm:grid-cols-2">
+                  <ProfileValue label={t("users.directoryUsername")} value={selectedUser.directory_profile.username} />
+                  <ProfileValue label={t("users.email")} value={selectedUser.directory_profile.email} />
+                  <ProfileValue label={t("users.department")} value={selectedUser.directory_profile.department} />
+                  <ProfileValue label={t("users.jobTitle")} value={selectedUser.directory_profile.title} />
+                  <ProfileValue label={t("users.employeeId")} value={selectedUser.directory_profile.employee_id} />
+                  <ProfileValue label={t("users.lastRefreshed")} value={new Date(selectedUser.directory_profile.last_refreshed_at).toLocaleString()} />
+                  <div className="sm:col-span-2">
+                    <div className="text-sm text-muted-foreground">{t("users.groups")}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {selectedUser.directory_profile.groups.length > 0
+                        ? selectedUser.directory_profile.groups.map((group) => <Badge key={group} variant="outline">{group}</Badge>)
+                        : "-"}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
           </>
         )
       ) : (
@@ -410,6 +548,49 @@ export function UserAdministrationFeature({
           {t("admin.createInvite")}
         </Button>
       </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("users.filters")}</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field>
+              <FieldLabel htmlFor="user-filter-query">{t("users.search")}</FieldLabel>
+              <Input id="user-filter-query" value={filterQuery} onChange={(event) => setFilterQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyFilters(); }} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-filter-source">{t("users.accountSource")}</FieldLabel>
+              <Select value={filterSource} onValueChange={(value) => setFilterSource(value as typeof filterSource)}>
+                <SelectTrigger id="user-filter-source" className="w-full"><SelectValue placeholder={t("users.allSources")} /></SelectTrigger>
+                <SelectContent><SelectGroup><SelectItem value="local">{t("users.source.local")}</SelectItem><SelectItem value="directory">{t("users.source.directory")}</SelectItem></SelectGroup></SelectContent>
+              </Select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-filter-active">{t("users.status")}</FieldLabel>
+              <Select value={filterActive} onValueChange={(value) => setFilterActive(value as typeof filterActive)}>
+                <SelectTrigger id="user-filter-active" className="w-full"><SelectValue placeholder={t("users.allStatuses")} /></SelectTrigger>
+                <SelectContent><SelectGroup><SelectItem value="true">{t("users.active")}</SelectItem><SelectItem value="false">{t("users.inactive")}</SelectItem></SelectGroup></SelectContent>
+              </Select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="user-filter-profile-status">{t("users.directoryProfileStatus")}</FieldLabel>
+              <Select value={filterProfileStatus} onValueChange={(value) => setFilterProfileStatus(value as typeof filterProfileStatus)}>
+                <SelectTrigger id="user-filter-profile-status" className="w-full"><SelectValue placeholder={t("users.allStatuses")} /></SelectTrigger>
+                <SelectContent><SelectGroup>{(["current", "stale", "missing", "disabled"] as const).map((status) => <SelectItem key={status} value={status}>{t(`users.directoryStatus.${status}`)}</SelectItem>)}</SelectGroup></SelectContent>
+              </Select>
+            </Field>
+            <FilterTextField id="user-filter-connection" label={t("users.directoryConnectionId")} value={filterConnectionId} onChange={setFilterConnectionId} />
+            <FilterTextField id="user-filter-group" label={t("users.group")} value={filterGroup} onChange={setFilterGroup} />
+            <FilterTextField id="user-filter-department" label={t("users.department")} value={filterDepartment} onChange={setFilterDepartment} />
+            <FilterTextField id="user-filter-title" label={t("users.jobTitle")} value={filterTitle} onChange={setFilterTitle} />
+            <FilterTextField id="user-filter-employee" label={t("users.employeeId")} value={filterEmployeeId} onChange={setFilterEmployeeId} />
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={clearFilters}><FilterX data-icon="inline-start" />{t("users.clearFilters")}</Button>
+            <Button onClick={applyFilters}><Search data-icon="inline-start" />{t("users.applyFilters")}</Button>
+          </div>
+        </CardContent>
+      </Card>
       <Card>
         <CardContent className="pt-6">
             {loading ? (
@@ -426,8 +607,8 @@ export function UserAdministrationFeature({
             ) : users.length === 0 ? (
               <Empty className="border">
                 <EmptyHeader>
-                  <EmptyTitle>{t("users.emptyTitle")}</EmptyTitle>
-                  <EmptyDescription>{t("users.emptyDescription")}</EmptyDescription>
+                  <EmptyTitle>{Object.keys(appliedFilters).length > 0 ? t("users.noFilterMatchesTitle") : t("users.emptyTitle")}</EmptyTitle>
+                  <EmptyDescription>{Object.keys(appliedFilters).length > 0 ? t("users.noFilterMatchesDescription") : t("users.emptyDescription")}</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : isMobile ? (
@@ -460,6 +641,10 @@ export function UserAdministrationFeature({
                       <Badge variant="outline">{user.system_role}</Badge>
                     </div>
                     <div className="mt-3 grid gap-2 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">{t("users.accountSource")}</span>
+                        {sourceBadge(user)}
+                      </div>
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-muted-foreground">{t("users.status")}</span>
                         <StatusBadge
@@ -497,6 +682,7 @@ export function UserAdministrationFeature({
                   <TableRow>
                     <TableHead>{t("users.name")}</TableHead>
                     <TableHead>{t("users.email")}</TableHead>
+                    <TableHead>{t("users.accountSource")}</TableHead>
                     <TableHead>{t("users.systemRole")}</TableHead>
                     <TableHead>{t("users.status")}</TableHead>
                     <TableHead>{t("users.inviteStatus")}</TableHead>
@@ -520,6 +706,7 @@ export function UserAdministrationFeature({
                     >
                       <TableCell>{user.display_name}</TableCell>
                       <TableCell>{userContactLabel(user)}</TableCell>
+                      <TableCell>{sourceBadge(user)}</TableCell>
                       <TableCell>
                         <Badge variant="outline">{user.system_role}</Badge>
                       </TableCell>
@@ -704,5 +891,33 @@ export function UserAdministrationFeature({
         </DialogContent>
       </Dialog>
     </section>
+  );
+}
+
+function ProfileValue({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div>
+      <div className="text-sm text-muted-foreground">{label}</div>
+      <div className="break-all font-medium">{value ?? "-"}</div>
+    </div>
+  );
+}
+
+function FilterTextField({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <Input id={id} value={value} onChange={(event) => onChange(event.target.value)} />
+    </Field>
   );
 }

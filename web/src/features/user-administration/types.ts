@@ -35,6 +35,31 @@ export interface UserInviteListResult {
   invites: UserInviteSummary[];
 }
 
+export interface DirectoryProfileSummary {
+  connection_id: string;
+  connection_display_name: string;
+  username: string;
+  email: string | null;
+  groups: string[];
+  department: string | null;
+  title: string | null;
+  employee_id: string | null;
+  status: "current" | "stale" | "missing" | "disabled";
+  last_refreshed_at: string;
+}
+
+export interface UserAdminFilters {
+  q?: string;
+  account_source?: "local" | "directory";
+  directory_connection_id?: string;
+  active?: boolean;
+  directory_profile_status?: DirectoryProfileSummary["status"];
+  directory_group?: string;
+  department?: string;
+  title?: string;
+  employee_id?: string;
+}
+
 export interface UserAdminSummary {
   actor_id: string;
   actor_type: "user" | "service_account";
@@ -45,6 +70,8 @@ export interface UserAdminSummary {
   created_at: string;
   invite_status: "pending" | "accepted" | "revoked" | "expired" | null;
   invite_id: string | null;
+  account_source: "local" | "directory";
+  directory_profile: DirectoryProfileSummary | null;
 }
 
 export interface UserAdminListResult {

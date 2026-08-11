@@ -6,6 +6,7 @@ export type StaticAppRoute =
   | "/library"
   | "/settings"
   | "/admin/document-library"
+  | "/admin/directory"
   | "/admin/users"
   | "/admin/teams"
   | "/admin/projects"
@@ -27,6 +28,11 @@ export type AppRoute =
   | `/admin/teams/${string}/members`
   | `/admin/projects/${string}/profile`
   | `/admin/projects/${string}/access`;
+
+export type DocumentLibraryDestination =
+  `/admin/document-library?scope_type=${"team" | "project"}&scope_id=${string}`;
+
+export type AppDestination = AppRoute | DocumentLibraryDestination;
 
 export type AppRouteMatch =
   | { kind: "static"; route: StaticAppRoute }
@@ -64,6 +70,7 @@ const STATIC_ROUTES = new Set<StaticAppRoute>([
   "/library",
   "/settings",
   "/admin/document-library",
+  "/admin/directory",
   "/admin/users",
   "/admin/teams",
   "/admin/projects",
@@ -94,6 +101,13 @@ export function adminProjectDetailRoute(
   section: "profile" | "access",
 ): AppRoute {
   return `/admin/projects/${encodeURIComponent(projectId)}/${section}`;
+}
+
+export function documentLibraryDestination(
+  scopeType: "team" | "project",
+  scopeId: string,
+): DocumentLibraryDestination {
+  return `/admin/document-library?scope_type=${scopeType}&scope_id=${encodeURIComponent(scopeId)}`;
 }
 
 export function adminAuditSectionRoute(

@@ -19,10 +19,12 @@ import {
   matchAppRoute,
   normalizeRoute,
   workspaceConversationRoute,
+  type AppDestination,
   type AppRoute,
 } from "./shared/routes";
 import { AtlasThemeProvider } from "./shared/theme";
 import { AdminDocumentLibraryPage } from "./pages/AdminDocumentLibraryPage";
+import { AdminDirectoryPage } from "./pages/AdminDirectoryPage";
 import { AdminModelsPage } from "./pages/AdminModelsPage";
 import { AdminPluginsPage } from "./pages/AdminPluginsPage";
 import { AdminProjectsPage } from "./pages/AdminProjectsPage";
@@ -159,10 +161,18 @@ function AtlasApplication() {
     return undefined;
   }
 
-  function navigate(next: AppRoute) {
-    if (route === next && window.location.pathname === next) return;
+  function navigate(next: AppDestination) {
+    const destination = new URL(next, window.location.origin);
+    const nextRoute = normalizeRoute(destination.pathname);
+    if (!nextRoute) return;
+    if (
+      route === nextRoute &&
+      window.location.pathname + window.location.search === next
+    ) {
+      return;
+    }
     window.history.pushState({}, "", next);
-    setRoute(next);
+    setRoute(nextRoute);
   }
 
   function replace(next: AppRoute) {
@@ -341,6 +351,16 @@ function AtlasApplication() {
           canUseDocumentLibrary ? (
             <AdminDocumentLibraryPage
               session={session}
+              onNotice={setNotice}
+              onRefresh={noGlobalRefresh}
+            />
+          ) : (
+            <AdminAccessDenied />
+          )
+        )}
+        {route === "/admin/directory" && (
+          isAdmin ? (
+            <AdminDirectoryPage
               onNotice={setNotice}
               onRefresh={noGlobalRefresh}
             />

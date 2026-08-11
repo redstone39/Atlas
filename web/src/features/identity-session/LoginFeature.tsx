@@ -35,11 +35,11 @@ export function LoginFeature({
   onLogin: (session: SessionState) => void;
 }) {
   const { t } = useTranslation();
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const canSubmit = Boolean(email.trim() && password);
+  const canSubmit = Boolean(identifier.trim() && password);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -47,7 +47,7 @@ export function LoginFeature({
     setSubmitting(true);
     setError("");
     try {
-      const nextSession = await identitySessionApi.login(email.trim(), password);
+      const nextSession = await identitySessionApi.login(identifier.trim(), password);
       toast.success(t("toast.signedIn"));
       onLogin(nextSession);
     } catch (err) {
@@ -103,13 +103,13 @@ export function LoginFeature({
             <form className="flex flex-col gap-5" onSubmit={submit}>
               <FieldGroup>
                 <Field data-invalid={Boolean(error)}>
-                  <FieldLabel htmlFor="email">{t("login.email")}</FieldLabel>
+                  <FieldLabel htmlFor="identifier">{t("login.identifier")}</FieldLabel>
                   <Input
-                    id="email"
-                    name="email"
-                    type="email"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
+                    id="identifier"
+                    name="identifier"
+                    type="text"
+                    value={identifier}
+                    onChange={(event) => setIdentifier(event.target.value)}
                     required
                     autoComplete="username"
                     aria-invalid={Boolean(error)}

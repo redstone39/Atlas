@@ -1,6 +1,6 @@
 import type { MessageReference } from "../../shared/user-messages";
 import type { SessionState } from "../identity-session/index";
-import type { AppRoute, AppRouteMatch } from "../../shared/routes";
+import type { AppDestination, AppRouteMatch } from "../../shared/routes";
 
 export type ProjectRole = "viewer" | "contributor" | "admin";
 export type ProjectMemberRole = ProjectRole;
@@ -55,7 +55,7 @@ export interface ProjectGovernanceFeatureProps {
   session: SessionState;
   canManageProjectProfile: boolean;
   detail: Extract<AppRouteMatch, { kind: "admin-project-detail" }> | null;
-  onNavigate: (route: AppRoute) => void;
+  onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
   onRefresh: () => Promise<void>;
   createInvite: (

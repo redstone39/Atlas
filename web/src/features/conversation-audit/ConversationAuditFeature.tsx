@@ -9,6 +9,7 @@ import { Bubble, BubbleContent } from "../../components/ui/bubble";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from "../../components/ui/card";
@@ -125,9 +126,8 @@ export function ConversationAuditFeature({
   const routeMatch = matchAppRoute(route);
   const isLanding = route === "/admin/audit";
   const isConversationDirectory =
-    isLanding ||
-    (routeMatch.kind === "admin-audit-section" &&
-      routeMatch.section === "conversations");
+    routeMatch.kind === "admin-audit-section" &&
+    routeMatch.section === "conversations";
   const isEvents =
     routeMatch.kind === "admin-audit-section" &&
     routeMatch.section === "events";
@@ -447,6 +447,50 @@ export function ConversationAuditFeature({
       <AdminResourceUnavailable
         onBack={() => onNavigate(adminAuditSectionRoute("conversations"))}
       />
+    );
+  }
+
+  if (isLanding) {
+    return (
+      <section className="flex flex-col gap-5">
+        <PageHeader title={t("audit.title")} description={t("audit.description")} />
+        <div className="grid gap-4 md:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <MessageSquareText aria-hidden="true" />
+              <CardTitle>{t("audit.conversationHistory")}</CardTitle>
+              <CardDescription>
+                {t("audit.conversationDirectoryDescription")}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button
+                type="button"
+                onClick={() => onNavigate(adminAuditSectionRoute("conversations"))}
+              >
+                {t("audit.openConversationDirectory")}
+              </Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <History aria-hidden="true" />
+              <CardTitle>{t("audit.operationHistory")}</CardTitle>
+              <CardDescription>
+                {t("audit.operationDirectoryDescription")}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button
+                type="button"
+                onClick={() => onNavigate(adminAuditSectionRoute("events"))}
+              >
+                {t("audit.openOperationDirectory")}
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </section>
     );
   }
 

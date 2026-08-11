@@ -1,4 +1,4 @@
-import { CheckCircle2, Plus, Save, Trash2, UserPlus } from "lucide-react";
+import { CheckCircle2, FileText, Plus, Save, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -59,6 +59,7 @@ import {
 import type { AdminActionResult } from "../../shared/api-contracts";
 import {
   adminProjectDetailRoute,
+  documentLibraryDestination,
   matchAppRoute,
   normalizeRoute,
 } from "../../shared/routes";
@@ -741,7 +742,8 @@ export function ProjectGovernanceFeature({
                 title={selectedProject.name}
                 description={policyProfileLabel(selectedProject.policy_profile_id)}
               />
-              {detail.section === "profile" && canManageProjectProfile && (
+              <div className="flex flex-wrap items-center gap-2">
+                {detail.section === "profile" && canManageProjectProfile && (
                   <Button
                     variant="outline"
                     onClick={() => {
@@ -752,7 +754,22 @@ export function ProjectGovernanceFeature({
                     <Save data-icon="inline-start" />
                     {t("admin.editProfile")}
                   </Button>
-              )}
+                )}
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    onNavigate(
+                      documentLibraryDestination(
+                        "project",
+                        selectedProject.project_id,
+                      ),
+                    )
+                  }
+                >
+                  <FileText data-icon="inline-start" />
+                  {t("documentLibrary.manageTargetDocuments")}
+                </Button>
+              </div>
             </div>
             <AdminSectionNav
               value={detail.section}

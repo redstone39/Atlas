@@ -4,6 +4,7 @@ import type {
   ConversationDetail,
   ConversationArchiveResultDto,
   ConversationListResult,
+  DocumentTagRef,
   ConversationTurnResult,
   RuntimeStreamEvent,
   TurnAcceptedDto,
@@ -52,8 +53,13 @@ export const workspaceApi = {
   createWorkspaceConversation: async (
     title: string,
     responseLanguage: "zh-TW" | "en",
+    tagRefs: DocumentTagRef[],
     signal?: AbortSignal,
   ): Promise<ConversationDetail> => {
+    const canonicalTagRefs = [...tagRefs].sort((left, right) =>
+      left.tag_type.localeCompare(right.tag_type) ||
+      left.tag_id.localeCompare(right.tag_id)
+    );
     const result = await requestJson<WorkspaceConversationDetailDto>(
       "/api/v1/workspace/conversations",
       {
@@ -62,6 +68,7 @@ export const workspaceApi = {
         body: JSON.stringify({
           title,
           response_language: responseLanguage,
+          tag_refs: canonicalTagRefs,
         }),
       },
     );

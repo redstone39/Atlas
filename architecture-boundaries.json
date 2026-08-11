@@ -307,6 +307,7 @@
       "public_contracts": [
         "web/src/features/agent-access/index.ts",
         "web/src/features/conversation-audit/index.ts",
+        "web/src/features/directory-administration/index.ts",
         "web/src/features/document-library/index.ts",
         "web/src/features/document-processing/index.ts",
         "web/src/features/identity-session/index.ts",

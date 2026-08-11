@@ -6,6 +6,7 @@ import {
   adminProjectDetailRoute,
   adminTeamDetailRoute,
   adminUserDetailRoute,
+  documentLibraryDestination,
   managementRouteFamily,
   matchAppRoute,
   normalizeRoute,
@@ -26,6 +27,22 @@ describe("Workspace conversation routes", () => {
     expect(normalizeRoute("/workspace/conversations")).toBeNull();
     expect(normalizeRoute("/workspace/conversations/conversation-1/extra")).toBeNull();
     expect(normalizeRoute("/workspace/conversations/%E0%A4%A")).toBeNull();
+  });
+});
+
+describe("directory administration route", () => {
+  it("recognizes the dedicated static route without colliding with user detail", () => {
+    expect(matchAppRoute(normalizeRoute("/admin/directory")!)).toEqual({
+      kind: "static",
+      route: "/admin/directory",
+    });
+    expect(normalizeRoute("/admin/users/directory")).toBe(
+      "/admin/users/directory",
+    );
+    expect(matchAppRoute(normalizeRoute("/admin/users/directory")!)).toMatchObject({
+      kind: "admin-user-detail",
+      actorId: "directory",
+    });
   });
 });
 
@@ -142,4 +159,22 @@ describe("audit progressive disclosure routes", () => {
       normalizeRoute("/admin/audit/conversations/conversation-1/runtime/%E0%A4%A"),
     ).toBeNull();
   });
+});
+
+describe("Document Library destinations", () => {
+  it.each([
+    ["team", "team one/primary", "team%20one%2Fprimary"],
+    ["project", "project one?active=true", "project%20one%3Factive%3Dtrue"],
+  ] as const)(
+    "encodes a %s scope id while preserving the canonical pathname",
+    (scopeType, scopeId, encodedScopeId) => {
+      const destination = documentLibraryDestination(scopeType, scopeId);
+      expect(destination).toBe(
+        `/admin/document-library?scope_type=${scopeType}&scope_id=${encodedScopeId}`,
+      );
+      expect(
+        normalizeRoute(new URL(destination, "https://atlas.example").pathname),
+      ).toBe("/admin/document-library");
+    },
+  );
 });

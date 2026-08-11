@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -41,11 +42,30 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
+import { Checkbox } from "../../components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "../../components/ui/dialog";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyTitle,
+} from "../../components/ui/empty";
 import {
   Field,
+  FieldDescription,
   FieldGroup,
   FieldLabel,
+  FieldLegend,
+  FieldSet,
 } from "../../components/ui/field";
+import { Input } from "../../components/ui/input";
 import {
   Message,
   MessageContent,
@@ -70,6 +90,7 @@ import { Spinner } from "../../components/ui/spinner";
 import { Textarea } from "../../components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "../../components/ui/toggle-group";
 import {
+  LoadErrorState,
   LoadingState,
   StatusBadge,
   conversationTurnStatusPresentation,
@@ -92,6 +113,8 @@ import {
 import { ReasoningTimeline } from "./ReasoningTimeline";
 import type {
   CitationCard,
+  DocumentTagRef,
+  DocumentTagSummary,
   ConversationDetail,
   ConversationSummary,
   ConversationTurn,
@@ -116,6 +139,10 @@ type RuntimeStreamPayload = {
   citation?: CitationCard;
 };
 
+function scopeTagKey(ref: DocumentTagRef) {
+  return `${ref.tag_type}:${ref.tag_id}`;
+}
+
 export function WorkspaceFeature({
   activeView,
   conversationId,
@@ -130,6 +157,12 @@ export function WorkspaceFeature({
   const [query, setQuery] = useState("");
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationDetail | null>(null);
+  const [scopeOptions, setScopeOptions] = useState<DocumentTagSummary[]>([]);
+  const [selectedScopeTags, setSelectedScopeTags] =
+    useState<DocumentTagSummary[]>([]);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const [scopeLoadError, setScopeLoadError] = useState(false);
+  const [scopeReloadKey, setScopeReloadKey] = useState(0);
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [retryContext, setRetryContext] = useState<TurnContext | null>(null);
   const [loading, setLoading] = useState(false);
@@ -162,6 +195,17 @@ export function WorkspaceFeature({
   const liveTurnRequestRef = useRef<AbortController | null>(null);
   const currentConversationIdRef = useRef(conversationId);
   currentConversationIdRef.current = conversationId;
+  const newConversationScopeVisible =
+    activeView === "/workspace" &&
+    conversationId === null &&
+    activeConversation === null;
+  const scopeItems = useMemo(() => {
+    const byKey = new Map<string, DocumentTagSummary>();
+    for (const item of [...selectedScopeTags, ...scopeOptions]) {
+      byKey.set(scopeTagKey(item), item);
+    }
+    return [...byKey.values()];
+  }, [scopeOptions, selectedScopeTags]);
   const initialLoading = historyLoading || conversationLoading;
   const canAsk = Boolean(
     query.trim() && !loading && !initialLoading && !reconnectingExecutionId,
@@ -216,6 +260,26 @@ export function WorkspaceFeature({
       cancelled = true;
     };
   }, [historyReloadKey]);
+
+  useEffect(() => {
+    if (activeView !== "/workspace" || conversationId !== null) return;
+    let cancelled = false;
+    setScopeLoading(true);
+    setScopeLoadError(false);
+    workspaceApi.workspaceTagScope()
+      .then((result) => {
+        if (!cancelled) setScopeOptions(result.tags);
+      })
+      .catch(() => {
+        if (!cancelled) setScopeLoadError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setScopeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, conversationId, scopeReloadKey]);
 
   useEffect(() => () => {
     conversationRequestRef.current?.abort();
@@ -409,6 +473,7 @@ export function WorkspaceFeature({
     conversationRequestRef.current = null;
     setActiveConversation(null);
     setTurns([]);
+    setSelectedScopeTags([]);
     setQuery("");
     setQueryError("");
     setRetryContext(null);
@@ -418,6 +483,7 @@ export function WorkspaceFeature({
 
   function openNewConversation() {
     startNewConversation();
+    setScopeReloadKey((current) => current + 1);
     if (conversationId || activeView !== "/workspace") {
       onNavigate("/workspace");
     }
@@ -474,9 +540,13 @@ export function WorkspaceFeature({
 
   async function ensureConversation(submittedQuery: string, signal: AbortSignal) {
     if (activeConversation) return activeConversation;
+    const scopeSnapshot = selectedScopeTags.map<DocumentTagRef>(
+      ({ tag_type, tag_id }) => ({ tag_type, tag_id }),
+    );
     const detail = await workspaceApi.createWorkspaceConversation(
       submittedQuery.slice(0, 64) || t("workspace.newConversation"),
       i18n.language === "zh-TW" ? "zh-TW" : "en",
+      scopeSnapshot,
       signal,
     );
     if (signal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
@@ -925,6 +995,31 @@ export function WorkspaceFeature({
                 </AlertDescription>
               </Alert>
             )}
+            {newConversationScopeVisible && (
+              <div className="mb-3 flex flex-col gap-3">
+                {scopeLoadError && (
+                  <LoadErrorState
+                    title={t("admin.listLoadFailed")}
+                    description={t("admin.resourceUnavailableDescription")}
+                    retryLabel={t("admin.retry")}
+                    onRetry={() => setScopeReloadKey((current) => current + 1)}
+                  />
+                )}
+                <ConversationScopeSelector
+                  items={scopeItems}
+                  value={selectedScopeTags}
+                  onValueChange={setSelectedScopeTags}
+                  loading={scopeLoading}
+                  disabled={
+                    loading ||
+                    initialLoading ||
+                    scopeLoading ||
+                    scopeLoadError ||
+                    Boolean(reconnectingExecutionId)
+                  }
+                />
+              </div>
+            )}
             <FieldGroup>
               <Field>
                 <FieldLabel htmlFor="message" className="sr-only">
@@ -1017,6 +1112,183 @@ export function WorkspaceFeature({
         )}
       </section>
     </>
+  );
+}
+
+function ConversationScopeSelector({
+  items,
+  value,
+  onValueChange,
+  loading,
+  disabled,
+}: {
+  items: DocumentTagSummary[];
+  value: DocumentTagSummary[];
+  onValueChange: (value: DocumentTagSummary[]) => void;
+  loading: boolean;
+  disabled: boolean;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [draftValue, setDraftValue] = useState<DocumentTagSummary[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
+  const filteredItems = useMemo(
+    () => items.filter((item) =>
+      !normalizedQuery ||
+      item.label.toLocaleLowerCase().includes(normalizedQuery) ||
+      item.tag_id.toLocaleLowerCase().includes(normalizedQuery)
+    ),
+    [items, normalizedQuery],
+  );
+  const grouped = useMemo(
+    () => ({
+      team: filteredItems.filter((item) => item.tag_type === "team"),
+      project: filteredItems.filter((item) => item.tag_type === "project"),
+    }),
+    [filteredItems],
+  );
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) {
+      setDraftValue(value);
+      setSearchQuery("");
+    }
+    setOpen(nextOpen);
+  }
+
+  function toggleDraftValue(item: DocumentTagSummary, checked: boolean) {
+    setDraftValue((current) => {
+      const itemKey = scopeTagKey(item);
+      if (checked) {
+        return current.some((selected) => scopeTagKey(selected) === itemKey)
+          ? current
+          : [...current, item];
+      }
+      return current.filter((selected) => scopeTagKey(selected) !== itemKey);
+    });
+  }
+
+  return (
+    <Field>
+      <FieldLabel htmlFor="conversation-knowledge-scope-trigger">
+        {t("workspace.scope")}
+      </FieldLabel>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogTrigger asChild>
+          <Button
+            id="conversation-knowledge-scope-trigger"
+            type="button"
+            aria-label={t("workspace.scope")}
+            variant="outline"
+            className="w-full justify-start"
+            disabled={disabled}
+          >
+            {value.length > 0
+              ? t("workspace.scopeSelectedCount", { count: value.length })
+              : t("workspace.allAccessible")}
+          </Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("workspace.scopeDialogTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("workspace.scopeDialogDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <Field>
+            <FieldLabel htmlFor="conversation-knowledge-scope-search">
+              {t("workspace.scopeSearch")}
+            </FieldLabel>
+            <Input
+              id="conversation-knowledge-scope-search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder={t("workspace.scopeSearchPlaceholder")}
+            />
+          </Field>
+          <div className="grid max-h-72 gap-4 overflow-y-auto rounded-md border p-2">
+            {items.length === 0 ? (
+              <Empty className="min-h-32 border-0 p-4 md:p-6">
+                <EmptyHeader>
+                  <EmptyTitle>{t("workspace.scopeEmpty")}</EmptyTitle>
+                </EmptyHeader>
+              </Empty>
+            ) : filteredItems.length === 0 ? (
+              <Empty className="min-h-32 border-0 p-4 md:p-6">
+                <EmptyHeader>
+                  <EmptyTitle>{t("workspace.scopeNoMatches")}</EmptyTitle>
+                </EmptyHeader>
+              </Empty>
+            ) : (
+              (["team", "project"] as const).map((tagType) =>
+                grouped[tagType].length > 0 ? (
+                  <FieldSet key={tagType} className="gap-2">
+                    <FieldLegend variant="label">
+                      {t(
+                        tagType === "team"
+                          ? "workspace.scopeTeam"
+                          : "workspace.scopeProject",
+                      )}
+                    </FieldLegend>
+                    {grouped[tagType].map((item) => (
+                      <label
+                        key={scopeTagKey(item)}
+                        className="flex min-h-11 items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors hover:bg-muted/50 focus-within:bg-muted/50 focus-within:outline-none focus-within:ring-2 focus-within:ring-ring"
+                      >
+                        <Checkbox
+                          checked={draftValue.some(
+                            (selected) =>
+                              scopeTagKey(selected) === scopeTagKey(item),
+                          )}
+                          onCheckedChange={(checked) =>
+                            toggleDraftValue(item, checked === true)
+                          }
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium">
+                            {item.label}
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {item.tag_id}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </FieldSet>
+                ) : null
+              )
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleOpenChange(false)}
+            >
+              {t("admin.cancel")}
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                onValueChange(draftValue);
+                setOpen(false);
+              }}
+            >
+              {t("workspace.scopeApply")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <FieldDescription className="flex items-center gap-2">
+        {loading && <Spinner aria-hidden="true" />}
+        {loading
+          ? t("workspace.scopeLoading")
+          : value.length > 0
+            ? t("workspace.scopeSelectedCount", { count: value.length })
+            : t("workspace.allAccessibleDescription")}
+      </FieldDescription>
+    </Field>
   );
 }
 

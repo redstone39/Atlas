@@ -162,9 +162,17 @@ describe("frontend compatibility convergence", () => {
     const frontendFeatures = registry.owners.find(
       (owner) => owner.id === "frontend_features",
     );
-    expect(frontendFeatures?.public_contracts).toContain(
-      "web/src/features/ops/index.ts",
-    );
+    const featureIndexes = readdirSync(resolve(webRoot, "src/features"), {
+      withFileTypes: true,
+    })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          existsSync(resolve(webRoot, "src/features", entry.name, "index.ts")),
+      )
+      .map((entry) => `web/src/features/${entry.name}/index.ts`)
+      .sort();
+    expect(frontendFeatures?.public_contracts).toEqual(featureIndexes);
     expect(registry.owners.some((owner) => owner.id === "frontend_compatibility")).toBe(false);
     expect(
       registry.ownership_exceptions.some((item) => item.id.startsWith("frontend-cross-domain")),

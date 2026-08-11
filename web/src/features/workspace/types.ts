@@ -1,9 +1,14 @@
 import type { ReactNode } from "react";
 
-import type { DocumentTagSummary } from "../../shared/document-contracts";
+import type {
+  DocumentTagRef,
+  DocumentTagSummary,
+} from "../../shared/document-contracts";
 import type { MessageParams } from "../../shared/user-messages";
 import type { SessionState } from "../identity-session/index";
 import type { AppRoute } from "../../shared/routes";
+
+export type { DocumentTagRef, DocumentTagSummary };
 
 export interface WorkspaceFeatureProps {
   activeView: "/workspace" | "/library";

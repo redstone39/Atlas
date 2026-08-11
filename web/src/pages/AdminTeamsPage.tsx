@@ -1,5 +1,5 @@
 import { TeamAdministrationFeature } from "../features/team-administration/index";
-import type { AppRoute, AppRouteMatch } from "../shared/routes";
+import type { AppDestination, AppRouteMatch } from "../shared/routes";
 
 export function AdminTeamsPage({
   detail,
@@ -8,7 +8,7 @@ export function AdminTeamsPage({
   onRefresh,
 }: {
   detail: Extract<AppRouteMatch, { kind: "admin-team-detail" }> | null;
-  onNavigate: (route: AppRoute) => void;
+  onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
   onRefresh: () => Promise<void>;
 }) {

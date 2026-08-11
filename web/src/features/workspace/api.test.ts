@@ -22,14 +22,6 @@ const conversation = {
   updated_at: "2026-07-20T00:00:01+00:00",
 } as const;
 
-function readBlobText(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
-    reader.addEventListener("error", () => reject(reader.error));
-    reader.readAsText(blob);
-  });
-}
 
 const projection: WorkspaceTurnProjectionDto = {
   turn_id: "turn-a",
@@ -123,6 +115,7 @@ function response(body: unknown, ok = true, status = 200) {
   };
 }
 
+
 function terminalReplay() {
   return [
     "id: event-1",
@@ -209,7 +202,9 @@ describe("workspace execution API contract", () => {
     expect(preview.kind).toBe("page");
     if (preview.kind === "page") {
       expect(preview.mediaType).toBe(mediaType);
-      await expect(readBlobText(preview.blob)).resolves.toBe("page bytes");
+      const reader = new FileReader();
+      reader.readAsText(preview.blob);
+      await vi.waitFor(() => expect(reader.result).toBe("page bytes"));
     }
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/workspace/conversations/conv-a/turns/turn-a/declared-evidence/declared-evidence-open-a",
@@ -458,15 +453,28 @@ describe("workspace execution API contract", () => {
     });
   });
 
-  it("maps conversation DTOs and never sends knowledge scope on create", async () => {
+  it("maps conversation DTOs and sends canonical create-only scope", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ conversations: [conversation] }))
+      .mockResolvedValueOnce(response(detail))
       .mockResolvedValueOnce(response(detail))
       .mockResolvedValueOnce(response(detail));
     vi.stubGlobal("fetch", fetchMock);
 
     const list = await workspaceApi.listWorkspaceConversations();
-    const created = await workspaceApi.createWorkspaceConversation("Question", "en");
+    const created = await workspaceApi.createWorkspaceConversation(
+      "Question",
+      "en",
+      [],
+    );
+    await workspaceApi.createWorkspaceConversation(
+      "Scoped question",
+      "en",
+      [
+        { tag_type: "team", tag_id: "team-b" },
+        { tag_type: "project", tag_id: "project-a" },
+      ],
+    );
     const loaded = await workspaceApi.getWorkspaceConversation("conv-a");
 
     expect(list.conversations[0]).not.toHaveProperty("scope_mode");
@@ -474,7 +482,17 @@ describe("workspace execution API contract", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1][1].body))).toEqual({
       title: "Question",
       response_language: "en",
+      tag_refs: [],
     });
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1].body))).toEqual({
+      title: "Scoped question",
+      response_language: "en",
+      tag_refs: [
+        { tag_type: "project", tag_id: "project-a" },
+        { tag_type: "team", tag_id: "team-b" },
+      ],
+    });
+    expect(created).not.toHaveProperty("tag_refs");
     expect(created.turns.map((turn) => turn.role)).toEqual(["user", "assistant"]);
     expect(loaded.turns[1].source_turn_id).toBe("turn-a");
   });

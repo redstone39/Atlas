@@ -1,6 +1,7 @@
 import {
   Bot,
   Boxes,
+  ContactRound,
   Cpu,
   FileText,
   History,
@@ -41,6 +42,12 @@ const USERS_ITEM: ManagementNavItem = {
   titleKey: "nav.users",
   descriptionKey: "settings.managementUsers",
   icon: Users,
+};
+const DIRECTORY_ITEM: ManagementNavItem = {
+  route: "/admin/directory",
+  titleKey: "nav.directory",
+  descriptionKey: "settings.managementDirectory",
+  icon: ContactRound,
 };
 const TEAMS_ITEM: ManagementNavItem = {
   route: "/admin/teams",
@@ -92,6 +99,7 @@ const SYSTEM_STATUS_ITEM: ManagementNavItem = {
 };
 export const IDENTITY_ACCESS_ITEMS = [
   USERS_ITEM,
+  DIRECTORY_ITEM,
   TEAMS_ITEM,
   PROJECTS_ITEM,
 ];

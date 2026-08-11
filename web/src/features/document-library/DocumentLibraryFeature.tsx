@@ -18,6 +18,11 @@ import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
 import { Checkbox } from "../../components/ui/checkbox";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../../components/ui/collapsible";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -26,7 +31,14 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../../components/ui/empty";
-import { Field, FieldDescription, FieldGroup, FieldLabel, FieldSet } from "../../components/ui/field";
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
 import {
@@ -55,6 +67,7 @@ import {
   LoadingState,
   PageHeader,
   StatusBadge,
+  TargetSummary,
   serverMessage,
 } from "../../shared/product-ui";
 import type {
@@ -99,7 +112,9 @@ export function DocumentLibraryFeature({
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadDescription, setUploadDescription] = useState("");
   const [uploadAllowMemberDownload, setUploadAllowMemberDownload] = useState(false);
-  const [uploadTagKeys, setUploadTagKeys] = useState<TagKey[]>([]);
+  const [uploadOwnerTagKey, setUploadOwnerTagKey] = useState<TagKey | null>(null);
+  const [uploadAdditionalTagKeys, setUploadAdditionalTagKeys] = useState<TagKey[]>([]);
+  const [showAdditionalTargets, setShowAdditionalTargets] = useState(false);
   const [uploadFileInputKey, setUploadFileInputKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [eventsLoading, setEventsLoading] = useState(false);
@@ -131,7 +146,13 @@ export function DocumentLibraryFeature({
   const uploadTagOptions = scopeOptions.filter(
     (option): option is OptionSelectItem<TagKey> => option.value !== "all",
   );
-  const canUpload = Boolean(uploadFile && uploadTagKeys.length > 0);
+  const uploadOwnerOption =
+    uploadTagOptions.find((option) => option.value === uploadOwnerTagKey) ?? null;
+  const uploadAdditionalTagOptions = uploadTagOptions.filter(
+    (option) => option.value !== uploadOwnerTagKey,
+  );
+  const uploadPending = pendingAction === "upload";
+  const canUpload = Boolean(uploadFile && uploadOwnerTagKey);
   const actorId = session.actor?.actor_id ?? "";
   const selectedProcessingIsActive = Boolean(
     selectedDocument &&
@@ -154,14 +175,24 @@ export function DocumentLibraryFeature({
   }, []);
 
   useEffect(() => {
-    if (scopeOptions.length > 0 && !scopeOptions.some((option) => option.value === selectedScopeKey)) {
+    if (
+      !scopeLoading &&
+      scopeOptions.length > 0 &&
+      !scopeOptions.some((option) => option.value === selectedScopeKey)
+    ) {
       setSelectedScopeKey(scopeOptions[0].value);
     }
-  }, [scopeOptions, selectedScopeKey]);
+  }, [scopeLoading, scopeOptions, selectedScopeKey]);
 
   useEffect(() => {
+    if (
+      scopeLoading ||
+      !scopeOptions.some((option) => option.value === selectedScopeKey)
+    ) {
+      return;
+    }
     void refreshDocuments();
-  }, [selectedScopeKey]);
+  }, [scopeLoading, scopeOptions, selectedScopeKey]);
 
   useEffect(() => {
     if (!selectedDocument) {
@@ -240,13 +271,18 @@ export function DocumentLibraryFeature({
     }
   }
 
-  async function runAction(actionName: string, action: () => Promise<MessageReference>) {
+  async function runAction(
+    actionName: string,
+    action: () => Promise<MessageReference>,
+    onAccepted?: () => void,
+  ): Promise<void> {
     setPendingAction(actionName);
     setActionError("");
     try {
       const result = await action();
       onNotice(result.message_code);
       toast.success(serverMessage(result, t));
+      onAccepted?.();
       await refreshDocuments();
       await refreshProcessingJobs();
       await onRefresh();
@@ -259,45 +295,66 @@ export function DocumentLibraryFeature({
     }
   }
 
-  function resetUploadDraft(tagKeys: TagKey[] = []) {
+  function resetUploadDraft(ownerTagKey: TagKey | null = null) {
     setUploadFile(null);
     setUploadDescription("");
     setUploadAllowMemberDownload(false);
-    setUploadTagKeys(tagKeys);
+    setUploadOwnerTagKey(ownerTagKey);
+    setUploadAdditionalTagKeys([]);
+    setShowAdditionalTargets(false);
     setUploadFileInputKey((value) => value + 1);
   }
 
   function openUploadDialog() {
-    const selectedTag = selectedScopeKey === "all" ? null : selectedScopeKey;
-    const defaultTag = selectedTag ?? uploadTagOptions[0]?.value;
-    resetUploadDraft(defaultTag ? [defaultTag] : []);
+    if (selectedScopeKey === "all") return;
+    const ownerTagKey = uploadTagOptions.find(
+      (option) => option.value === selectedScopeKey,
+    )?.value;
+    if (!ownerTagKey) return;
+    setActionError("");
+    resetUploadDraft(ownerTagKey);
     setShowUploadDialog(true);
   }
 
   function closeUploadDialog() {
+    setActionError("");
     resetUploadDraft();
     setShowUploadDialog(false);
   }
 
+  function handleUploadDialogOpenChange(open: boolean) {
+    if (open) {
+      setShowUploadDialog(true);
+    } else if (pendingAction !== "upload") {
+      closeUploadDialog();
+    }
+  }
+
   async function uploadDocument() {
-    const tags = uploadTagKeys
-      .map(scopeRefFromKey)
+    const ownerRef = uploadOwnerTagKey
+      ? scopeRefFromKey(uploadOwnerTagKey)
+      : null;
+    if (!ownerRef || !uploadFile) return;
+    const additionalRefs = uploadTagOptions
+      .filter((option) => uploadAdditionalTagKeys.includes(option.value))
+      .map((option) => scopeRefFromKey(option.value))
       .filter((tag): tag is DocumentTagRef => tag !== null);
-    const scope = tags[0];
-    if (!scope || !uploadFile) return;
+    const tagRefs = [ownerRef, ...additionalRefs];
     const documentId = generatedId("doc", titleFromFilename(uploadFile.name));
-    await runAction("upload", () =>
-      documentLibraryApi.uploadDocumentLibraryFile({
-        documentId,
-        scopeType: scope.tag_type,
-        scopeId: scope.tag_id,
-        tagRefs: tags,
-        file: uploadFile,
-        description: uploadDescription,
-        allowMemberDownload: uploadAllowMemberDownload,
-      }),
+    await runAction(
+      "upload",
+      () =>
+        documentLibraryApi.uploadDocumentLibraryFile({
+          documentId,
+          scopeType: ownerRef.tag_type,
+          scopeId: ownerRef.tag_id,
+          tagRefs,
+          file: uploadFile,
+          description: uploadDescription,
+          allowMemberDownload: uploadAllowMemberDownload,
+        }),
+      closeUploadDialog,
     );
-    closeUploadDialog();
   }
 
   async function downloadDocument(item: DocumentLibrarySummary) {
@@ -384,6 +441,11 @@ export function DocumentLibraryFeature({
               options={scopeOptions}
               onValueChange={setSelectedScopeKey}
             />
+            {selectedScopeKey === "all" && (
+              <FieldDescription>
+                {t("documentLibrary.selectTargetBeforeUpload")}
+              </FieldDescription>
+            )}
           </Field>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void refreshDocuments()} disabled={loading}>
@@ -394,7 +456,13 @@ export function DocumentLibraryFeature({
               )}
               {t("admin.retry")}
             </Button>
-            <Button onClick={openUploadDialog} disabled={uploadTagOptions.length === 0}>
+            <Button
+              onClick={openUploadDialog}
+              disabled={
+                selectedScopeKey === "all" ||
+                !scopeOptions.some((option) => option.value === selectedScopeKey)
+              }
+            >
               <FileUp data-icon="inline-start" />
               {t("documentLibrary.upload")}
             </Button>
@@ -537,14 +605,24 @@ export function DocumentLibraryFeature({
         </div>
       )}
 
-      <Dialog open={showUploadDialog} onOpenChange={setShowUploadDialog}>
-        <DialogContent>
+      <Dialog open={showUploadDialog} onOpenChange={handleUploadDialogOpenChange}>
+        <DialogContent
+          showCloseButton={!uploadPending}
+          onEscapeKeyDown={(event) => uploadPending && event.preventDefault()}
+          onPointerDownOutside={(event) => uploadPending && event.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>{t("documentLibrary.upload")}</DialogTitle>
             <DialogDescription>{t("documentLibrary.uploadDescription")}</DialogDescription>
           </DialogHeader>
           <FieldSet>
             <FieldGroup>
+              {uploadOwnerOption && (
+                <TargetSummary
+                  label={t("documentLibrary.uploadTarget")}
+                  title={uploadOwnerOption.label}
+                />
+              )}
               <Field>
                 <FieldLabel htmlFor="document-library-file">{t("ingestion.pdfFile")}</FieldLabel>
                 <Input
@@ -555,8 +633,13 @@ export function DocumentLibraryFeature({
                   onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
                 />
                 <FieldDescription>
+                  {t("documentLibrary.fileRequirements")}
+                </FieldDescription>
+                <FieldDescription>
                   {uploadFile
-                    ? t("ingestion.fileTitle", { title: titleFromFilename(uploadFile.name) })
+                    ? `${t("ingestion.fileTitle", {
+                        title: titleFromFilename(uploadFile.name),
+                      })} · ${formatFileSize(uploadFile.size)}`
                     : t("ingestion.fileTitlePending")}
                 </FieldDescription>
               </Field>
@@ -570,26 +653,47 @@ export function DocumentLibraryFeature({
                   onChange={(event) => setUploadDescription(event.target.value)}
                 />
               </Field>
-              <Field>
-                <FieldLabel>{t("ingestion.tags")}</FieldLabel>
-                <div className="grid max-h-48 gap-2 overflow-y-auto rounded-md border p-3">
-                  {uploadTagOptions.map((option) => (
-                    <label key={option.value} className="flex items-center gap-2 text-sm">
-                      <Checkbox
-                        checked={uploadTagKeys.includes(option.value)}
-                        onCheckedChange={(checked) =>
-                          setUploadTagKeys((current) =>
-                            checked === true
-                              ? [...new Set([...current, option.value])]
-                              : current.filter((value) => value !== option.value),
-                          )
-                        }
-                      />
-                      {option.label}
-                    </label>
-                  ))}
-                </div>
-              </Field>
+              {uploadAdditionalTagOptions.length > 0 && (
+                <Collapsible
+                  open={showAdditionalTargets}
+                  onOpenChange={setShowAdditionalTargets}
+                >
+                  <CollapsibleTrigger asChild>
+                    <Button type="button" variant="ghost">
+                      {t("documentLibrary.additionalTargets")}
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <FieldSet className="pt-3">
+                      <FieldLegend className="sr-only">
+                        {t("documentLibrary.additionalTargets")}
+                      </FieldLegend>
+                      <FieldGroup>
+                        {uploadAdditionalTagOptions.map((option) => (
+                          <label
+                            key={option.value}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <Checkbox
+                              checked={uploadAdditionalTagKeys.includes(option.value)}
+                              onCheckedChange={(checked) =>
+                                setUploadAdditionalTagKeys((current) =>
+                                  checked === true
+                                    ? [...new Set([...current, option.value])]
+                                    : current.filter(
+                                        (value) => value !== option.value,
+                                      ),
+                                )
+                              }
+                            />
+                            {option.label}
+                          </label>
+                        ))}
+                      </FieldGroup>
+                    </FieldSet>
+                  </CollapsibleContent>
+                </Collapsible>
+              )}
               <label className="flex items-center gap-2 text-sm">
                 <Checkbox
                   checked={uploadAllowMemberDownload}
@@ -599,17 +703,36 @@ export function DocumentLibraryFeature({
               </label>
             </FieldGroup>
           </FieldSet>
+          {actionError && (
+            <Alert variant="destructive">
+              <ShieldOff />
+              <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={closeUploadDialog}>
+            <Button
+              variant="outline"
+              onClick={closeUploadDialog}
+              disabled={uploadPending}
+            >
               {t("admin.cancel")}
             </Button>
             <Button
               onClick={() => void uploadDocument()}
-              disabled={!canUpload || pendingAction === "upload"}
+              disabled={!canUpload || uploadPending}
             >
-              {pendingAction === "upload" && <Spinner />}
-              <FileUp data-icon="inline-start" />
-              {t("documentLibrary.upload")}
+              {uploadPending ? (
+                <>
+                  <Spinner data-icon="inline-start" />
+                  {t("documentLibrary.uploading")}
+                </>
+              ) : (
+                <>
+                  <FileUp data-icon="inline-start" />
+                  {t("documentLibrary.upload")}
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
