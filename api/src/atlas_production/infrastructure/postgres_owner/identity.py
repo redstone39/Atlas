@@ -11,12 +11,21 @@ from sqlalchemy.orm import Session
 from atlas_production.infrastructure.persistence import identity_access
 from atlas_production.infrastructure.persistence.identity_access import (
     AtlasAgentTokenRow,
+    AtlasDirectoryConnectionRow,
+    AtlasDirectoryConnectionSecretRow,
+    AtlasExternalIdentityRow,
     AtlasPermissionGrantRow,
     AtlasSessionRow,
     AtlasTeamMembershipRow,
     AtlasTeamRow,
     AtlasUserInviteRow,
     AtlasUserRow,
+    directory_connection_record,
+    directory_connection_row,
+    directory_secret_record,
+    directory_secret_row,
+    external_identity_record,
+    external_identity_row,
 )
 from atlas_production.infrastructure.postgres_owner.lock_keys import (
     identity_actor_owner_key,
@@ -29,6 +38,11 @@ from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.infrastructure.postgres_owner.project import ProjectGrantWriter
 from atlas_production.infrastructure.postgres_owner.team import TeamMembershipWriter
+from atlas_production.modules.identity_access.directory_records import (
+    DirectoryConnectionRecord,
+    DirectorySecretRecord,
+    ExternalIdentityRecord,
+)
 from atlas_production.modules.identity_access.records import (
     AgentTokenRecord,
     PermissionGrantRecord,
@@ -186,6 +200,20 @@ class IdentitySessionChangeSet:
     invite_transitions: tuple[InviteTransition, ...] = ()
     agent_tokens: tuple[AgentTokenRecord, ...] = ()
     expected_agent_users: tuple[tuple[str, UserRecord], ...] = ()
+    directory_connections: tuple[DirectoryConnectionRecord, ...] = ()
+    expected_directory_connections: tuple[
+        tuple[str, DirectoryConnectionRecord | None], ...
+    ] = ()
+    directory_secrets: tuple[DirectorySecretRecord, ...] = ()
+    expected_directory_secrets: tuple[
+        tuple[str, str, DirectorySecretRecord | None], ...
+    ] = ()
+    deleted_directory_secrets: tuple[tuple[str, str], ...] = ()
+    external_identities: tuple[ExternalIdentityRecord, ...] = ()
+    expected_external_identities: tuple[
+        tuple[str, ExternalIdentityRecord | None], ...
+    ] = ()
+    reject_directory_alias_conflicts: bool = False
     audit_events: tuple[AuditEventRecord, ...] = ()
     protect_admin_count: bool = False
     protected_admin_team_ids: tuple[str, ...] = ()
@@ -204,6 +232,10 @@ class IdentitySessionChangeSet:
                 self.deleted_session_tokens,
                 self.invite_transitions,
                 self.agent_tokens,
+                self.directory_connections,
+                self.directory_secrets,
+                self.deleted_directory_secrets,
+                self.external_identities,
             )
         )
         if has_mutation and not self.audit_events:
@@ -566,10 +598,16 @@ class IdentityRepository:
                     session,
                     change_set.expected_agent_users,
                 )
+                self._lock_directory_currentness(session, change_set)
                 self._lock_pending_invite_absence(
                     session,
                     change_set.expected_pending_invite_absent_emails,
                 )
+                if change_set.reject_directory_alias_conflicts:
+                    self._validate_directory_alias_conflicts(
+                        session,
+                        change_set.external_identities,
+                    )
                 if change_set.protect_admin_count:
                     self._validate_active_admin_invariant(session, change_set.users)
                 (
@@ -762,6 +800,94 @@ class IdentityRepository:
                 raise IdentityCurrentnessConflict(
                     "agent token target currentness changed"
                 )
+
+    @staticmethod
+    def _lock_directory_currentness(
+        session: Session,
+        change_set: IdentitySessionChangeSet,
+    ) -> None:
+        for connection_id, expected in change_set.expected_directory_connections:
+            row = session.scalar(
+                select(AtlasDirectoryConnectionRow)
+                .where(AtlasDirectoryConnectionRow.connection_id == connection_id)
+                .with_for_update()
+            )
+            current = directory_connection_record(row) if row is not None else None
+            if current != expected:
+                raise IdentityCurrentnessConflict("directory connection currentness changed")
+        for connection_id, secret_kind, expected in change_set.expected_directory_secrets:
+            row = session.scalar(
+                select(AtlasDirectoryConnectionSecretRow)
+                .where(
+                    AtlasDirectoryConnectionSecretRow.connection_id == connection_id,
+                    AtlasDirectoryConnectionSecretRow.secret_kind == secret_kind,
+                )
+                .with_for_update()
+            )
+            current = directory_secret_record(row) if row is not None else None
+            if current != expected:
+                raise IdentityCurrentnessConflict("directory secret currentness changed")
+        for actor_id, expected in change_set.expected_external_identities:
+            row = session.scalar(
+                select(AtlasExternalIdentityRow)
+                .where(AtlasExternalIdentityRow.actor_id == actor_id)
+                .with_for_update()
+            )
+            current = external_identity_record(row) if row is not None else None
+            if current != expected:
+                raise IdentityCurrentnessConflict("external identity currentness changed")
+
+    @staticmethod
+    def _validate_directory_alias_conflicts(
+        session: Session,
+        identities: tuple[ExternalIdentityRecord, ...],
+    ) -> None:
+        seen: set[tuple[str, str]] = set()
+        changed_actor_ids = {identity.actor_id for identity in identities}
+        for identity in identities:
+            aliases = [identity.normalized_username]
+            if identity.normalized_email is not None:
+                aliases.append(identity.normalized_email)
+            for alias in aliases:
+                key = (identity.connection_id, alias)
+                if key in seen:
+                    raise IdentityCurrentnessConflict("directory alias is ambiguous")
+                seen.add(key)
+                conflict = session.scalar(
+                    select(AtlasExternalIdentityRow.actor_id)
+                    .where(
+                        AtlasExternalIdentityRow.connection_id == identity.connection_id,
+                        or_(
+                            AtlasExternalIdentityRow.normalized_username == alias,
+                            AtlasExternalIdentityRow.normalized_email == alias,
+                        ),
+                        AtlasExternalIdentityRow.actor_id.not_in(changed_actor_ids),
+                    )
+                    .with_for_update()
+                    .limit(1)
+                )
+                if conflict is not None:
+                    raise IdentityCurrentnessConflict("directory alias is ambiguous")
+            if identity.normalized_email is None:
+                continue
+            local_rows = session.scalars(
+                select(AtlasUserRow)
+                .where(
+                    func.lower(AtlasUserRow.email) == identity.normalized_email,
+                    AtlasUserRow.actor_id.not_in(changed_actor_ids),
+                )
+                .with_for_update()
+            ).all()
+            for local_row in local_rows:
+                binding = session.scalar(
+                    select(AtlasExternalIdentityRow.actor_id).where(
+                        AtlasExternalIdentityRow.actor_id == local_row.actor_id
+                    )
+                )
+                if binding is None:
+                    raise IdentityCurrentnessConflict(
+                        "directory alias conflicts with a local email"
+                    )
 
     @staticmethod
     def _lock_complete_protected_team_memberships(
@@ -975,8 +1101,23 @@ class IdentityRepository:
             session.execute(
                 delete(AtlasSessionRow).where(AtlasSessionRow.session_token == token)
             )
+        for connection_id, secret_kind in change_set.deleted_directory_secrets:
+            session.execute(
+                delete(AtlasDirectoryConnectionSecretRow).where(
+                    AtlasDirectoryConnectionSecretRow.connection_id == connection_id,
+                    AtlasDirectoryConnectionSecretRow.secret_kind == secret_kind,
+                )
+            )
+        for connection in change_set.directory_connections:
+            session.merge(directory_connection_row(connection))
         for user in change_set.users:
             session.merge(_user_row(user))
+        if change_set.directory_connections or change_set.users:
+            session.flush()
+        for secret in change_set.directory_secrets:
+            session.merge(directory_secret_row(secret))
+        for identity in change_set.external_identities:
+            session.merge(external_identity_row(identity))
         for token, actor_id in change_set.sessions:
             session.merge(AtlasSessionRow(session_token=token, actor_id=actor_id))
         for transition in change_set.invite_transitions:
@@ -1022,6 +1163,64 @@ class IdentityRepository:
                 statement.order_by(AtlasUserRow.actor_id).limit(limit)
             ).all()
             return [_user_record(row) for row in rows]
+    def list_directory_connections(self) -> list[DirectoryConnectionRecord]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(AtlasDirectoryConnectionRow).order_by(
+                    AtlasDirectoryConnectionRow.priority,
+                    AtlasDirectoryConnectionRow.connection_id,
+                )
+            ).all()
+            return [directory_connection_record(row) for row in rows]
+
+    def get_directory_connection(
+        self, connection_id: str
+    ) -> DirectoryConnectionRecord | None:
+        with self.session_factory() as session:
+            row = session.get(AtlasDirectoryConnectionRow, connection_id)
+            return directory_connection_record(row) if row is not None else None
+
+    def get_directory_secret(
+        self, connection_id: str, secret_kind: str
+    ) -> DirectorySecretRecord | None:
+        with self.session_factory() as session:
+            row = session.get(
+                AtlasDirectoryConnectionSecretRow,
+                (connection_id, secret_kind),
+            )
+            return directory_secret_record(row) if row is not None else None
+
+    def get_external_identity(
+        self, actor_id: str
+    ) -> ExternalIdentityRecord | None:
+        with self.session_factory() as session:
+            row = session.get(AtlasExternalIdentityRow, actor_id)
+            return external_identity_record(row) if row is not None else None
+
+    def get_external_identity_by_subject(
+        self, connection_id: str, external_subject: str
+    ) -> ExternalIdentityRecord | None:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(AtlasExternalIdentityRow)
+                .where(
+                    AtlasExternalIdentityRow.connection_id == connection_id,
+                    AtlasExternalIdentityRow.external_subject == external_subject,
+                )
+                .order_by(AtlasExternalIdentityRow.actor_id)
+                .limit(2)
+            ).all()
+            return external_identity_record(rows[0]) if len(rows) == 1 else None
+
+    def list_external_identities(self) -> list[ExternalIdentityRecord]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(AtlasExternalIdentityRow).order_by(
+                    AtlasExternalIdentityRow.connection_id,
+                    AtlasExternalIdentityRow.actor_id,
+                )
+            ).all()
+            return [external_identity_record(row) for row in rows]
 
     def active_admin_count(self) -> int:
         with self.session_factory() as session:

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from atlas_production.shared.user_messages import MessageReferenceModel
 
@@ -29,10 +29,144 @@ class SessionState(BaseModel):
     team_roles: dict[str, Literal["member", "uploader", "admin"]] = Field(default_factory=dict)
 
 
-class LoginRequest(BaseModel):
-    email: str
+class StrictIdentityModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class StrictIdentityMessageModel(MessageReferenceModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LoginRequest(StrictIdentityModel):
+    identifier: str = Field(min_length=1, max_length=320)
     password: str
-    idempotency_key: str | None = None
+
+
+class DirectoryConnectionConfig(StrictIdentityModel):
+    connection_id: str = Field(min_length=1, max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    priority: int = Field(ge=0)
+    provider_type: Literal["active_directory", "ldap"]
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    tls_mode: Literal["ldaps", "start_tls"]
+    connect_timeout_seconds: int = Field(ge=1, le=30)
+    operation_timeout_seconds: int = Field(ge=1, le=30)
+    bind_dn: str = Field(min_length=1, max_length=1000)
+    user_base_dn: str = Field(min_length=1, max_length=1000)
+    user_object_filter: str = Field(min_length=1, max_length=2000)
+    login_attribute: str = Field(min_length=1, max_length=200)
+    stable_id_attribute: str = Field(min_length=1, max_length=200)
+    display_name_attribute: str = Field(min_length=1, max_length=200)
+    email_attribute: str = Field(min_length=1, max_length=200)
+    groups_attribute: str = Field(min_length=1, max_length=200)
+    department_attribute: str = Field(min_length=1, max_length=200)
+    title_attribute: str = Field(min_length=1, max_length=200)
+    employee_id_attribute: str = Field(min_length=1, max_length=200)
+    enabled: bool
+
+
+class DirectoryConnectionCreateRequest(DirectoryConnectionConfig):
+    bind_password: SecretStr = Field(min_length=1)
+    custom_ca_pem: SecretStr | None = Field(default=None, min_length=1)
+
+
+class DirectoryConnectionUpdateRequest(StrictIdentityModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    priority: int | None = Field(default=None, ge=0)
+    provider_type: Literal["active_directory", "ldap"] | None = None
+    host: str | None = Field(default=None, min_length=1, max_length=253)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    tls_mode: Literal["ldaps", "start_tls"] | None = None
+    connect_timeout_seconds: int | None = Field(default=None, ge=1, le=30)
+    operation_timeout_seconds: int | None = Field(default=None, ge=1, le=30)
+    bind_dn: str | None = Field(default=None, min_length=1, max_length=1000)
+    user_base_dn: str | None = Field(default=None, min_length=1, max_length=1000)
+    user_object_filter: str | None = Field(default=None, min_length=1, max_length=2000)
+    login_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    stable_id_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    display_name_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    email_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    groups_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    department_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    title_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    employee_id_attribute: str | None = Field(default=None, min_length=1, max_length=200)
+    enabled: bool | None = None
+    bind_password: SecretStr | None = Field(default=None, min_length=1)
+    clear_bind_password: bool = False
+    custom_ca_pem: SecretStr | None = Field(default=None, min_length=1)
+    clear_custom_ca: bool = False
+
+    @model_validator(mode="after")
+    def reject_secret_set_and_clear(self) -> "DirectoryConnectionUpdateRequest":
+        if self.bind_password is not None and self.clear_bind_password:
+            raise ValueError("bind password cannot be set and cleared together")
+        if self.custom_ca_pem is not None and self.clear_custom_ca:
+            raise ValueError("custom CA cannot be set and cleared together")
+        return self
+
+
+class DirectoryConnectionStatus(DirectoryConnectionConfig):
+    bind_password_configured: bool
+    custom_ca_configured: bool
+    custom_ca_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class DirectoryConnectionListResult(StrictIdentityModel):
+    connections: list[DirectoryConnectionStatus]
+
+
+class DirectoryConnectionTestResult(StrictIdentityMessageModel):
+    validation_status: Literal["passed", "failed"]
+
+
+class DirectoryUserSearchRequest(StrictIdentityModel):
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=50, ge=1, le=50)
+
+
+class DirectoryUserCandidate(StrictIdentityModel):
+    external_subject: str
+    username: str
+    display_name: str
+    email: str | None
+    groups: list[str]
+    department: str | None
+    title: str | None
+    employee_id: str | None
+    directory_enabled: bool | None
+
+
+class DirectoryUserSearchResult(StrictIdentityModel):
+    users: list[DirectoryUserCandidate]
+
+
+class DirectoryUserImportRequest(StrictIdentityModel):
+    external_subjects: list[str] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def reject_duplicate_subjects(self) -> "DirectoryUserImportRequest":
+        if len(self.external_subjects) != len(set(self.external_subjects)):
+            raise ValueError("external subjects must be unique")
+        return self
+
+
+class DirectoryUserImportResult(StrictIdentityMessageModel):
+    imported_actor_ids: list[str]
+    imported_count: int
+
+
+class DirectoryProfileSummary(StrictIdentityModel):
+    connection_id: str
+    connection_display_name: str
+    username: str
+    email: str | None
+    groups: list[str]
+    department: str | None
+    title: str | None
+    employee_id: str | None
+    status: Literal["current", "stale", "missing", "disabled"]
+    last_refreshed_at: str
 
 
 class AccountCreateRequest(BaseModel):
@@ -131,6 +265,8 @@ class UserAdminSummary(BaseModel):
     created_at: str
     invite_status: Literal["pending", "accepted", "revoked", "expired"] | None = None
     invite_id: str | None = None
+    account_source: Literal["local", "directory"] = "local"
+    directory_profile: DirectoryProfileSummary | None = None
 
 
 class UserAdminListResult(BaseModel):

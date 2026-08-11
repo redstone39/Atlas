@@ -18,9 +18,7 @@ from atlas_production.modules.document_intake.public import (
     KnowledgeDocumentListResult,
     KnowledgeDocumentSummary,
     KnowledgeScopeSummary,
-    source_allows_original_download,
 )
-from atlas_production.modules.identity_access.public import UserRecord
 from atlas_production.shared.http import error, session_token
 from atlas_production.transport.dependencies import api_composition, current_user
 from ..rbac import effective_document_scope
@@ -76,14 +74,13 @@ def list_knowledge_documents(request: Request) -> KnowledgeDocumentListResult | 
         ]
         if authorized_tags:
             documents.append(
-                _knowledge_document_summary(item, actor, document, authorized_tags)
+                _knowledge_document_summary(item, document, authorized_tags)
             )
     return KnowledgeDocumentListResult(documents=documents)
 
 
 def _knowledge_document_summary(
     item,
-    actor: UserRecord,
     document: DocumentRecord,
     authorized_tags: list[DocumentTagRecord],
 ) -> KnowledgeDocumentSummary:
@@ -107,14 +104,7 @@ def _knowledge_document_summary(
         source_filename=document.source_filename,
         source_byte_size=document.source_byte_size,
         uploaded_at=document.uploaded_at,
-        download_available=bool(
-            source_allows_original_download(
-                document.content_type,
-                source_download_restricted=document.source_download_restricted,
-            )
-            and item.original_artifact_available
-            and (document.allow_member_download or actor.system_role == "admin")
-        ),
+        download_available=item.download_available,
     )
 
 

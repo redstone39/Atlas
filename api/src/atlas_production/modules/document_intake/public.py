@@ -30,6 +30,33 @@ from .formats import (
     detect_document_format,
     source_allows_original_download,
 )
+from .library_application import DocumentLibraryApplication
+from .library_contracts import (
+    DocumentLibraryExceptionTypes,
+    DocumentLibraryFailureV1,
+    DocumentLibraryOutcomeV1,
+    DocumentLibraryUploadCommand,
+)
+from .library_ports import (
+    DocumentLibraryIntakeBackend,
+    DocumentLibraryProcessingBackend,
+    DocumentLibraryUploadBackend,
+    DocumentLifecycleFacade,
+    DocumentRestoreProofProvider,
+    LifecycleRequestFactory,
+    ProcessingAcceptanceFactory,
+)
+from .library_records import (
+    DocumentLibraryItemProjection,
+    DocumentLibraryRequestProjection,
+    DocumentLifecycleRequestInput,
+    DocumentUploadAccessDenied,
+    DocumentUploadReplayConflict,
+    DocumentUploadResult,
+    DocumentUploadUnauthenticated,
+    PublishedDocumentUpload,
+    RequestedDocumentScopeProjection,
+)
 
 __all__ = [
     "DocumentRecord",
@@ -40,6 +67,27 @@ __all__ = [
     "DocumentLibraryListResult",
     "DocumentLibraryUpdateRequest",
     "DocumentLibraryMutationResult",
+    "DocumentLibraryApplication",
+    "DocumentLibraryExceptionTypes",
+    "DocumentLibraryFailureV1",
+    "DocumentLibraryIntakeBackend",
+    "DocumentLibraryOutcomeV1",
+    "DocumentLibraryUploadCommand",
+    "DocumentLibraryProcessingBackend",
+    "DocumentLibraryUploadBackend",
+    "DocumentLifecycleFacade",
+    "LifecycleRequestFactory",
+    "ProcessingAcceptanceFactory",
+    "DocumentRestoreProofProvider",
+    "DocumentLibraryItemProjection",
+    "DocumentLibraryRequestProjection",
+    "DocumentLifecycleRequestInput",
+    "DocumentUploadAccessDenied",
+    "DocumentUploadReplayConflict",
+    "DocumentUploadResult",
+    "DocumentUploadUnauthenticated",
+    "PublishedDocumentUpload",
+    "RequestedDocumentScopeProjection",
     "KnowledgeScopeSummary",
     "KnowledgeDocumentSummary",
     "KnowledgeDocumentListResult",

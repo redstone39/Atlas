@@ -56,12 +56,14 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "attempt_ended_at",
         "attempt_id",
         "attempt_started_at",
+        "actor_ids",
         "batch_id",
         "canonical_mime",
         "candidate_event_id",
         "change_id",
         "connection_id",
         "command",
+        "count",
         "delivery_mode",
         "discovery_status",
         "document_id",
@@ -155,6 +157,7 @@ _AUDIT_BOOLEAN_FIELDS = frozenset(
 _AUDIT_INTEGER_FIELDS = frozenset(
     {
         "active_processing_generation",
+        "count",
         "attempt",
         "elapsed_seconds",
         "evidence_count",
@@ -167,7 +170,7 @@ _AUDIT_INTEGER_FIELDS = frozenset(
     }
 )
 _AUDIT_STRING_LIST_FIELDS = frozenset(
-    {"access_decision_ids", "model_invocation_refs", "tested_route_ids"}
+    {"access_decision_ids", "actor_ids", "model_invocation_refs", "tested_route_ids"}
 )
 
 

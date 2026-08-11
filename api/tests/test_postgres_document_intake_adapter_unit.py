@@ -7,13 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from atlas_production.infrastructure import (
+    postgres_document_intake_adapter as intake_adapter,
+)
 from atlas_production.infrastructure.postgres_document_intake_adapter import (
     DocumentIntakeJourneyFacade,
-    DocumentLibraryItemProjection,
-    DocumentLibraryRequestProjection,
-    DocumentLifecycleRequestInput,
     PostgresDocumentIntakeAdapter,
-    RequestedDocumentScopeProjection,
 )
 from atlas_production.infrastructure.postgres_document_processing_adapter import (
     PostgresDocumentProcessingAdapter,
@@ -31,12 +30,6 @@ from atlas_production.infrastructure.postgres_owner.document_processing import (
     CaptureProcessingExecutionCommand,
     DocumentLifecycleMutationCommand,
     ProcessingExecutionAcceptanceWriter,
-    ProcessingJobAuthorizationState,
-    ProcessingJobListBatch,
-    ProcessingJobView,
-    ProcessingProfilePin,
-    ProcessingControlResult,
-    VerifiedDocumentRestoreSet,
     attach_document_job_request_projections,
     document_processing_acceptance_identity,
     document_processing_acceptance_lock_identities,
@@ -45,6 +38,20 @@ from atlas_production.modules.document_intake.records import (
     DocumentRecord,
     DocumentTagRecord,
     DocumentVersionRecord,
+)
+from atlas_production.modules.document_intake.public import (
+    DocumentLibraryItemProjection,
+    DocumentLibraryRequestProjection,
+    DocumentLifecycleRequestInput,
+    RequestedDocumentScopeProjection,
+)
+from atlas_production.modules.processing_pipeline.public import (
+    ProcessingControlResult,
+    ProcessingJobAuthorizationState,
+    ProcessingJobListBatch,
+    ProcessingJobView,
+    ProcessingProfilePin,
+    VerifiedDocumentRestoreSet,
 )
 from atlas_production.modules.identity_access.records import UserRecord
 from atlas_production.shared.public import AuditEventRecord
@@ -207,6 +214,235 @@ def test_document_library_projection_owns_route_action_decisions() -> None:
         "scope_id",
         "record_upload_denial",
     } <= set(signature.parameters)
+
+
+class _ProjectionScalarRows:
+    def __init__(self, values):
+        self.values = values
+
+    def all(self):
+        return list(self.values)
+
+
+class _ProjectionExecuteRows:
+    def __init__(self, values):
+        self.values = values
+
+    def __iter__(self):
+        return iter(self.values)
+
+    def scalars(self):
+        return list(self.values)
+
+
+class _ProjectionSession:
+    def __init__(self, documents, tags, artifacts):
+        self.documents = documents
+        self.tags = tags
+        self.artifacts = artifacts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def scalars(self, statement):
+        description = statement.column_descriptions[0]
+        entity = description.get("entity")
+        entity_name = getattr(entity, "__name__", "")
+        if entity_name == "AtlasDocumentRow":
+            values = (
+                [document.document_id for document in self.documents]
+                if description.get("name") == "document_id"
+                else self.documents
+            )
+        elif entity_name == "AtlasDocumentTagRow":
+            values = self.tags
+        elif entity_name == "AtlasTeamRow":
+            values = [SimpleNamespace(team_id="team-1", name="Team One")]
+        elif entity_name == "AtlasProjectRow":
+            values = [
+                SimpleNamespace(project_id="project-1", name="Project One")
+            ]
+        else:
+            values = []
+        return _ProjectionScalarRows(values)
+
+    def execute(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        entity_name = getattr(entity, "__name__", "")
+        return _ProjectionExecuteRows(
+            self.artifacts if entity_name == "AtlasArtifactRow" else []
+        )
+
+
+def _project_download_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    team_role: str,
+    project_admin: bool,
+    original_scope: set[tuple[str, str]] | None = None,
+    team_source_restricted: bool = False,
+    artifacts: tuple[object, ...] | None = None,
+) -> dict[str, bool]:
+    team_document = replace(
+        _command().document,
+        document_id="document-team",
+        scope_type="team",
+        scope_id="team-1",
+        allow_member_download=False,
+        source_download_restricted=team_source_restricted,
+        original_artifact_id="artifact-team",
+        uploader_actor_id="user-uploader",
+    )
+    project_document = replace(
+        _command().document,
+        document_id="document-project",
+        scope_type="project",
+        scope_id="project-1",
+        allow_member_download=False,
+        original_artifact_id="artifact-project",
+        uploader_actor_id="user-uploader",
+    )
+    tags = (
+        SimpleNamespace(
+            document_id=team_document.document_id,
+            tag_type="team",
+            tag_id="team-1",
+            created_at=NOW,
+        ),
+        SimpleNamespace(
+            document_id=team_document.document_id,
+            tag_type="project",
+            tag_id="project-1",
+            created_at=NOW,
+        ),
+        SimpleNamespace(
+            document_id=project_document.document_id,
+            tag_type="project",
+            tag_id="project-1",
+            created_at=NOW,
+        ),
+    )
+    if artifacts is None:
+        artifacts = (
+            SimpleNamespace(
+                artifact_id="artifact-team",
+                parent_resource_id=team_document.document_id,
+                owner_scope_type="team",
+                owner_scope_id="team-1",
+            ),
+            SimpleNamespace(
+                artifact_id="artifact-project",
+                parent_resource_id=project_document.document_id,
+                owner_scope_type="project",
+                owner_scope_id="project-1",
+            ),
+        )
+    session = _ProjectionSession(
+        (team_document, project_document),
+        tags,
+        artifacts,
+    )
+    actor = UserRecord(
+        "user-1", "User", None, "member", None, True, "user", NOW
+    )
+    monkeypatch.setattr(intake_adapter, "acquire_mixed_owner_locks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(intake_adapter, "read_session_actor", lambda *_args: actor)
+    monkeypatch.setattr(intake_adapter, "_document_record", lambda row: row)
+    monkeypatch.setattr(intake_adapter, "_authorization_state", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(intake_adapter, "is_system_admin", lambda *_args: False)
+    monkeypatch.setattr(
+        intake_adapter,
+        "direct_team_role",
+        lambda _state, _actor_type, _actor_id, team_id: (
+            team_role if team_id == "team-1" else None
+        ),
+    )
+    monkeypatch.setattr(
+        intake_adapter,
+        "resolve_access",
+        lambda _state, **kwargs: SimpleNamespace(
+            allowed=(
+                project_admin
+                and kwargs["project_id"] == "project-1"
+                and kwargs["action"] == "permission_manage"
+            )
+        ),
+    )
+    visible_scope = (
+        {("team", "team-1"), ("project", "project-1")}
+        if original_scope is None
+        else original_scope
+    )
+    monkeypatch.setattr(
+        intake_adapter,
+        "effective_document_scope",
+        lambda *_args, **_kwargs: set(visible_scope),
+    )
+
+    projection = PostgresDocumentIntakeAdapter(
+        lambda: session
+    ).document_library_projection(
+        actor_type="user",
+        actor_id="user-1",
+        presented_browser_session_token="browser-token",
+    )
+
+    return {
+        item.document.document_id: item.download_available
+        for item in projection.items
+    }
+
+
+@pytest.mark.parametrize(
+    ("team_role", "project_admin", "expected"),
+    (
+        ("admin", False, {"document-team": True, "document-project": False}),
+        ("member", True, {"document-team": False, "document-project": True}),
+        ("uploader", False, {"document-team": False, "document-project": False}),
+        ("member", False, {"document-team": False, "document-project": False}),
+    ),
+)
+def test_document_projection_uses_exact_owner_admin_for_false_member_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    team_role: str,
+    project_admin: bool,
+    expected: dict[str, bool],
+) -> None:
+    assert _project_download_capabilities(
+        monkeypatch,
+        team_role=team_role,
+        project_admin=project_admin,
+    ) == expected
+
+
+def test_document_projection_keeps_source_acl_and_artifact_gates_for_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_denied = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        team_source_restricted=True,
+    )
+    acl_denied = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        original_scope=set(),
+    )
+    artifact_denied = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        artifacts=(),
+    )
+
+    assert source_denied["document-team"] is False
+    assert acl_denied["document-team"] is False
+    assert artifact_denied["document-team"] is False
 
 
 def test_processing_detail_projection_derives_document_from_job_identity() -> None:

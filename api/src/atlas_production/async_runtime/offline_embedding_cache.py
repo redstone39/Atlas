@@ -8,10 +8,12 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from .vector_index import MODEL_ALLOW_PATTERNS, MODEL_NAME, MODEL_REVISION
-
-
-MODEL_CONTENT_DIGEST = "e052ba4b733767ddea9fd3e6640ff41a0a83599baea0b0eadd97189d92f2d396"
+from .embedding_model_contract import (
+    MODEL_ALLOW_PATTERNS,
+    MODEL_CONTENT_DIGEST,
+    MODEL_NAME,
+    MODEL_REVISION,
+)
 
 
 def prepare_embedding_cache(*, cache_dir: Path, download: bool) -> dict[str, object]:

@@ -23,6 +23,7 @@ from .api_models import (
     UserInviteRevokeRequest,
     UserInviteSummary,
 )
+from .directory_service import DirectoryIdentityService, canonical_identifier
 from .records import (
     UserInviteRecord,
     UserRecord,
@@ -44,9 +45,11 @@ class IdentityAccessService:
         self,
         repository: IdentityAccessRepository,
         scope_grants: InviteScopeGrantPort,
+        directory_identity: DirectoryIdentityService | None = None,
     ) -> None:
         self.repository = repository
         self.scope_grants = scope_grants
+        self.directory_identity = directory_identity
 
     def _identity_mutation_context(self, owner_key: str, **kwargs):
         mutation = getattr(self.repository, "identity_mutation", None)
@@ -80,19 +83,43 @@ class IdentityAccessService:
         return self.repository.session_state(actor)
 
     def login(self, payload: LoginRequest) -> LoginOutcome:
-        user = self.repository.user_by_email(payload.email)
-        if not user or not user.active or not verify_password(payload.password, user.password_digest):
-            raise IdentityAccessError(
-                "invalid_credentials",
-                'auth.the_email_or_password_was_not_accepted',
-                401,
-                "audit-p0-login-denied",
+        identifier = canonical_identifier(payload.identifier)
+        local_candidates = [
+            user
+            for user in self.repository.list_users()
+            if user.email
+            and canonical_identifier(user.email) == identifier
+            and (
+                self.directory_identity is None
+                or self.directory_identity.repository.get_external_identity(
+                    user.actor_id
+                )
+                is None
             )
-        token = self.repository.issue_session(user.actor_id)
-        return LoginOutcome(
-            session=self.repository.session_state(user),
-            raw_session_token=token,
-        )
+        ]
+        if local_candidates:
+            if len(local_candidates) != 1:
+                self._invalid_credentials()
+            user = local_candidates[0]
+            if (
+                not user.active
+                or user.actor_type != "user"
+                or not verify_password(payload.password, user.password_digest)
+            ):
+                self._invalid_credentials()
+            token = self.repository.issue_session(user.actor_id)
+            return LoginOutcome(
+                session=self.repository.session_state(user),
+                raw_session_token=token,
+            )
+        if self.directory_identity is not None:
+            outcome = self.directory_identity.authenticate_imported(
+                payload.identifier,
+                payload.password,
+            )
+            if outcome is not None:
+                return outcome
+        self._invalid_credentials()
 
     def logout(self, token: str | None) -> bool:
         return self.repository.revoke_session(token)
@@ -370,12 +397,87 @@ class IdentityAccessService:
             audit_event_ref=audit.event_id,
         )
 
-    def list_users(self, actor: UserRecord | None) -> UserAdminListResult:
+    def list_users(
+        self,
+        actor: UserRecord | None,
+        *,
+        q: str | None = None,
+        account_source: str | None = None,
+        directory_connection_id: str | None = None,
+        active: bool | None = None,
+        directory_profile_status: str | None = None,
+        directory_group: str | None = None,
+        department: str | None = None,
+        title: str | None = None,
+        employee_id: str | None = None,
+    ) -> UserAdminListResult:
         self._require_system_admin(actor)
         users: list[UserAdminSummary] = []
+        canonical_query = canonical_identifier(q) if q else None
+        canonical_group = canonical_identifier(directory_group) if directory_group else None
+        contains_filters = {
+            "department": canonical_identifier(department) if department else None,
+            "title": canonical_identifier(title) if title else None,
+            "employee_id": canonical_identifier(employee_id) if employee_id else None,
+        }
         for user in sorted(self.repository.list_users(), key=lambda item: item.actor_id):
             if user.actor_type not in {"user", "service_account"}:
                 continue
+            identity = (
+                self.directory_identity.repository.get_external_identity(user.actor_id)
+                if self.directory_identity is not None
+                else None
+            )
+            source = "directory" if identity is not None else "local"
+            profile = (
+                self.directory_identity.profile_summary(identity)
+                if identity is not None and self.directory_identity is not None
+                else None
+            )
+            if account_source is not None and source != account_source:
+                continue
+            if active is not None and user.active is not active:
+                continue
+            if directory_connection_id is not None and (
+                profile is None or profile.connection_id != directory_connection_id
+            ):
+                continue
+            if directory_profile_status is not None and (
+                profile is None or profile.status != directory_profile_status
+            ):
+                continue
+            if canonical_group is not None and (
+                profile is None
+                or canonical_group not in {
+                    canonical_identifier(group) for group in profile.groups
+                }
+            ):
+                continue
+            if any(
+                expected is not None
+                and (
+                    profile is None
+                    or expected
+                    not in canonical_identifier(getattr(profile, field_name) or "")
+                )
+                for field_name, expected in contains_filters.items()
+            ):
+                continue
+            if canonical_query is not None:
+                searchable = [
+                    user.display_name,
+                    user.email or "",
+                    profile.username if profile else "",
+                    profile.email or "" if profile else "",
+                    profile.department or "" if profile else "",
+                    profile.title or "" if profile else "",
+                    profile.employee_id or "" if profile else "",
+                    *(profile.groups if profile else []),
+                ]
+                if not any(
+                    canonical_query in canonical_identifier(value) for value in searchable
+                ):
+                    continue
             latest_invite = self._latest_invite_for_actor(user.actor_id)
             users.append(
                 UserAdminSummary(
@@ -388,6 +490,8 @@ class IdentityAccessService:
                     created_at=user.created_at,
                     invite_status=self._invite_status(latest_invite) if latest_invite else None,
                     invite_id=latest_invite.invite_id if latest_invite else None,
+                    account_source=source,
+                    directory_profile=profile,
                 )
             )
         return UserAdminListResult(users=users)
@@ -436,6 +540,17 @@ class IdentityAccessService:
                 404,
             )
         assert target is not None
+        if (
+            payload.display_name is not None
+            and self.directory_identity is not None
+            and self.directory_identity.repository.get_external_identity(actor_id)
+            is not None
+        ):
+            self._reject_admin_action(
+                "directory.profile_is_read_only",
+                "audit-user-update-rejected",
+                422,
+            )
         removes_active_admin = self._would_remove_active_admin(
             target,
             payload.active,
@@ -534,6 +649,14 @@ class IdentityAccessService:
                 'invite.requires_admin_access_to_this_team_or_project',
                 403,
             )
+
+    @staticmethod
+    def _invalid_credentials() -> None:
+        raise IdentityAccessError(
+            "invalid_credentials",
+            "auth.the_email_or_password_was_not_accepted",
+            401,
+        )
 
     def _require_actor(self, actor: UserRecord | None) -> UserRecord:
         if not actor:

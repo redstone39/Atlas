@@ -52,11 +52,10 @@ print(value)' "$1"
 }
 
 admin_login_json() {
-  python3 -c 'import json,os,sys; print(json.dumps({
-"email": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
+  python3 -c 'import json,os; print(json.dumps({
+"identifier": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
 "password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
-"idempotency_key": sys.argv[1],
-}))' "$1"
+}))'
 }
 
 api_get() {
@@ -102,7 +101,7 @@ wait_for_url "production API" "${api_url}/api/v1/ops/health"
 wait_for_url "production Web" "${web_url}/login"
 
 api_post "/api/v1/auth/sessions" \
-  "$(admin_login_json smoke-login)" >/dev/null
+  "$(admin_login_json)" >/dev/null
 
 invite="$(
   api_post "/api/v1/admin/user-invites" \
@@ -128,7 +127,7 @@ curl -fsS -b "$cookie_file" -c "$cookie_file" \
   "${api_url}/api/v1/admin/document-library" >/dev/null
 
 user_api_post "/api/v1/auth/sessions" \
-  "{\"email\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"member-login-${suffix}\"}" >/dev/null
+  "{\"identifier\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
 
 api_post "/api/v1/admin/teams" \
   "{\"team_id\":\"${parent_team_id}\",\"name\":\"Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}" >/dev/null
@@ -229,10 +228,10 @@ compose restart api >/dev/null
 wait_for_url "restarted production API" "${api_url}/api/v1/ops/health"
 
 api_post "/api/v1/auth/sessions" \
-  "$(admin_login_json smoke-login-after-restart)" >/dev/null
+  "$(admin_login_json)" >/dev/null
 
 user_api_post "/api/v1/auth/sessions" \
-  "{\"email\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"member-login-after-restart-${suffix}\"}" >/dev/null
+  "{\"identifier\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
 
 if [[ "$(user_document_visible)" != "True" ]]; then
   echo "Persisted direct user grant was not effective after API restart" >&2

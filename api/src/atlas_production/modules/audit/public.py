@@ -11,6 +11,8 @@ from atlas_production.modules.result_governance.public import (
 )
 
 from .service import (
+    AdminAuditEventReadService,
+    AuditEventReadError,
     SENSITIVE_AUDIT_KEY_FRAGMENTS,
     audit_event_status,
     safe_audit_metadata,
@@ -147,6 +149,8 @@ class TurnAuditDraftOwnerV2(Protocol):
 
 
 __all__ = [
+    "AdminAuditEventReadService",
+    "AuditEventReadError",
     "SENSITIVE_AUDIT_KEY_FRAGMENTS",
     "audit_event_status",
     "safe_audit_metadata",

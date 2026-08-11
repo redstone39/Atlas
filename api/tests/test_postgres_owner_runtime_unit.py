@@ -160,6 +160,9 @@ class RecordingSession:
             raise RuntimeError("audit unavailable")
         self.added.append(row)
 
+    def flush(self) -> None:
+        return None
+
     def commit(self) -> None:
         self.commits += 1
 

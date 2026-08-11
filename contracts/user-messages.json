@@ -835,6 +835,9 @@
     "auth.please_sign_in_before_reconnecting_this_turn": {
       "params": {}
     },
+    "audit.admin_listed_audit_events": {
+      "params": {}
+    },
     "audit.admin_listed_conversation_history": {
       "params": {}
     },
@@ -930,6 +933,29 @@
     "answer_behavior.idempotency_key_was_reused": { "params": {} },
     "answer_behavior.revision_changed_before_update": { "params": {} },
     "answer_behavior.stored_revision_is_invalid": { "params": {} },
-    "audit.metadata_was_redacted": { "params": {} }
+    "audit.metadata_was_redacted": { "params": {} },
+    "directory.bind_password_not_configured": { "params": {} },
+    "directory.concurrent_change": { "params": {} },
+    "directory.connection_conflict": { "params": {} },
+    "directory.connection_created": { "params": {} },
+    "directory.connection_disabled": { "params": {} },
+    "directory.connection_not_found": { "params": {} },
+    "directory.connection_test_failed": { "params": {} },
+    "directory.connection_test_passed": { "params": {} },
+    "directory.connection_updated": { "params": {} },
+    "directory.enabled_connection_requires_bind_password": { "params": {} },
+    "directory.entry_is_invalid": { "params": {} },
+    "directory.import_conflict": { "params": {} },
+    "directory.import_entry_unavailable": { "params": {} },
+    "directory.is_unavailable": { "params": {} },
+    "directory.login_succeeded": { "params": {} },
+    "directory.profile_not_found": { "params": {} },
+    "directory.profile_is_read_only": { "params": {} },
+    "directory.profile_refreshed": { "params": {} },
+    "directory.users_imported": {
+      "params": {
+        "count": { "type": "integer", "required": false }
+      }
+    }
   }
 }

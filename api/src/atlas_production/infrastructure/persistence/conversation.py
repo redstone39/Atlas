@@ -40,6 +40,25 @@ class AtlasTurnConversationRow(OrmBase):
         ),
         CheckConstraint("next_ordinal >= 1", name="ck_atlas_turn_conversation_next_ordinal"),
     )
+class AtlasTurnConversationScopeTagRow(OrmBase):
+    __tablename__ = "atlas_turn_conversation_scope_tags"
+
+    conversation_id: Mapped[str] = mapped_column(
+        String(200),
+        ForeignKey("atlas_turn_conversations.conversation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_type: Mapped[str] = mapped_column(String(20), primary_key=True)
+    tag_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "tag_type IN ('project','team')",
+            name="ck_atlas_turn_conversation_scope_tag_type",
+        ),
+    )
+
+
 
 
 class AtlasTurnConversationMemberRow(OrmBase):
@@ -89,5 +108,10 @@ class AtlasTurnConversationIdempotencyRow(OrmBase):
 
 
 OWNER_TABLES = frozenset(
-    {AtlasTurnConversationRow.__tablename__, AtlasTurnConversationMemberRow.__tablename__, AtlasTurnConversationIdempotencyRow.__tablename__}
+    {
+        AtlasTurnConversationRow.__tablename__,
+        AtlasTurnConversationScopeTagRow.__tablename__,
+        AtlasTurnConversationMemberRow.__tablename__,
+        AtlasTurnConversationIdempotencyRow.__tablename__,
+    }
 )

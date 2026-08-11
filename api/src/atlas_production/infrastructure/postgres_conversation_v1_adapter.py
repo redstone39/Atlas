@@ -75,6 +75,9 @@ class PostgresConversationV1Adapter:
                     title=command.title or _DEFAULT_TITLE,
                     idempotency_key=replay_key,
                     response_language=command.response_language,
+                    tag_refs=tuple(
+                        (ref.tag_type, ref.tag_id) for ref in command.tag_refs
+                    ),
                 )
             )
         )

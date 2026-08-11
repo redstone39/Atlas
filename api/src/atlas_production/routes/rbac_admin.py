@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Request
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from atlas_production.modules.identity_access.public import (
@@ -59,9 +61,36 @@ def _identity_error(
 
 
 @router.get("/api/v1/admin/users", response_model=UserAdminListResult)
-def list_users(request: Request) -> UserAdminListResult | JSONResponse:
+def list_users(
+    request: Request,
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    account_source: Literal["local", "directory"] | None = None,
+    directory_connection_id: Annotated[
+        str | None, Query(min_length=1, max_length=200)
+    ] = None,
+    active: bool | None = None,
+    directory_profile_status: Literal[
+        "current", "stale", "missing", "disabled"
+    ]
+    | None = None,
+    directory_group: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    department: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    title: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    employee_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+) -> UserAdminListResult | JSONResponse:
     try:
-        return _identity_service(request).list_users(current_user(request))
+        return _identity_service(request).list_users(
+            current_user(request),
+            q=q,
+            account_source=account_source,
+            directory_connection_id=directory_connection_id,
+            active=active,
+            directory_profile_status=directory_profile_status,
+            directory_group=directory_group,
+            department=department,
+            title=title,
+            employee_id=employee_id,
+        )
     except IdentityAccessError as exc:
         return _identity_error(exc)
 

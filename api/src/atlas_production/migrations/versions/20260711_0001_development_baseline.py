@@ -42,6 +42,7 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_turn_citation_binding_drafts',
         'atlas_turn_conversation_idempotency',
         'atlas_turn_conversation_members',
+        'atlas_turn_conversation_scope_tags',
         'atlas_turn_conversations',
         'atlas_turn_document_candidate_ledger',
         'atlas_turn_evidence_identities',
@@ -614,6 +615,55 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('team_id')
     )
     op.create_index(op.f('ix_atlas_teams_parent_team_id'), 'atlas_teams', ['parent_team_id'], unique=False)
+    op.create_table('atlas_directory_connections',
+    sa.Column('connection_id', sa.String(), nullable=False),
+    sa.Column('display_name', sa.String(), nullable=False),
+    sa.Column('priority', sa.Integer(), nullable=False),
+    sa.Column('provider_type', sa.String(), nullable=False),
+    sa.Column('host', sa.String(), nullable=False),
+    sa.Column('port', sa.Integer(), nullable=False),
+    sa.Column('tls_mode', sa.String(), nullable=False),
+    sa.Column('connect_timeout_seconds', sa.Integer(), nullable=False),
+    sa.Column('operation_timeout_seconds', sa.Integer(), nullable=False),
+    sa.Column('bind_dn', sa.Text(), nullable=False),
+    sa.Column('user_base_dn', sa.Text(), nullable=False),
+    sa.Column('user_object_filter', sa.Text(), nullable=False),
+    sa.Column('login_attribute', sa.String(), nullable=False),
+    sa.Column('stable_id_attribute', sa.String(), nullable=False),
+    sa.Column('display_name_attribute', sa.String(), nullable=False),
+    sa.Column('email_attribute', sa.String(), nullable=False),
+    sa.Column('groups_attribute', sa.String(), nullable=False),
+    sa.Column('department_attribute', sa.String(), nullable=False),
+    sa.Column('title_attribute', sa.String(), nullable=False),
+    sa.Column('employee_id_attribute', sa.String(), nullable=False),
+    sa.Column('enabled', sa.Boolean(), nullable=False),
+    sa.Column('created_at', sa.String(), nullable=False),
+    sa.Column('updated_at', sa.String(), nullable=False),
+    sa.CheckConstraint("provider_type IN ('active_directory', 'ldap')", name='ck_atlas_directory_connection_provider_type'),
+    sa.CheckConstraint("tls_mode IN ('ldaps', 'start_tls')", name='ck_atlas_directory_connection_tls_mode'),
+    sa.CheckConstraint('priority >= 0', name='ck_atlas_directory_connection_priority'),
+    sa.CheckConstraint('port >= 1 AND port <= 65535', name='ck_atlas_directory_connection_port'),
+    sa.CheckConstraint('connect_timeout_seconds >= 1 AND connect_timeout_seconds <= 30', name='ck_atlas_directory_connection_connect_timeout'),
+    sa.CheckConstraint('operation_timeout_seconds >= 1 AND operation_timeout_seconds <= 30', name='ck_atlas_directory_connection_operation_timeout'),
+    sa.PrimaryKeyConstraint('connection_id')
+    )
+    op.create_table('atlas_directory_connection_secrets',
+    sa.Column('connection_id', sa.String(), nullable=False),
+    sa.Column('secret_kind', sa.String(), nullable=False),
+    sa.Column('ciphertext', sa.Text(), nullable=False),
+    sa.Column('nonce', sa.Text(), nullable=False),
+    sa.Column('key_id', sa.String(), nullable=False),
+    sa.Column('version', sa.Integer(), nullable=False),
+    sa.Column('algorithm', sa.String(), nullable=False),
+    sa.Column('storage_backend', sa.String(), nullable=False),
+    sa.Column('updated_at', sa.String(), nullable=False),
+    sa.CheckConstraint("secret_kind IN ('bind_password', 'custom_ca')", name='ck_atlas_directory_connection_secret_kind'),
+    sa.CheckConstraint("algorithm = 'AES-256-GCM'", name='ck_atlas_directory_connection_secret_algorithm'),
+    sa.CheckConstraint("storage_backend = 'encrypted_database'", name='ck_atlas_directory_connection_secret_storage'),
+    sa.CheckConstraint('version >= 1', name='ck_atlas_directory_connection_secret_version'),
+    sa.ForeignKeyConstraint(['connection_id'], ['atlas_directory_connections.connection_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('connection_id', 'secret_kind')
+    )
     op.create_table('atlas_user_invites',
     sa.Column('invite_id', sa.String(), nullable=False),
     sa.Column('actor_id', sa.String(), nullable=False),
@@ -648,6 +698,31 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('actor_id')
     )
     op.create_index(op.f('ix_atlas_users_email'), 'atlas_users', ['email'], unique=False)
+    op.create_table('atlas_external_identities',
+    sa.Column('actor_id', sa.String(), nullable=False),
+    sa.Column('connection_id', sa.String(), nullable=False),
+    sa.Column('external_subject', sa.String(), nullable=False),
+    sa.Column('normalized_username', sa.String(), nullable=False),
+    sa.Column('normalized_email', sa.String(), nullable=True),
+    sa.Column('username', sa.String(), nullable=False),
+    sa.Column('display_name', sa.String(), nullable=False),
+    sa.Column('email', sa.String(), nullable=True),
+    sa.Column('groups_json', sa.Text(), nullable=False),
+    sa.Column('department', sa.String(length=500), nullable=True),
+    sa.Column('title', sa.String(length=500), nullable=True),
+    sa.Column('employee_id', sa.String(length=500), nullable=True),
+    sa.Column('directory_enabled', sa.Boolean(), nullable=True),
+    sa.Column('status', sa.String(), nullable=False),
+    sa.Column('last_refreshed_at', sa.String(), nullable=False),
+    sa.CheckConstraint("status IN ('current', 'stale', 'missing', 'disabled')", name='ck_atlas_external_identity_status'),
+    sa.ForeignKeyConstraint(['actor_id'], ['atlas_users.actor_id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['connection_id'], ['atlas_directory_connections.connection_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('actor_id'),
+    sa.UniqueConstraint('connection_id', 'external_subject', name='uq_atlas_external_identity_subject')
+    )
+    op.create_index('ix_atlas_external_identity_connection_email', 'atlas_external_identities', ['connection_id', 'normalized_email'], unique=False)
+    op.create_index('ix_atlas_external_identity_connection_username', 'atlas_external_identities', ['connection_id', 'normalized_username'], unique=False)
+    op.create_index(op.f('ix_atlas_external_identities_connection_id'), 'atlas_external_identities', ['connection_id'], unique=False)
     op.create_table('atlas_artifact_operations',
     sa.Column('operation_id', sa.String(), nullable=False),
     sa.Column('operation_type', sa.String(), nullable=False),
@@ -1517,6 +1592,12 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_atlas_artifact_write_attempts_blob_id'), table_name='atlas_artifact_write_attempts')
     op.drop_table('atlas_artifact_write_attempts')
     op.drop_table('atlas_artifact_operations')
+    op.drop_index(op.f('ix_atlas_external_identities_connection_id'), table_name='atlas_external_identities')
+    op.drop_index('ix_atlas_external_identity_connection_username', table_name='atlas_external_identities')
+    op.drop_index('ix_atlas_external_identity_connection_email', table_name='atlas_external_identities')
+    op.drop_table('atlas_external_identities')
+    op.drop_table('atlas_directory_connection_secrets')
+    op.drop_table('atlas_directory_connections')
     op.drop_index(op.f('ix_atlas_users_email'), table_name='atlas_users')
     op.drop_table('atlas_users')
     op.drop_index(op.f('ix_atlas_user_invites_scope_type'), table_name='atlas_user_invites')

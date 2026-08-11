@@ -57,6 +57,7 @@ from atlas_production.modules.conversation.public import (
     ConversationArchiveV1,
     ConversationCreateV1,
     ConversationMembershipConflict,
+    ConversationScopeTagV1,
     ConversationOwner,
     ConversationRetryLineageOwner,
     ConversationTurnMemberV1,
@@ -88,8 +89,8 @@ from atlas_production.modules.retrieval.public import (
     RelevantDocumentDiscoveryTraceV1,
     RetrievalOwner,
 )
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorOwner
 from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorOwner,
     TurnExecutionOrchestrator,
 )
 from atlas_production.modules.turn_runtime.public import (
@@ -137,10 +138,8 @@ class WorkspaceTurnRetryV1(_StrictModel):
     idempotency_key: Identity
 
 
-class WorkspaceConversationCreateV1(_StrictModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
-    idempotency_key: Identity | None = None
-    response_language: ResponseLanguage = "zh-TW"
+class WorkspaceConversationCreateV1(ConversationCreateV1):
+    pass
 
 
 class WorkspaceConversationArchiveV1(_StrictModel):
@@ -375,6 +374,10 @@ class WorkspaceExecutionStatusV1(_StrictModel):
 
 
 class AuthorizedKnowledgeSource(Protocol):
+    def current_scope(
+        self, *, actor_id: Identity
+    ) -> frozenset[tuple[str, str]]: ...
+
     def resources_for_grant(
         self,
         *,
@@ -521,12 +524,24 @@ class WorkspaceTurnApplication:
         self, actor: object | None, command: WorkspaceConversationCreateV1
     ) -> WorkspaceConversationDetailV1:
         actor_id = self._actor_id(actor)
+        requested_scope = {
+            (ref.tag_type, ref.tag_id) for ref in command.tag_refs
+        }
+        if requested_scope and not requested_scope.issubset(
+            self._knowledge_source.current_scope(actor_id=actor_id)
+        ):
+            raise WorkspaceTurnError(
+                "knowledge_scope_access_denied",
+                "result.knowledge_scope_access_required",
+                403,
+            )
         item = self._conversations.create(
             actor_id=actor_id,
             command=ConversationCreateV1(
                 title=command.title,
                 idempotency_key=command.idempotency_key,
                 response_language=command.response_language,
+                tag_refs=command.tag_refs,
             ),
         )
         return WorkspaceConversationDetailV1(conversation=item, turns=[])
@@ -1981,15 +1996,28 @@ class InlineTurnCarrier:
 
 
 __all__ = [
-    name
-    for name in globals()
-    if name.startswith("Workspace")
-    or name
-    in {
-        "AuthorizedKnowledgeSource",
-        "ContextCommandPreparer",
-        "ConversationTokenUsageReader",
-        "InlineTurnCarrier",
-        "TurnCarrierLauncher",
-    }
+    "AuthorizedKnowledgeSource",
+    "ContextCommandPreparer",
+    "ConversationTokenUsageReader",
+    "InlineTurnCarrier",
+    "TurnCarrierLauncher",
+    "WorkspaceAnswerSegmentV2",
+    "WorkspaceAuditDraftSource",
+    "WorkspaceCitationDraftSource",
+    "WorkspaceCitationV1",
+    "WorkspaceClaimedEvidenceV1",
+    "WorkspaceConversationArchiveV1",
+    "WorkspaceConversationCreateV1",
+    "WorkspaceConversationDetailV1",
+    "WorkspaceConversationListV1",
+    "WorkspaceConversationSummaryV1",
+    "WorkspaceDiscoveryCandidateV1",
+    "WorkspaceDiscoveryTraceV1",
+    "WorkspaceExecutionStatusV1",
+    "WorkspaceReasoningProgressV1",
+    "WorkspaceTurnApplication",
+    "WorkspaceTurnCreateV1",
+    "WorkspaceTurnError",
+    "WorkspaceTurnProjectionV1",
+    "WorkspaceTurnRetryV1",
 ]

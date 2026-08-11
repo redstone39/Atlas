@@ -87,6 +87,7 @@ class ProtectedOriginalFacts:
     blob: StorageBlobRecord
     bindings: tuple[ArtifactScopeBindingRecord, ...]
     candidate_team_ids: frozenset[str]
+    can_administer_owner_scope: bool
     observed_at: str
     read_lease: StorageRequestLeaseRecord
     access_decision: AccessDecisionRecord | None
@@ -179,7 +180,7 @@ class ProtectedOriginalJourneyBuilder:
             else (
                 "member_download_policy"
                 if not document.allow_member_download
-                and facts.actor.system_role != "admin"
+                and not facts.can_administer_owner_scope
                 else None
             )
         )
@@ -220,6 +221,9 @@ class ProtectedOriginalJourneyBuilder:
             record_success_evidence=facts.method == "GET",
             candidate_scope=candidate_scope,
             candidate_team_ids=facts.candidate_team_ids,
+            expected_can_administer_owner_scope=(
+                facts.can_administer_owner_scope
+            ),
             access_decision=decision,
             audit_events=facts.audit_events,
             observed_at=facts.observed_at,
@@ -511,11 +515,17 @@ class PostgresProtectedOriginalJourneyProvider:
                     artifact_id=artifact.artifact_id,
                     reason="authorization_binding_unavailable",
                 )
-            resolved_scope, team_ids = read_effective_document_scope_with_team_ids(
+            (
+                resolved_scope,
+                team_ids,
+                can_administer_owner_scope,
+            ) = read_effective_document_scope_with_team_ids(
                 session,
                 actor_type=actor.actor_type,
                 actor_id=actor.actor_id,
                 requested_scope=requested_scope or tag_scope,
+                owner_scope_type=document.scope_type,
+                owner_scope_id=document.scope_id,
             )
             visible_scope = requested_scope.intersection(resolved_scope)
             policy_reason = (
@@ -523,7 +533,7 @@ class PostgresProtectedOriginalJourneyProvider:
                 if document.source_download_restricted
                 else "member_download_policy"
                 if not document.allow_member_download
-                and actor.system_role != "admin"
+                and not can_administer_owner_scope
                 else None
             )
             allowed = bool(visible_scope) and policy_reason is None
@@ -601,6 +611,7 @@ class PostgresProtectedOriginalJourneyProvider:
                 blob=blob,
                 bindings=bindings,
                 candidate_team_ids=frozenset(team_ids),
+                can_administer_owner_scope=can_administer_owner_scope,
                 observed_at=observed_at,
                 read_lease=lease,
                 access_decision=decision,

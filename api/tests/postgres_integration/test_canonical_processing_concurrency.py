@@ -27,8 +27,10 @@ from atlas_production.infrastructure.postgres_document_processing_adapter import
     PostgresDocumentProcessingAdapter,
 )
 from atlas_production.infrastructure.postgres_owner.document_processing import (
-    ProcessingExecutionSnapshot,
     _JobTransitionSql,
+)
+from atlas_production.modules.processing_pipeline.public import (
+    ProcessingExecutionSnapshot,
 )
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
 from test_document_processing_generation_concurrency import (

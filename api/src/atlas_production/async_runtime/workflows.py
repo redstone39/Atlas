@@ -26,7 +26,7 @@ from atlas_production.infrastructure.postgres_document_processing_adapter import
     PostgresDocumentProcessingAdapter,
     PostgresProcessingExecutionAdapter,
 )
-from atlas_production.infrastructure.postgres_owner.document_processing import (
+from atlas_production.modules.processing_pipeline.job_records import (
     DocumentProcessingCurrentnessConflict,
 )
 from atlas_production.infrastructure.postgres_model_routing_adapter import (
@@ -57,7 +57,11 @@ from atlas_production.infrastructure.bounded_artifact_writer import (
     DocumentPreparationArtifactFence,
 )
 from atlas_production.infrastructure.bounded_artifact_writer import ProcessingArtifactFence
-from atlas_production.async_runtime.vector_index import MODEL_NAME, MODEL_REVISION, VectorIndex
+from atlas_production.async_runtime.embedding_model_contract import (
+    MODEL_NAME,
+    MODEL_REVISION,
+)
+from atlas_production.async_runtime.vector_index import VectorIndex
 from atlas_production.infrastructure.office_renderer_adapter import (
     OfficeRendererAdapter,
     OfficeRendererError,

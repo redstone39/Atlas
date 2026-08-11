@@ -5,7 +5,6 @@ import inspect
 from types import SimpleNamespace
 
 from atlas_production.infrastructure.postgres_owner.document_processing import (
-    ProcessingExecutionSnapshot,
     _JobTransitionSql,
     _apply_sealed_family_mutation,
     _publish_canonical_revision,
@@ -21,9 +20,12 @@ from atlas_production.infrastructure.postgres_document_upload import (
     NewDocumentUploadCommand,
 )
 from atlas_production.modules.document_intake.public import (
+    DocumentLibraryApplication,
     DocumentLibraryMutationResult,
 )
-from atlas_production.routes.document_library import upload_document_library_file
+from atlas_production.modules.processing_pipeline.public import (
+    ProcessingExecutionSnapshot,
+)
 
 
 def _snapshot() -> ProcessingExecutionSnapshot:
@@ -178,13 +180,12 @@ def test_current_hit_upload_contract_preserves_optional_job_fields_as_null() -> 
 
 
 def test_upload_dispatches_only_when_a_shared_job_is_returned() -> None:
-    source = inspect.getsource(upload_document_library_file)
+    source = inspect.getsource(DocumentLibraryApplication.upload)
 
     guard = source.index("if result.publication.job is not None:")
-    dispatch = source.index("best_effort_dispatch()", guard)
+    dispatch = source.index("self.dispatch()", guard)
     job_id = source.index("job_id = (", dispatch)
     assert guard < dispatch < job_id
-    assert ").model_dump()" in source
 
 
 def test_shared_job_status_projects_identity_bound_documents_but_not_control() -> None:

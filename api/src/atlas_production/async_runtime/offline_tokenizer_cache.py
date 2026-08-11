@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import json
+
 import os
 from pathlib import Path
 from threading import Lock
@@ -59,3 +62,25 @@ def prepare_tokenizer_cache(*, cache_dir: Path, download: bool) -> dict[str, Any
         "cache_total_bytes": total_bytes,
         "mode": "download_and_verify" if download else "offline_verify",
     }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--download", action="store_true")
+    args = parser.parse_args()
+    cache_dir = Path(os.getenv("TIKTOKEN_CACHE_DIR", "/var/lib/atlas-tiktoken"))
+    try:
+        result = prepare_tokenizer_cache(cache_dir=cache_dir, download=args.download)
+    except Exception:
+        print(
+            json.dumps(
+                {"status": "failed", "error_code": "offline_tokenizer_cache_invalid"}
+            )
+        )
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

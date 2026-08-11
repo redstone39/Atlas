@@ -9,6 +9,11 @@ from threading import Lock
 from typing import Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from atlas_production.async_runtime.embedding_model_contract import (
+    MODEL_ALLOW_PATTERNS,
+    MODEL_NAME,
+    MODEL_REVISION,
+)
 from fastembed import TextEmbedding
 from fastembed.common.model_description import ModelSource, PoolingType
 from huggingface_hub import snapshot_download
@@ -24,23 +29,7 @@ from qdrant_client.models import (
 )
 from qdrant_client.models import PointIdsList
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
-MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 VECTOR_DIMENSION = 384
-MODEL_ALLOW_PATTERNS = (
-    "1_Pooling/config.json",
-    "config.json",
-    "modules.json",
-    "sentence_bert_config.json",
-    "special_tokens_map.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "onnx/config.json",
-    "onnx/model.onnx",
-    "onnx/special_tokens_map.json",
-    "onnx/tokenizer.json",
-    "onnx/tokenizer_config.json",
-)
 COLLECTION_NAME = "atlas_evidence_v1"
 EMBEDDING_CONTRACT_VERSION = "fastembed-mean-normalized-v1"
 INDEX_CONTRACT_VERSION = "atlas-qdrant-evidence-points-v1"

@@ -9,7 +9,7 @@ import pytest
 from atlas_production.infrastructure.postgres_model_routing_adapter import (
     PostgresModelRoutingAdapter,
 )
-from atlas_production.infrastructure.postgres_owner.document_processing import (
+from atlas_production.modules.processing_pipeline.public import (
     ProcessingExecutionSnapshot,
 )
 from atlas_production.infrastructure.postgres_owner.model_routing import (

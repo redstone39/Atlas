@@ -56,12 +56,15 @@ def _protected_facts(
     source_restricted: bool = False,
     allow_member_download: bool = True,
     system_role: str = "user",
+    can_administer_owner_scope: bool = False,
 ) -> journeys.ProtectedOriginalFacts:
     reason = (
         "source_download_restricted"
         if source_restricted
         else "member_download_policy"
-        if not allow_member_download and system_role != "admin"
+        if not allow_member_download
+        and not can_administer_owner_scope
+        and system_role != "admin"
         else "project_grant"
     )
     allowed = reason == "project_grant"
@@ -107,7 +110,11 @@ def _protected_facts(
             artifact_id="artifact-1", binding_kind="owner",
             scope_type="project", scope_id="project-1",
         ),),
-        candidate_team_ids=frozenset(), observed_at=NOW,
+        candidate_team_ids=frozenset(),
+        can_administer_owner_scope=(
+            can_administer_owner_scope or system_role == "admin"
+        ),
+        observed_at=NOW,
         read_lease=SimpleNamespace(fence=FENCE),
         access_decision=decision,
         audit_events=() if decision is None else (_audit(decision.decision_id),),
@@ -162,6 +169,26 @@ def test_policy_denial_reaches_owner_before_headers_or_bytes(
     assert built.request.presented_browser_session_token == TOKEN
     assert built.request.access_decision.reason == reason
     assert events == [f"commit-denial:{reason}"]
+
+
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+def test_owner_scope_admin_bypasses_only_member_download_policy(
+    method: str,
+) -> None:
+    facts = _protected_facts(
+        method=method,
+        allow_member_download=False,
+        can_administer_owner_scope=True,
+    )
+
+    built = journeys.ProtectedOriginalJourneyBuilder(Authority()).build(facts)
+
+    assert built.request.expected_can_administer_owner_scope is True
+    assert (built.request.access_decision is None) is (method == "HEAD")
+    if method == "HEAD":
+        assert built.request.audit_events == ()
+    else:
+        assert built.request.audit_events
 
 
 def test_protected_original_provider_rejects_missing_authorization_binding(
@@ -261,10 +288,27 @@ def test_protected_original_preimage_denial_rolls_back_when_audit_fails(
     assert session.rollbacks == 1
 
 
+@pytest.mark.parametrize(
+    ("scope_type", "scope_id", "method"),
+    (
+        ("team", "team-1", "GET"),
+        ("team", "team-1", "HEAD"),
+        ("project", "project-1", "GET"),
+        ("project", "project-1", "HEAD"),
+    ),
+)
 def test_protected_original_provider_success_reaches_terminal_open_command(
     monkeypatch: pytest.MonkeyPatch,
+    scope_type: str,
+    scope_id: str,
+    method: str,
 ) -> None:
-    facts = _protected_facts(method="HEAD")
+    facts = _protected_facts(method=method)
+    facts.document.scope_type = scope_type
+    facts.document.scope_id = scope_id
+    facts.document.allow_member_download = False
+    facts.artifact.owner_scope_type = scope_type
+    facts.artifact.owner_scope_id = scope_id
     facts.document.source_filename = "manual.pdf"
     facts.document.title = "Manual"
     version = DocumentVersionRecord(
@@ -286,7 +330,7 @@ def test_protected_original_provider_success_reaches_terminal_open_command(
     )
     binding = SimpleNamespace(
         binding_id="binding-1", artifact_id="artifact-1", binding_kind="owner",
-        scope_type="project", scope_id="project-1", created_at=NOW,
+        scope_type=scope_type, scope_id=scope_id, created_at=NOW,
     )
 
     class ScalarResult:
@@ -295,7 +339,12 @@ def test_protected_original_provider_success_reaches_terminal_open_command(
     class Session:
         def __init__(self): self.results = [
             [SimpleNamespace(payload=asdict(version))],
-            [SimpleNamespace(document_id="document-1", tag_type="project", tag_id="project-1", created_at=NOW)],
+            [SimpleNamespace(
+                document_id="document-1",
+                tag_type=scope_type,
+                tag_id=scope_id,
+                created_at=NOW,
+            )],
             [binding],
         ]
         def __enter__(self): return self
@@ -305,12 +354,30 @@ def test_protected_original_provider_success_reaches_terminal_open_command(
         def scalars(self, _statement): return ScalarResult(self.results.pop(0))
 
     monkeypatch.setattr(journeys, "read_session_actor", lambda *_args: facts.actor)
+    captured_owner: dict[str, str] = {}
+
+    def resolve_scope(*_args, requested_scope, **kwargs):
+        captured_owner["scope_type"] = kwargs["owner_scope_type"]
+        captured_owner["scope_id"] = kwargs["owner_scope_id"]
+        return (
+            set(requested_scope),
+            {scope_id} if scope_type == "team" else set(),
+            True,
+        )
+
     monkeypatch.setattr(
         journeys,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, requested_scope, **_kwargs: (set(requested_scope), set()),
+        resolve_scope,
     )
-    monkeypatch.setattr(journeys, "ActionAwareAclAuthority", lambda _factory: Authority())
+    scope_authority = SimpleNamespace(
+        effective_document_scope=lambda **_kwargs: {(scope_type, scope_id)}
+    )
+    monkeypatch.setattr(
+        journeys,
+        "ActionAwareAclAuthority",
+        lambda _factory: scope_authority,
+    )
     monkeypatch.setattr(
         journeys,
         "_row_record",
@@ -324,27 +391,41 @@ def test_protected_original_provider_success_reaches_terminal_open_command(
     built = provider.build(
         document_id="document-1",
         presented_browser_session_token=TOKEN,
-        method="HEAD",
+        method=method,
     )
-    calls = []
-    class Terminal:
-        def execute(self, request):
-            calls.append(request)
-            return owner.PostCommitArtifactOpener(
-                "artifact-1", "blob-1", "blobs/aa/bb/blob.blob", 3,
-                DIGEST, "application/pdf", request.read_lease,
-            )
-        def complete(self, _request): calls.append("complete")
-    unused = SimpleNamespace(execute=lambda _request: None)
-    service = adapter.PostgresArtifactStorageAdapter(
-        Terminal(), unused, unused, unused, unused, unused, NeverFilesystem(),
-    )
-    response = service.open_original(
-        built.request, method="HEAD", filename=built.filename,
-    )
-    assert response.status_code == 200
-    assert calls[0] is built.request
-    assert calls[1] == "complete"
+    assert built.request.expected_can_administer_owner_scope is True
+    assert captured_owner == {"scope_type": scope_type, "scope_id": scope_id}
+    if method == "GET":
+        assert built.request.access_decision is not None
+        assert built.request.access_decision.allowed is True
+        assert built.request.audit_events
+    else:
+        assert built.request.access_decision is None
+        assert built.request.audit_events == ()
+    if method == "HEAD":
+        calls = []
+
+        class Terminal:
+            def execute(self, request):
+                calls.append(request)
+                return owner.PostCommitArtifactOpener(
+                    "artifact-1", "blob-1", "blobs/aa/bb/blob.blob", 3,
+                    DIGEST, "application/pdf", request.read_lease,
+                )
+
+            def complete(self, _request):
+                calls.append("complete")
+
+        unused = SimpleNamespace(execute=lambda _request: None)
+        service = adapter.PostgresArtifactStorageAdapter(
+            Terminal(), unused, unused, unused, unused, unused, NeverFilesystem(),
+        )
+        response = service.open_original(
+            built.request, method="HEAD", filename=built.filename,
+        )
+        assert response.status_code == 200
+        assert calls[0] is built.request
+        assert calls[1] == "complete"
 
 
 def test_successful_get_and_head_build_exact_transport_inputs() -> None:

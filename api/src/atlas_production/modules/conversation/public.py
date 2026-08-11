@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Identity = Annotated[str, Field(min_length=1, max_length=200)]
@@ -13,11 +13,28 @@ ReasoningMode = Literal["standard", "deep"]
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+class ConversationScopeTagV1(_StrictModel):
+    tag_type: Literal["project", "team"]
+    tag_id: Identity
+
+
 
 class ConversationCreateV1(_StrictModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     idempotency_key: Identity | None = None
     response_language: ResponseLanguage = "zh-TW"
+    tag_refs: list[ConversationScopeTagV1] = Field(default_factory=list)
+
+    @field_validator("tag_refs")
+    @classmethod
+    def canonicalize_tag_refs(
+        cls, value: list[ConversationScopeTagV1]
+    ) -> list[ConversationScopeTagV1]:
+        ordered = sorted(value, key=lambda ref: (ref.tag_type, ref.tag_id))
+        keys = [(ref.tag_type, ref.tag_id) for ref in ordered]
+        if len(keys) != len(set(keys)):
+            raise ValueError("tag_refs must be unique")
+        return ordered
 
 
 class ConversationV1(_StrictModel):
@@ -140,6 +157,7 @@ __all__ = [
     "ConversationArchiveV1",
     "ConversationCreateV1",
     "ConversationMembershipConflict",
+    "ConversationScopeTagV1",
     "ConversationOwner",
     "ConversationRetryLineageOwner",
     "ConversationTurnMemberV1",

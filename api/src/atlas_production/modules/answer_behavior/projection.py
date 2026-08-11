@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorInputV1,
-    AnswerBehaviorOwner,
-)
 from atlas_production.modules.turn_runtime.public import ExecutionSnapshotV1
+
+from .api_models import AnswerBehaviorInputV1
+from .ports import AnswerBehaviorOwner
 
 
 def project_answer_behavior(

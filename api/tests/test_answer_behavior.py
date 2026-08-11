@@ -9,12 +9,12 @@ from pydantic import ValidationError
 from atlas_production.app import create_app
 from atlas_production.infrastructure.composition import ApiComposition
 from atlas_production.modules.identity_access.records import UserRecord
-from atlas_production.modules.turn_execution.public import (
+from atlas_production.modules.answer_behavior.public import (
     AnswerBehaviorError,
+    AnswerBehaviorService,
     AnswerBehaviorStatus,
     AnswerBehaviorUpdateRequest,
 )
-from atlas_production.modules.turn_execution.service import AnswerBehaviorService
 
 
 NOW = datetime(2026, 7, 27, tzinfo=timezone.utc)

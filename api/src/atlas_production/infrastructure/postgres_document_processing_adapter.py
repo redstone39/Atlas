@@ -18,7 +18,6 @@ from atlas_production.infrastructure.postgres_owner.document_processing import (
     AcceptProcessingExecutionCommand,
     BatchCheckpointCommand,
     CaptureProcessingExecutionCommand,
-    DocumentJobRequestAuthorityProjection,
     DocumentMutationCommand,
     FinalGenerationPublicationCommand,
     IndexPublicationManifest,
@@ -27,14 +26,17 @@ from atlas_production.infrastructure.postgres_owner.document_processing import (
     OutboxDeliveryCommand,
     ProcessingBatchClaimRecord,
     ProcessingCheckpointRecord,
-    ProcessingControlResult,
-    ProcessingJobRecord,
-    ProcessingJobListBatch,
-    ProcessingJobView,
-    ProcessingProfilePin,
-    ProcessingExecutionSnapshot,
     SessionFactory,
     TaskOutboxRecord,
+)
+from atlas_production.modules.processing_pipeline.job_records import (
+    DocumentJobRequestAuthorityProjection,
+    ProcessingControlResult,
+    ProcessingExecutionSnapshot,
+    ProcessingJobListBatch,
+    ProcessingJobRecord,
+    ProcessingJobView,
+    ProcessingProfilePin,
 )
 
 

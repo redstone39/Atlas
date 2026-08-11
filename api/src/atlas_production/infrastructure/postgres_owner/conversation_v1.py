@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.infrastructure.persistence.conversation import (
     AtlasTurnConversationIdempotencyRow,
+    AtlasTurnConversationScopeTagRow,
     AtlasTurnConversationMemberRow,
     AtlasTurnConversationRow,
 )
@@ -62,6 +63,7 @@ class CreateConversationInput:
     title: str
     idempotency_key: str
     response_language: Literal["zh-TW", "en"]
+    tag_refs: tuple[tuple[Literal["project", "team"], str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +168,14 @@ class PostgresConversationV1Store:
                 updated_at=created_at,
             )
             session.add(row)
+            session.add_all(
+                AtlasTurnConversationScopeTagRow(
+                    conversation_id=command.conversation_id,
+                    tag_type=tag_type,
+                    tag_id=tag_id,
+                )
+                for tag_type, tag_id in command.tag_refs
+            )
             session.add(
                 AtlasTurnConversationIdempotencyRow(
                     scope_ref=scope_ref,

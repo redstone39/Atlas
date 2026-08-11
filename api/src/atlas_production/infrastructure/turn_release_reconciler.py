@@ -46,14 +46,21 @@ class TurnResourceReleaseReconciler:
         self._interval_seconds = interval_seconds
         self._batch_size = batch_size
         self._stop = Event()
+        self._thread: Thread | None = None
 
     def start(self) -> None:
         self.run_once()
-        Thread(
+        self._thread = Thread(
             target=self._run,
             name="atlas-turn-resource-release-reconciler",
             daemon=True,
-        ).start()
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self._interval_seconds, 1.0))
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):

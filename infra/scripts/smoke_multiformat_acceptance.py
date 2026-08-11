@@ -103,9 +103,8 @@ def login(client: httpx.Client) -> None:
         client.post(
             "/api/v1/auth/sessions",
             json={
-                "email": email,
+                "identifier": email,
                 "password": password,
-                "idempotency_key": "login-multiformat-acceptance",
             },
         ),
         200,

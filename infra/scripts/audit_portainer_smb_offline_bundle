@@ -235,10 +235,13 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         fail("generated Compose is not locked to the requested target platform")
 
     api_image = f"atlas-offline/api:audit-1-{AUDIT_PLATFORM_TAG}"
+    model_digest = builder_contract["embedding_model_content_digest"]()
+    model_image = (
+        f"atlas-offline/embedding-model:{model_digest}-{AUDIT_PLATFORM_TAG}"
+    )
     api_services = {
         "api",
         "artifact-storage-init",
-        "embedding-model-init",
         "celery-dispatch",
         "celery-processing",
         "celery-indexing",
@@ -247,8 +250,13 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     }
     if any(services[name]["image"] != api_image for name in api_services):
         fail("API-family image mapping drifted")
+    if services["embedding-model-init"]["image"] != model_image:
+        fail("embedding initializer does not use the stable model image")
+    if model_image == api_image:
+        fail("embedding model image is not distinct from the API image")
     expected_images = {
         api_image,
+        model_image,
         f"atlas-offline/plugin-runner:audit-1-{AUDIT_PLATFORM_TAG}",
         f"atlas-offline/office-renderer:audit-1-{AUDIT_PLATFORM_TAG}",
         f"atlas-offline/web:audit-1-{AUDIT_PLATFORM_TAG}",
@@ -257,7 +265,7 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         f"atlas-offline/qdrant:audit-1-{AUDIT_PLATFORM_TAG}",
     }
     if {service["image"] for service in services.values()} != expected_images:
-        fail("offline image set drifted")
+        fail("offline eight-image set drifted")
 
     compose_text = (output / "docker-compose.yml").read_text(encoding="utf-8")
     if "${ATLAS_SMB_PASSWORD:?set SMB password}" not in compose_text:
@@ -278,30 +286,42 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         fail("generated Compose retained a packaging-host path")
     embedding_init = services["embedding-model-init"]
     if embedding_init.get("restart") != "no":
-        fail("runtime asset initializer is not one-shot")
-    if embedding_init.get("environment", {}).get("HF_HUB_OFFLINE") != "1":
-        fail("runtime asset initializer is not fail-closed offline")
-    if (
-        embedding_init.get("environment", {}).get("TIKTOKEN_CACHE_DIR")
-        != "/var/lib/atlas-tiktoken"
-    ):
-        fail("runtime asset initializer does not use the embedded tokenizer cache")
+        fail("embedding model initializer is not one-shot")
+    embedding_environment = embedding_init.get("environment", {})
+    expected_embedding_environment = {
+        "ATLAS_FASTEMBED_CACHE": "/var/lib/atlas-fastembed",
+        "ATLAS_EMBEDDING_OFFLINE": "true",
+        "HF_HOME": "/var/lib/atlas-fastembed/huggingface",
+        "HF_HUB_CACHE": "/var/lib/atlas-fastembed/huggingface/hub",
+        "HF_XET_CACHE": "/var/lib/atlas-fastembed/huggingface/xet",
+        "XDG_CACHE_HOME": "/var/lib/atlas-fastembed/xdg",
+        "HF_HUB_DISABLE_XET": "1",
+        "HF_HUB_OFFLINE": "1",
+    }
+    if embedding_environment != expected_embedding_environment:
+        fail("embedding model initializer offline environment drifted")
     if embedding_init.get("command") != [
         "/app/.venv/bin/python",
         "-m",
-        "atlas_production.async_runtime.offline_runtime_assets",
+        "atlas_production.async_runtime.offline_embedding_cache",
     ]:
-        fail("runtime asset initializer command drifted")
+        fail("embedding model initializer command drifted")
+    embedding_volumes = embedding_init.get("volumes", [])
+    if len(embedding_volumes) != 1 or (
+        embedding_volumes[0].get("source") != "atlas-production-fastembed"
+        or embedding_volumes[0].get("target") != "/var/lib/atlas-fastembed"
+    ):
+        fail("embedding model initializer volume drifted")
     for name in ("api", "celery-processing", "celery-indexing"):
         dependency = services[name].get("depends_on", {}).get("embedding-model-init")
         if not dependency or dependency.get("condition") != "service_completed_successfully":
-            fail(f"{name} is not gated on offline runtime asset verification")
-        if services[name].get("environment", {}).get("ATLAS_EMBEDDING_OFFLINE") != "true":
+            fail(f"{name} is not gated on offline embedding cache verification")
+        consumer_environment = services[name].get("environment", {})
+        if consumer_environment.get("ATLAS_EMBEDDING_OFFLINE") != "true":
             fail(f"{name} can attempt an online embedding model fetch")
-        if (
-            services[name].get("environment", {}).get("TIKTOKEN_CACHE_DIR")
-            != "/var/lib/atlas-tiktoken"
-        ):
+        if consumer_environment.get("HF_HUB_OFFLINE") != "1":
+            fail(f"{name} can access Hugging Face online")
+        if consumer_environment.get("TIKTOKEN_CACHE_DIR") != "/var/lib/atlas-tiktoken":
             fail(f"{name} does not use the embedded tokenizer cache")
 
     manifest = json.loads((output / "bundle-manifest.json").read_text())
@@ -309,6 +329,13 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         fail("compose-only audit unexpectedly created an image archive")
     if set(manifest["images"]) != expected_images:
         fail("manifest image set drifted")
+    if len(manifest["images"]) != 8 or model_image not in manifest["images"]:
+        fail("manifest does not contain the distinct embedding model reference")
+    record_references = {
+        record.get("reference") for record in manifest["image_records"]
+    }
+    if len(record_references) != 8 or model_image not in record_references:
+        fail("manifest image records omit the distinct embedding model reference")
     if manifest["platform"] != AUDIT_PLATFORM:
         fail("manifest target platform drifted")
     if any(record["platform"] != AUDIT_PLATFORM for record in manifest["image_records"]):

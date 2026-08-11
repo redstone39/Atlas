@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from atlas_production.modules.turn_execution.public import (
+from atlas_production.modules.answer_behavior.public import (
     AnswerBehaviorAdmin,
     AnswerBehaviorError,
     AnswerBehaviorStatus,

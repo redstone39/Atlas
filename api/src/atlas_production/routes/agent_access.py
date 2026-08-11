@@ -13,7 +13,9 @@ from atlas_production.modules.identity_access.public import (
     AgentUserUpdateRequest,
 )
 from atlas_production.modules.audit.public import (
+    AdminAuditEventReadService,
     AuditEventList,
+    AuditEventReadError,
 )
 from ..modules.identity_access.public import (
     AgentAccessError,
@@ -22,11 +24,9 @@ from ..modules.identity_access.public import (
     AgentCreateOutcome,
     AgentTokenOutcome,
 )
-from atlas_production.modules.audit.public import audit_event_status
 from atlas_production.transport.dependencies import (
     api_composition,
     current_user,
-    require_admin,
 )
 from atlas_production.shared.http import (
     error,
@@ -37,6 +37,9 @@ router = APIRouter()
 
 def _agent_service(request: Request) -> AgentAccessService:
     return api_composition(request).agent_access
+
+def _admin_audit_event_service(request: Request) -> AdminAuditEventReadService:
+    return api_composition(request).admin_audit_events
 
 
 def _agent_error(
@@ -153,12 +156,15 @@ def revoke_agent_token(token_id: str, request: Request) -> AdminActionResult | J
 
 @router.get("/api/v1/admin/audit/events", response_model=AuditEventList)
 def list_audit_events(request: Request) -> AuditEventList | JSONResponse:
-    denied = require_admin(request)
-    if denied:
-        return denied
-    return AuditEventList(
-        events=[
-            audit_event_status(event)
-            for event in api_composition(request).audit_reader.recent_audit_events(limit=50)
-        ]
-    )
+    try:
+        return _admin_audit_event_service(request).list_admin(
+            current_user(request),
+            limit=50,
+        )
+    except AuditEventReadError as exc:
+        return error(
+            exc.error_code,
+            exc.message_code,
+            exc.status_code,
+            message_params=exc.message_params,
+        )

@@ -172,12 +172,24 @@ class _ConversationSession:
 def test_conversation_public_adapter_hides_ordinal_and_replays_exact_identity(monkeypatch) -> None:
     monkeypatch.setattr(conversation_adapter, "PostgresConversationV1Store", _ConversationStore)
     adapter = conversation_adapter.PostgresConversationV1Adapter(_ConversationSession)
-    command = ConversationCreateV1(title="A conversation", idempotency_key="create-key")
+    command = ConversationCreateV1(
+        title="A conversation",
+        idempotency_key="create-key",
+        tag_refs=[
+            {"tag_type": "team", "tag_id": "team-b"},
+            {"tag_type": "project", "tag_id": "project-a"},
+        ],
+    )
     created = adapter.create(actor_id="actor-1", command=command)
     assert created == adapter.create(
         actor_id="actor-1", command=command
     )
     assert created.response_language == "zh-TW"
+    assert "tag_refs" not in created.model_dump()
+    assert _ConversationStore.current.create_request.tag_refs == (
+        ("project", "project-a"),
+        ("team", "team-b"),
+    )
 
     append = AppendTurnMemberV1(
         conversation_id=_ConversationStore.current.conversation.conversation_id,

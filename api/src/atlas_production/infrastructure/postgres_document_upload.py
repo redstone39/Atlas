@@ -57,8 +57,6 @@ from atlas_production.infrastructure.postgres_owner.audit import AuditEventWrite
 from atlas_production.infrastructure.postgres_owner.document_processing import (
     ProcessingExecutionCaptureWriter,
     ProcessingExecutionAcceptanceWriter,
-    ProcessingExecutionSnapshot,
-    ProcessingJobRecord,
     JobTransitionCommand,
     SessionFactory,
     canonical_processing_spec_from_snapshot,
@@ -74,6 +72,15 @@ from atlas_production.modules.document_intake.records import (
     DocumentRecord,
     DocumentTagRecord,
     DocumentVersionRecord,
+)
+from atlas_production.modules.document_intake.library_records import (
+    DocumentUploadAccessDenied,
+    DocumentUploadReplayConflict,
+    DocumentUploadUnauthenticated,
+)
+from atlas_production.modules.processing_pipeline.job_records import (
+    ProcessingExecutionSnapshot,
+    ProcessingJobRecord,
 )
 from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 from atlas_production.modules.artifact_storage.records import (
@@ -122,23 +129,6 @@ class NewDocumentUploadBoundaryFacts:
     execution_snapshot: ProcessingExecutionSnapshot
 
 
-class DocumentUploadAccessDenied(PermissionError):
-    def __init__(
-        self,
-        decision: AccessDecisionRecord,
-        audit_event: AuditEventRecord,
-    ) -> None:
-        super().__init__("document upload is not authorized")
-        self.decision = decision
-        self.audit_event = audit_event
-
-
-class DocumentUploadUnauthenticated(PermissionError):
-    """The presented browser credential no longer names the expected actor."""
-
-
-class DocumentUploadReplayConflict(ValueError):
-    """A completed canonical result cannot be returned for this new request."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1175,9 +1165,6 @@ class NewDocumentUploadJourneyCommand:
 
 
 __all__ = [
-    "DocumentUploadAccessDenied",
-    "DocumentUploadReplayConflict",
-    "DocumentUploadUnauthenticated",
     "NewDocumentUploadBoundaryFacts",
     "NewDocumentUploadCommand",
     "NewDocumentUploadInput",

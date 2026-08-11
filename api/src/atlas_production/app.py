@@ -18,6 +18,7 @@ from .routes import (
     auth,
     conversations,
     document_library,
+    directory_admin,
     invitations,
     knowledge_library,
     model_routes,
@@ -48,9 +49,16 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
                 if callable(shutdown):
                     shutdown()
             finally:
-                stop = getattr(selected.turn_lease_failure_sweeper, "stop", None)
-                if callable(stop):
-                    stop()
+                try:
+                    stop = getattr(
+                        selected.turn_resource_release_reconciler, "stop", None
+                    )
+                    if callable(stop):
+                        stop()
+                finally:
+                    stop = getattr(selected.turn_lease_failure_sweeper, "stop", None)
+                    if callable(stop):
+                        stop()
 
     app = FastAPI(title="Atlas Production API", version="0.1.0", lifespan=lifespan)
 
@@ -111,6 +119,7 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
         agent_access.router,
         answer_behavior.router,
         rbac_admin.router,
+        directory_admin.router,
         processing_plugins.router,
         processing_jobs.router,
         projects.router,

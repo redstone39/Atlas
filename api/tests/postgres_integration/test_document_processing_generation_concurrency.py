@@ -54,7 +54,7 @@ from atlas_production.infrastructure.persistence.document_intake import (
 from atlas_production.infrastructure.postgres_owner import (
     document_processing as document_processing_owner,
 )
-from atlas_production.infrastructure.postgres_owner.document_processing import (
+from atlas_production.modules.processing_pipeline.public import (
     DocumentProcessingCurrentnessConflict,
 )
 from atlas_production.infrastructure.postgres_document_processing_adapter import (

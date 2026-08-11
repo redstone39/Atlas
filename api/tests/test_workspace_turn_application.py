@@ -39,9 +39,10 @@ from atlas_production.modules.turn_runtime.public import (
     RuntimeEventV1,
     TurnRuntimeReplayConflict,
 )
-from atlas_production.modules.turn_execution.public import AnswerBehaviorRevisionV1
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorRevisionV1
 from atlas_production.modules.workspace_turn.public import (
     WorkspaceTurnApplication,
+    WorkspaceConversationCreateV1,
     WorkspaceAnswerSegmentV2,
     WorkspaceTurnCreateV1,
     WorkspaceTurnError,
@@ -188,6 +189,18 @@ class Conversations:
         self.member = None
         self._retry_sources = {}
         self.conversation = CONVERSATION
+        self.create_calls = []
+
+    def create(self, *, actor_id, command):
+        self.create_calls.append((actor_id, command))
+        self.conversation = self.conversation.model_copy(
+            update={
+                "title": command.title or self.conversation.title,
+                "response_language": command.response_language,
+            }
+        )
+        return self.conversation
+
 
     def list_for_actor(self, _actor_id):
         return [self.conversation]
@@ -263,6 +276,14 @@ class Authorization:
 class KnowledgeSource:
     def __init__(self):
         self.revisions = []
+        self.scope_calls = []
+        self.scope = frozenset(
+            {("team", "team-a"), ("project", "project-b")}
+        )
+
+    def current_scope(self, *, actor_id):
+        self.scope_calls.append(actor_id)
+        return self.scope
 
     def resources_for_grant(self, **facts):
         self.revisions.append(facts["authorization_revision"])
@@ -491,6 +512,59 @@ def _app(
         conversation_usage=conversation_usage or ConversationUsage(),
     )
     return application, runtime, source
+
+
+def test_create_conversation_validates_and_forwards_canonical_scope() -> None:
+    application, _runtime, source = _app(SimpleNamespace())
+
+    created = application.create_conversation(
+        ACTOR,
+        WorkspaceConversationCreateV1(
+            title="Scoped",
+            tag_refs=[
+                {"tag_type": "team", "tag_id": "team-a"},
+                {"tag_type": "project", "tag_id": "project-b"},
+            ],
+        ),
+    )
+
+    assert created.conversation.title == "Scoped"
+    assert source.scope_calls == ["actor-1"]
+    actor_id, command = application._conversations.create_calls[0]
+    assert actor_id == "actor-1"
+    assert [
+        (ref.tag_type, ref.tag_id) for ref in command.tag_refs
+    ] == [("project", "project-b"), ("team", "team-a")]
+
+
+def test_create_conversation_fails_closed_before_owner_write() -> None:
+    application, _runtime, source = _app(SimpleNamespace())
+    source.scope = frozenset({("team", "team-a")})
+
+    with pytest.raises(WorkspaceTurnError) as caught:
+        application.create_conversation(
+            ACTOR,
+            WorkspaceConversationCreateV1(
+                tag_refs=[
+                    {"tag_type": "team", "tag_id": "team-a"},
+                    {"tag_type": "project", "tag_id": "project-b"},
+                ]
+            ),
+        )
+
+    assert caught.value.error_code == "knowledge_scope_access_denied"
+    assert caught.value.message_code == "result.knowledge_scope_access_required"
+    assert caught.value.status_code == 403
+    assert application._conversations.create_calls == []
+
+
+def test_create_conversation_default_all_skips_scope_lookup() -> None:
+    application, _runtime, source = _app(SimpleNamespace())
+
+    application.create_conversation(ACTOR, WorkspaceConversationCreateV1())
+
+    assert source.scope_calls == []
+    assert application._conversations.create_calls[0][1].tag_refs == []
 
 
 @pytest.mark.parametrize(

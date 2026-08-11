@@ -14,6 +14,8 @@ SENSITIVE_VALIDATION_KEYS = (
     "secret",
     "token",
     "credential",
+    "pem",
+    "dn",
 )
 
 

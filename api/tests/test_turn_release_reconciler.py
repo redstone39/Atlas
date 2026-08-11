@@ -15,8 +15,10 @@ class Runtime:
     def __init__(self, intents):
         self.intents = intents
         self.completed = []
+        self.pending_calls = 0
 
     def pending_release_intents(self, *, limit):
+        self.pending_calls += 1
         assert limit == 100
         values, self.intents = self.intents, []
         return values
@@ -80,6 +82,51 @@ def _intent(owner, kind, ref, ordinal):
         status="releasing",
         attempt_count=1,
     )
+
+def test_reconciler_stop_is_idempotent_and_retires_only_its_thread() -> None:
+    first_runtime = Runtime([])
+    second_runtime = Runtime([])
+    first = TurnResourceReleaseReconciler(
+        runtime=first_runtime,
+        authorization=Authorization(),
+        retrieval=Retrieval(),
+        generation_retention=GenerationRetention(),
+        contexts=Contexts(),
+        interval_seconds=60,
+    )
+    second = TurnResourceReleaseReconciler(
+        runtime=second_runtime,
+        authorization=Authorization(),
+        retrieval=Retrieval(),
+        generation_retention=GenerationRetention(),
+        contexts=Contexts(),
+        interval_seconds=60,
+    )
+
+    try:
+        first.start()
+        first_thread = first._thread
+        assert first_thread is not None
+        assert first_thread.is_alive()
+
+        first.stop()
+        first.stop()
+        calls_after_stop = first_runtime.pending_calls
+        assert not first_thread.is_alive()
+
+        second.start()
+        second_thread = second._thread
+        assert second_thread is not None
+        assert not first_thread.is_alive()
+        assert second_thread.is_alive()
+        assert first_runtime.pending_calls == calls_after_stop
+
+        second.stop()
+        assert not first_thread.is_alive()
+        assert not second_thread.is_alive()
+    finally:
+        first.stop()
+        second.stop()
 
 
 def test_reconciler_releases_each_owner_after_claim_transaction_closed() -> None:

@@ -25,7 +25,7 @@ def test_schema_and_provider_tools_use_db_free_openapi_app() -> None:
         assert "from atlas_production.openapi_app import create_openapi_app" in source
         assert "atlas_production." + "stores" not in source
     assert hashlib.sha256(OPENAPI_FIXTURE.read_bytes()).hexdigest() == (
-        "40a6cd6790b537327adbb9f5097b1b97c74d0a73e8017636795ebb5aa44bab5c"
+        "26d362b5da7f38c866b19073c6a7b1b2e821da7eb289a9193b0a1b0a046c6d00"
     )
 
 

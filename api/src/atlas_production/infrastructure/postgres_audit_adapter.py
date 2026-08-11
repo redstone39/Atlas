@@ -81,9 +81,6 @@ class PostgresAuditConsumerAdapter:
     def recent_events(self, *, limit: int = 50) -> list[AuditEventRecord]:
         return self.owner.recent_events(limit=limit)
 
-    def recent_audit_events(self, *, limit: int = 50) -> list[AuditEventRecord]:
-        """Current route-facing name; delegates to the bounded owner read."""
-        return self.owner.recent_events(limit=limit)
 
 
 @dataclass(frozen=True, slots=True)

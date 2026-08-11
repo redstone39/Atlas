@@ -37,7 +37,6 @@ from atlas_production.infrastructure.postgres_owner.artifact import (
 )
 from atlas_production.infrastructure.postgres_owner.document_processing import (
     SessionFactory,
-    VerifiedDocumentRestoreSet,
 )
 from atlas_production.modules.artifact_storage.errors import ArtifactStorageError
 from atlas_production.modules.artifact_storage.ports import ArtifactFilesystemPort
@@ -48,6 +47,13 @@ from atlas_production.modules.document_intake.records import (
     DocumentRecord,
     DocumentTagRecord,
     DocumentVersionRecord,
+)
+from atlas_production.modules.document_intake.library_records import (
+    DocumentUploadResult,
+    PublishedDocumentUpload,
+)
+from atlas_production.modules.processing_pipeline.job_records import (
+    VerifiedDocumentRestoreSet,
 )
 from atlas_production.shared.public import AuditEventRecord, content_digest, utc_now_iso
 
@@ -82,17 +88,6 @@ class _MeasuredUploadChunks:
         self.version.source_digest = checksum
 
 
-@dataclass(frozen=True, slots=True)
-class PublishedDocumentUpload:
-    version: DocumentVersionRecord
-    job: Any | None
-    audit: AuditEventRecord
-
-
-@dataclass(frozen=True, slots=True)
-class PostgresDocumentUploadResult:
-    artifact: ArtifactRecord
-    publication: PublishedDocumentUpload
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +208,7 @@ class PostgresDocumentUploadJourneyProvider:
         presented_browser_session_token: str,
         actor_type: str = "user",
         progress_total: int | None = None,
-    ) -> PostgresDocumentUploadResult:
+    ) -> DocumentUploadResult:
         if (
             artifact_class != "original_document"
             or created_by is None
@@ -367,7 +362,7 @@ class PostgresDocumentUploadJourneyProvider:
         # Reload the committed graph for both first publication and replay. This
         # also returns the authoritative blob selected by original-byte dedup.
         artifact = self._canonical_artifact(result.artifact_id)
-        return PostgresDocumentUploadResult(
+        return DocumentUploadResult(
             artifact=artifact,
             publication=self._canonical_publication(
                 document_version_id=result.document_version_id,
@@ -611,6 +606,4 @@ class PostgresDocumentRestoreProofProvider:
 __all__ = [
     "PostgresDocumentRestoreProofProvider",
     "PostgresDocumentUploadJourneyProvider",
-    "PostgresDocumentUploadResult",
-    "PublishedDocumentUpload",
 ]

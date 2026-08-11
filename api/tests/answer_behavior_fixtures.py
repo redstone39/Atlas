@@ -1,4 +1,4 @@
-from atlas_production.modules.turn_execution.public import AnswerBehaviorRevisionV1
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorRevisionV1
 
 
 class NullAnswerBehavior:

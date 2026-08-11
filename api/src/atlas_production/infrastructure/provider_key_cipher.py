@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
-import json
-import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
+from atlas_production.infrastructure.envelope_cipher import (
+    AesGcmEnvelopeCipher,
+    EncryptedCredential,
+)
 from atlas_production.modules.model_routing.records import (
     ProviderConnectionSecretRecord,
 )
@@ -32,6 +29,17 @@ class CredentialCryptoError(RuntimeError):
         return self.message_code
 
 
+def _provider_crypto_error(code: str) -> CredentialCryptoError:
+    return CredentialCryptoError(
+        code,
+        (
+            "provider.credential_encryption_is_unavailable"
+            if code == "credential_master_key_unavailable"
+            else "provider.credential_is_unavailable"
+        ),
+    )
+
+
 class AesGcmCredentialCipher:
     def __init__(
         self,
@@ -40,65 +48,24 @@ class AesGcmCredentialCipher:
         key_id: str,
         decryption_keys: Mapping[str, bytes] | None = None,
     ) -> None:
-        if len(key) != 32 or not key_id.strip():
-            raise CredentialCryptoError(
-                "credential_master_key_unavailable",
-                'provider.credential_encryption_is_unavailable',
+        try:
+            self._envelope = AesGcmEnvelopeCipher(
+                key=key,
+                key_id=key_id,
+                decryption_keys=decryption_keys,
             )
-        self._key = bytes(key)
-        self.key_id = key_id.strip()
-        keys = {
-            identity.strip(): bytes(value)
-            for identity, value in (decryption_keys or {}).items()
-        }
-        keys[self.key_id] = self._key
-        if any(not identity or len(value) != 32 for identity, value in keys.items()):
-            raise CredentialCryptoError(
-                "credential_master_key_unavailable",
-                'provider.credential_encryption_is_unavailable',
-            )
-        self._decryption_keys = keys
+        except ValueError as exc:
+            raise _provider_crypto_error("credential_master_key_unavailable") from exc
 
     @classmethod
     def from_environment(cls) -> "AesGcmCredentialCipher":
-        encoded = os.getenv("ATLAS_CREDENTIAL_MASTER_KEY")
-        key_id = os.getenv("ATLAS_CREDENTIAL_MASTER_KEY_ID")
-        if not encoded or not key_id:
-            raise CredentialCryptoError(
-                "credential_master_key_unavailable",
-                'provider.credential_encryption_is_unavailable',
-            )
         try:
-            key = base64.b64decode(encoded, validate=True)
-            raw_keyring = os.getenv("ATLAS_CREDENTIAL_MASTER_KEYRING", "{}")
-            keyring_payload = json.loads(raw_keyring)
-            if not isinstance(keyring_payload, dict) or any(
-                not isinstance(identity, str) or not isinstance(value, str)
-                for identity, value in keyring_payload.items()
-            ):
-                raise ValueError("credential keyring must be a string map")
-            keyring = {
-                identity: base64.b64decode(value, validate=True)
-                for identity, value in keyring_payload.items()
-            }
-        except (ValueError, binascii.Error, json.JSONDecodeError) as exc:
-            raise CredentialCryptoError(
-                "credential_master_key_unavailable",
-                'provider.credential_encryption_is_unavailable',
-            ) from exc
-        return cls(key=key, key_id=key_id, decryption_keys=keyring)
-
-    @staticmethod
-    def _aad(connection_id: str, provider_type: str, secret_version: int) -> bytes:
-        return json.dumps(
-            {
-                "connection_id": connection_id,
-                "provider_type": provider_type,
-                "secret_version": secret_version,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+            envelope = AesGcmEnvelopeCipher.from_environment()
+        except ValueError as exc:
+            raise _provider_crypto_error("credential_master_key_unavailable") from exc
+        instance = cls.__new__(cls)
+        instance._envelope = envelope
+        return instance
 
     def encrypt(
         self,
@@ -108,38 +75,26 @@ class AesGcmCredentialCipher:
         secret_version: int,
         plaintext: str,
     ) -> ProviderConnectionSecretRecord:
-        if not plaintext:
-            raise CredentialCryptoError(
-                "provider_credential_unavailable",
-                'provider.credential_is_unavailable',
+        try:
+            encrypted = self._envelope.encrypt(
+                domain="model_routing_provider_credential",
+                owner_id=connection_id,
+                owner_kind=provider_type,
+                secret_version=secret_version,
+                plaintext=plaintext,
             )
-        nonce = os.urandom(12)
-        ciphertext = AESGCM(self._key).encrypt(
-            nonce,
-            plaintext.encode("utf-8"),
-            self._aad(connection_id, provider_type, secret_version),
-        )
+        except ValueError as exc:
+            raise _provider_crypto_error("provider_credential_unavailable") from exc
         return ProviderConnectionSecretRecord(
             connection_id=connection_id,
-            ciphertext=base64.b64encode(ciphertext).decode("ascii"),
-            nonce=base64.b64encode(nonce).decode("ascii"),
-            key_id=self.key_id,
-            version=secret_version,
+            ciphertext=encrypted.ciphertext,
+            nonce=encrypted.nonce,
+            key_id=encrypted.key_id,
+            version=encrypted.version,
+            algorithm=encrypted.algorithm,
+            storage_backend=encrypted.storage_backend,
             updated_at=utc_now_iso(),
         )
-
-    def request_fingerprint(self, canonical_payload: bytes) -> str:
-        """Return a stable, key-bound digest without persisting request secrets."""
-        fingerprint_key = hmac.new(
-            self._key,
-            b"atlas-model-routing-idempotency-key-v1",
-            hashlib.sha256,
-        ).digest()
-        return hmac.new(
-            fingerprint_key,
-            canonical_payload,
-            hashlib.sha256,
-        ).hexdigest()
 
     def decrypt(
         self,
@@ -148,30 +103,39 @@ class AesGcmCredentialCipher:
         connection_id: str,
         provider_type: str,
     ) -> str:
-        if (
-            secret.connection_id != connection_id
-            or secret.key_id not in self._decryption_keys
-            or secret.storage_backend != "encrypted_database"
-            or secret.algorithm != "AES-256-GCM"
-            or secret.version < 1
-        ):
-            raise CredentialCryptoError(
-                "provider_credential_unavailable",
-                'provider.credential_is_unavailable',
-            )
+        if secret.connection_id != connection_id:
+            raise _provider_crypto_error("provider_credential_unavailable")
         try:
-            nonce = base64.b64decode(secret.nonce, validate=True)
-            ciphertext = base64.b64decode(secret.ciphertext, validate=True)
-            if len(nonce) != 12:
-                raise ValueError("invalid nonce")
-            plaintext = AESGCM(self._decryption_keys[secret.key_id]).decrypt(
-                nonce,
-                ciphertext,
-                self._aad(connection_id, provider_type, secret.version),
+            return self._envelope.decrypt(
+                EncryptedCredential(
+                    ciphertext=secret.ciphertext,
+                    nonce=secret.nonce,
+                    key_id=secret.key_id,
+                    version=secret.version,
+                    algorithm=secret.algorithm,
+                    storage_backend=secret.storage_backend,
+                ),
+                domain="model_routing_provider_credential",
+                owner_id=connection_id,
+                owner_kind=provider_type,
             )
-            return plaintext.decode("utf-8")
-        except (ValueError, UnicodeDecodeError, binascii.Error, InvalidTag) as exc:
-            raise CredentialCryptoError(
-                "provider_credential_unavailable",
-                'provider.credential_is_unavailable',
-            ) from exc
+        except ValueError as exc:
+            raise _provider_crypto_error("provider_credential_unavailable") from exc
+
+
+def model_routing_request_fingerprint(canonical_payload: bytes) -> str:
+    """Return the existing model-routing key-bound replay digest."""
+    try:
+        envelope = AesGcmEnvelopeCipher.from_environment()
+    except ValueError as exc:
+        raise _provider_crypto_error("credential_master_key_unavailable") from exc
+    fingerprint_key = hmac.new(
+        envelope._key,
+        b"atlas-model-routing-idempotency-key-v1",
+        hashlib.sha256,
+    ).digest()
+    return hmac.new(
+        fingerprint_key,
+        canonical_payload,
+        hashlib.sha256,
+    ).hexdigest()

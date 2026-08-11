@@ -61,6 +61,23 @@ from atlas_production.modules.processing_pipeline.records import (
     EvidencePageArtifact,
     EvidenceRecord,
 )
+from atlas_production.modules.processing_pipeline.job_contracts import (
+    ProcessingControlDenied,
+)
+from atlas_production.modules.processing_pipeline.job_records import (
+    DocumentJobRequestAuthorityProjection,
+    DocumentLifecycleDenied,
+    DocumentLifecycleProcessingAcceptance,
+    DocumentProcessingCurrentnessConflict,
+    ProcessingControlResult,
+    ProcessingExecutionSnapshot,
+    ProcessingJobAuthorizationState,
+    ProcessingJobListBatch,
+    ProcessingJobRecord,
+    ProcessingJobView,
+    ProcessingProfilePin,
+    VerifiedDocumentRestoreSet,
+)
 from atlas_production.modules.processing_pipeline.canonical_processing import (
     PROCESSING_SPEC_SCHEMA_VERSION,
     canonical_processing_spec,
@@ -510,14 +527,8 @@ class _GenerationArtifactPublicationReader:
         return CurrentArtifactGraphResult(tuple(entries), active_fence)
 
 
-class DocumentProcessingCurrentnessConflict(RuntimeError):
-    pass
 
 
-class DocumentLifecycleDenied(PermissionError):
-    def __init__(self, audit_event: AuditEventRecord):
-        super().__init__("document lifecycle request is not authorized")
-        self.audit_event = audit_event
 
 
 _JOB_TRANSITIONS = {
@@ -643,47 +654,10 @@ class CurrentRowExpectation:
             raise ValueError("expected fence must be non-negative")
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingJobRecord:
-    job_id: str
-    job_kind: str
-    document_id: str
-    document_version_id: str
-    processing_generation: int | None
-    index_generation_id: str
-    stage: str
-    status: str
-    progress_current: int
-    progress_total: int | None
-    progress_unit: str
-    attempt: int
-    lease_owner: str | None
-    lease_expires_at: datetime | None
-    fence: int
-    failure_code: str | None
-    failure_detail: str | None
-    idempotency_scope: str
-    idempotency_key: str
-    request_fingerprint: str
-    created_by: str | None
-    attempt_started_at: datetime
-    created_at: datetime
-    updated_at: datetime
-    processing_identity_id: str | None = None
-    processing_revision_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingControlResult:
-    job: ProcessingJobRecord
-    audit_event: AuditEventRecord
 
 
-class ProcessingControlDenied(PermissionError):
-    def __init__(self, reason: str, audit_event: AuditEventRecord):
-        super().__init__(reason)
-        self.reason = reason
-        self.audit_event = audit_event
 
 
 class _ProcessingControlAuthorizationDenied(PermissionError):
@@ -703,90 +677,14 @@ class DocumentProcessingAcceptanceIdentity:
     outbox_work_identity_key: str
 
 
-@dataclass(frozen=True, slots=True)
-class DocumentLifecycleProcessingAcceptance:
-    """Optional processing acceptance committed with one lifecycle mutation."""
-
-    media_type: str
-    document_version_id: str
-    job_kind: str
-    idempotency_scope: str
-    idempotency_key: str
-    created_by: str | None
-    execution_snapshot: ProcessingExecutionSnapshot
-    progress_total: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class VerifiedDocumentRestoreSet:
-    """Full-hash byte-plane proof consumed only by the restore terminal commit."""
-
-    document_id: str
-    resource_lifecycle_epoch: int
-    active_fence: StorageFence
-    artifacts: tuple[tuple[str, str, str, int], ...]
-    reusable_processing_generation: bool
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingJobView:
-    """Consumer-facing job projection with an ephemeral batch claim token."""
-
-    job_id: str
-    job_kind: str
-    document_id: str
-    document_version_id: str
-    processing_generation: int | None
-    index_generation_id: str
-    stage: str
-    status: str
-    progress_current: int
-    progress_total: int | None
-    progress_unit: str
-    attempt: int
-    fence: int
-    failure_code: str | None
-    failure_detail: str | None
-    created_by: str | None
-    attempt_started_at: datetime
-    created_at: datetime
-    updated_at: datetime
-    batch_claim_token: str | None = None
-    processing_identity_id: str | None = None
-    processing_revision_id: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingProfilePin:
-    profile_id: str
-    profile_revision: int
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingExecutionSnapshot:
-    """Complete executable processing input accepted at one request boundary."""
-
-    profile_id: str
-    profile_revision: int
-    profile_snapshot: dict[str, Any]
-    plugin_versions: tuple[dict[str, Any], ...]
-    plugin_packages: tuple[dict[str, Any], ...]
-    runtime_profiles: tuple[dict[str, Any], ...]
-    acceptance_request_digest: str
-
-    def __post_init__(self) -> None:
-        if not self.profile_id.strip() or self.profile_revision <= 0:
-            raise ValueError("processing execution profile identity is invalid")
-        if (
-            self.profile_snapshot.get("profile_id") != self.profile_id
-            or self.profile_snapshot.get("revision") != self.profile_revision
-            or self.profile_snapshot.get("status") != "active"
-        ):
-            raise ValueError("processing execution profile snapshot is mismatched")
-        if not self.plugin_versions or not self.runtime_profiles:
-            raise ValueError("processing execution plugin snapshot is incomplete")
-        if len(self.acceptance_request_digest) != 64:
-            raise ValueError("processing acceptance request digest is invalid")
 
 
 def canonical_processing_spec_from_snapshot(
@@ -796,13 +694,15 @@ def canonical_processing_spec_from_snapshot(
 
     # These are module constants: importing them does not construct VectorIndex
     # or load/download an embedding model.
+    from atlas_production.async_runtime.embedding_model_contract import (
+        MODEL_NAME,
+        MODEL_REVISION,
+    )
     from atlas_production.async_runtime.vector_index import (
         CHUNKING_CONTRACT_VERSION,
         COLLECTION_NAME,
         EMBEDDING_CONTRACT_VERSION,
         INDEX_CONTRACT_VERSION,
-        MODEL_NAME,
-        MODEL_REVISION,
         NORMALIZATION_CONTRACT_VERSION,
         VECTOR_DIMENSION,
     )
@@ -1275,34 +1175,10 @@ def _processing_execution_snapshot(
     )
 
 
-@dataclass(slots=True)
-class ProcessingJobAuthorizationState:
-    users: dict[str, UserRecord]
-    projects: dict[str, ProjectRecord]
-    teams: dict[str, TeamRecord]
-    team_memberships: dict[str, TeamMembershipRecord]
-    permission_grants: dict[str, PermissionGrantRecord]
 
 
-@dataclass(frozen=True, slots=True)
-class ProcessingJobListBatch:
-    jobs: tuple[ProcessingJobView, ...]
-    documents: dict[str, DocumentRecord]
-    tag_refs_by_document: dict[str, tuple[tuple[str, str], ...]]
-    profile_pins: dict[tuple[str, int], ProcessingProfilePin]
-    authorization_state: ProcessingJobAuthorizationState
 
 
-@dataclass(frozen=True, slots=True)
-class DocumentJobRequestAuthorityProjection:
-    """One attached document/job fact graph for a single HTTP request."""
-
-    job: ProcessingJobView
-    document: DocumentRecord
-    tag_refs: tuple[tuple[str, str], ...]
-    profile_pin: ProcessingProfilePin | None
-    authorization_state: ProcessingJobAuthorizationState
-    authenticated_actor: UserRecord
 
 
 def attach_document_job_request_projections(
@@ -12973,10 +12849,6 @@ __all__ = [
     "CurrentRowExpectation",
     "DocumentMutationCommand",
     "DocumentLifecycleMutationCommand",
-    "DocumentLifecycleDenied",
-    "DocumentLifecycleProcessingAcceptance",
-    "DocumentJobRequestAuthorityProjection",
-    "DocumentProcessingCurrentnessConflict",
     "FinalGenerationPublicationCommand",
     "IndexGenerationProjection",
     "IndexGenerationTransition",
@@ -12990,24 +12862,14 @@ __all__ = [
     "ProcessingBatchClaimTransition",
     "ProcessingCheckpointRecord",
     "ProcessingCheckpointTransition",
-    "ProcessingControlDenied",
-    "ProcessingControlResult",
     "ProcessingGenerationProjection",
     "ProcessingGenerationTransition",
-    "ProcessingJobAuthorizationState",
-    "ProcessingJobListBatch",
-    "ProcessingJobRecord",
-    "ProcessingJobTransition",
-    "ProcessingJobView",
-    "ProcessingProfilePin",
-    "ProcessingExecutionSnapshot",
     "ProcessingExecutionAcceptanceWriter",
     "ProcessingExecutionCaptureWriter",
     "SearchChunkProjection",
     "SearchChunkTransition",
     "TaskOutboxRecord",
     "TaskOutboxTransition",
-    "VerifiedDocumentRestoreSet",
     "VectorPointMappingRecord",
     "VectorPointMappingTransition",
     "document_processing_acceptance_identity",

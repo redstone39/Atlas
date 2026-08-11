@@ -8,14 +8,14 @@ from atlas_production.infrastructure.persistence.audit_events import (
     AtlasAuditEventRow,
     _audit_metadata_payload,
 )
-from atlas_production.infrastructure.persistence.turn_execution import (
+from atlas_production.infrastructure.persistence.answer_behavior import (
     AtlasTurnAnswerBehaviorRevisionRow,
 )
 from atlas_production.infrastructure.postgres_owner.answer_behavior import (
     PostgresAnswerBehaviorOwner,
 )
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
-from atlas_production.modules.turn_execution.public import (
+from atlas_production.modules.answer_behavior.public import (
     AnswerBehaviorError,
     AnswerBehaviorUpdateRequest,
 )

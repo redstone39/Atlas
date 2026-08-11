@@ -19,7 +19,13 @@ from atlas_production.infrastructure.persistence.document_intake import (
     AtlasDocumentTagRow,
     AtlasDocumentVersionRow,
 )
-from atlas_production.infrastructure.persistence.identity_access import AtlasUserRow
+from atlas_production.infrastructure.persistence.conversation import (
+    AtlasTurnConversationScopeTagRow,
+)
+from atlas_production.infrastructure.persistence.identity_access import (
+    AtlasPermissionGrantRow,
+    AtlasUserRow,
+)
 from atlas_production.infrastructure.persistence.processing_pipeline import (
     AtlasEvidencePageArtifactRow,
     AtlasEvidenceRow,
@@ -38,6 +44,10 @@ from atlas_production.infrastructure.postgres_owner.authorization import (
 )
 from atlas_production.infrastructure.postgres_owner.generation_retention import (
     PostgresGenerationRetentionOwner,
+)
+from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
+    CreateConversationInput,
+    PostgresConversationV1Store,
 )
 from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
     CatalogDocumentInput,
@@ -89,6 +99,9 @@ OLD_MANIFEST = "f" * 64
 NEW_MANIFEST = "e" * 64
 PROCESSING_FINGERPRINT = "d" * 64
 NOW_TEXT = "2026-07-23T00:00:00+00:00"
+PERMISSION_GRANT_ID = "grant-cpr003-project-reader"
+DEFAULT_CONVERSATION_ID = "conversation-cpr003-default-all"
+SELECTED_CONVERSATION_ID = "conversation-cpr003-selected"
 NOW = datetime(2026, 7, 23, tzinfo=timezone.utc)
 
 
@@ -193,11 +206,24 @@ def _seed_canonical_fixture(runtime: PostgresRuntime) -> dict[str, object] | Non
                 actor_id=ACTOR_ID,
                 display_name="CPR-003 reader",
                 email=None,
-                system_role="admin",
+                system_role="user",
                 password_digest=None,
                 active=True,
                 actor_type="user",
                 created_at=NOW_TEXT,
+            )
+        )
+        session.add(
+            AtlasPermissionGrantRow(
+                grant_id=PERMISSION_GRANT_ID,
+                project_id=PROJECT_ID,
+                subject_type="user",
+                subject_id=ACTOR_ID,
+                role="viewer",
+                effect="allow",
+                status="active",
+                created_at=NOW_TEXT,
+                revoked_at=None,
             )
         )
         identity = AtlasProcessingIdentityRow(
@@ -414,6 +440,11 @@ def _cleanup_canonical_fixture(
         )
         session.execute(delete(AtlasUserRow).where(AtlasUserRow.actor_id == ACTOR_ID))
         session.execute(
+            delete(AtlasPermissionGrantRow).where(
+                AtlasPermissionGrantRow.grant_id == PERMISSION_GRANT_ID
+            )
+        )
+        session.execute(
             delete(AtlasProjectRow).where(AtlasProjectRow.project_id == PROJECT_ID)
         )
     _delete_fixture(runtime, restore_control=restore_control)
@@ -440,6 +471,42 @@ def test_old_exact_citation_survives_current_switch_and_retention_fences_cleanup
         processing_generation_ref="processing-generation-1",
         index_generation_ref=SOURCE_INDEX_GENERATION_ID,
     )
+    conversations = PostgresConversationV1Store(postgres_runtime.session_factory)
+    default_conversation = conversations.create(
+        CreateConversationInput(
+            conversation_id=DEFAULT_CONVERSATION_ID,
+            actor_id=ACTOR_ID,
+            title="Default all",
+            idempotency_key="create-cpr003-default-all",
+            response_language="en",
+        )
+    )
+    selected_conversation = conversations.create(
+        CreateConversationInput(
+            conversation_id=SELECTED_CONVERSATION_ID,
+            actor_id=ACTOR_ID,
+            title="Selected project",
+            idempotency_key="create-cpr003-selected",
+            response_language="en",
+            tag_refs=(("project", PROJECT_ID),),
+        )
+    )
+    assert default_conversation.conversation_id == DEFAULT_CONVERSATION_ID
+    assert selected_conversation.conversation_id == SELECTED_CONVERSATION_ID
+    assert {
+        item.resource_ref
+        for item in rows.grant_resources(
+            actor_id=ACTOR_ID,
+            conversation_id=DEFAULT_CONVERSATION_ID,
+        ).documents
+    } == {resource_ref}
+    assert {
+        item.resource_ref
+        for item in rows.grant_resources(
+            actor_id=ACTOR_ID,
+            conversation_id=SELECTED_CONVERSATION_ID,
+        ).documents
+    } == {resource_ref}
     try:
         claim = retention.create_generation_retention(
             CreateGenerationRetentionV1(
@@ -639,6 +706,24 @@ def test_old_exact_citation_survives_current_switch_and_retention_fences_cleanup
                 is not None
             )
 
+        with postgres_runtime.session_factory() as session, session.begin():
+            grant = session.get(AtlasPermissionGrantRow, PERMISSION_GRANT_ID)
+            assert grant is not None
+            grant.status = "revoked"
+            grant.revoked_at = NOW_TEXT
+        assert rows.grant_resources(
+            actor_id=ACTOR_ID,
+            conversation_id=DEFAULT_CONVERSATION_ID,
+        ).documents == ()
+        assert rows.grant_resources(
+            actor_id=ACTOR_ID,
+            conversation_id=SELECTED_CONVERSATION_ID,
+        ).documents == ()
+        with postgres_runtime.session_factory() as session:
+            assert session.get(
+                AtlasTurnConversationScopeTagRow,
+                (SELECTED_CONVERSATION_ID, "project", PROJECT_ID),
+            ) is not None
         with postgres_runtime.session_factory() as session, session.begin():
             actor = session.get(AtlasUserRow, ACTOR_ID)
             assert actor is not None

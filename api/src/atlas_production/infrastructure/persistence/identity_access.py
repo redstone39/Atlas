@@ -1,10 +1,26 @@
+import json
 from dataclasses import asdict
 from secrets import token_urlsafe
 from typing import Any
 
-from sqlalchemy import Boolean, String, Text, or_
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    or_,
+)
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from atlas_production.modules.identity_access.directory_records import (
+    DirectoryConnectionRecord,
+    DirectorySecretRecord,
+    ExternalIdentityRecord,
+)
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     AgentTokenRecord,
@@ -33,6 +49,200 @@ class AtlasUserRow(OrmBase):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     actor_type: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class AtlasDirectoryConnectionRow(OrmBase):
+    __tablename__ = "atlas_directory_connections"
+    __table_args__ = (
+        CheckConstraint(
+            "provider_type IN ('active_directory', 'ldap')",
+            name="ck_atlas_directory_connection_provider_type",
+        ),
+        CheckConstraint(
+            "tls_mode IN ('ldaps', 'start_tls')",
+            name="ck_atlas_directory_connection_tls_mode",
+        ),
+        CheckConstraint("priority >= 0", name="ck_atlas_directory_connection_priority"),
+        CheckConstraint(
+            "port >= 1 AND port <= 65535",
+            name="ck_atlas_directory_connection_port",
+        ),
+        CheckConstraint(
+            "connect_timeout_seconds >= 1 AND connect_timeout_seconds <= 30",
+            name="ck_atlas_directory_connection_connect_timeout",
+        ),
+        CheckConstraint(
+            "operation_timeout_seconds >= 1 AND operation_timeout_seconds <= 30",
+            name="ck_atlas_directory_connection_operation_timeout",
+        ),
+    )
+
+    connection_id: Mapped[str] = mapped_column(String, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_type: Mapped[str] = mapped_column(String, nullable=False)
+    host: Mapped[str] = mapped_column(String, nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    tls_mode: Mapped[str] = mapped_column(String, nullable=False)
+    connect_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    bind_dn: Mapped[str] = mapped_column(Text, nullable=False)
+    user_base_dn: Mapped[str] = mapped_column(Text, nullable=False)
+    user_object_filter: Mapped[str] = mapped_column(Text, nullable=False)
+    login_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    stable_id_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    display_name_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    email_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    groups_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    department_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    title_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    employee_id_attribute: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class AtlasDirectoryConnectionSecretRow(OrmBase):
+    __tablename__ = "atlas_directory_connection_secrets"
+    __table_args__ = (
+        CheckConstraint(
+            "secret_kind IN ('bind_password', 'custom_ca')",
+            name="ck_atlas_directory_connection_secret_kind",
+        ),
+        CheckConstraint(
+            "algorithm = 'AES-256-GCM'",
+            name="ck_atlas_directory_connection_secret_algorithm",
+        ),
+        CheckConstraint(
+            "storage_backend = 'encrypted_database'",
+            name="ck_atlas_directory_connection_secret_storage",
+        ),
+        CheckConstraint("version >= 1", name="ck_atlas_directory_connection_secret_version"),
+    )
+
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("atlas_directory_connections.connection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    secret_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce: Mapped[str] = mapped_column(Text, nullable=False)
+    key_id: Mapped[str] = mapped_column(String, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    algorithm: Mapped[str] = mapped_column(String, nullable=False)
+    storage_backend: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class AtlasExternalIdentityRow(OrmBase):
+    __tablename__ = "atlas_external_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_id",
+            "external_subject",
+            name="uq_atlas_external_identity_subject",
+        ),
+        CheckConstraint(
+            "status IN ('current', 'stale', 'missing', 'disabled')",
+            name="ck_atlas_external_identity_status",
+        ),
+        Index(
+            "ix_atlas_external_identity_connection_username",
+            "connection_id",
+            "normalized_username",
+        ),
+        Index(
+            "ix_atlas_external_identity_connection_email",
+            "connection_id",
+            "normalized_email",
+        ),
+    )
+
+    actor_id: Mapped[str] = mapped_column(
+        ForeignKey("atlas_users.actor_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("atlas_directory_connections.connection_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    external_subject: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_username: Mapped[str] = mapped_column(String, nullable=False)
+    normalized_email: Mapped[str | None] = mapped_column(String, nullable=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    groups_json: Mapped[str] = mapped_column(Text, nullable=False)
+    department: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    employee_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    directory_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    last_refreshed_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+def directory_connection_row(record: DirectoryConnectionRecord) -> AtlasDirectoryConnectionRow:
+    return AtlasDirectoryConnectionRow(**asdict(record))
+
+
+def directory_connection_record(row: AtlasDirectoryConnectionRow) -> DirectoryConnectionRecord:
+    return DirectoryConnectionRecord(
+        **{
+            field_name: getattr(row, field_name)
+            for field_name in DirectoryConnectionRecord.__dataclass_fields__
+        }
+    )
+
+
+def directory_secret_row(record: DirectorySecretRecord) -> AtlasDirectoryConnectionSecretRow:
+    return AtlasDirectoryConnectionSecretRow(**asdict(record))
+
+
+def directory_secret_record(row: AtlasDirectoryConnectionSecretRow) -> DirectorySecretRecord:
+    return DirectorySecretRecord(
+        connection_id=row.connection_id,
+        secret_kind=row.secret_kind,
+        ciphertext=row.ciphertext,
+        nonce=row.nonce,
+        key_id=row.key_id,
+        version=row.version,
+        algorithm=row.algorithm,
+        storage_backend=row.storage_backend,
+        updated_at=row.updated_at,
+    )
+
+
+def external_identity_row(record: ExternalIdentityRecord) -> AtlasExternalIdentityRow:
+    values = asdict(record)
+    values["groups_json"] = json.dumps(
+        list(record.groups), ensure_ascii=False, separators=(",", ":")
+    )
+    del values["groups"]
+    return AtlasExternalIdentityRow(**values)
+
+
+def external_identity_record(row: AtlasExternalIdentityRow) -> ExternalIdentityRecord:
+    groups = json.loads(row.groups_json)
+    if not isinstance(groups, list) or not all(isinstance(item, str) for item in groups):
+        raise ValueError("directory groups payload must be a string array")
+    return ExternalIdentityRecord(
+        actor_id=row.actor_id,
+        connection_id=row.connection_id,
+        external_subject=row.external_subject,
+        normalized_username=row.normalized_username,
+        normalized_email=row.normalized_email,
+        username=row.username,
+        display_name=row.display_name,
+        email=row.email,
+        groups=tuple(groups),
+        department=row.department,
+        title=row.title,
+        employee_id=row.employee_id,
+        directory_enabled=row.directory_enabled,
+        status=row.status,
+        last_refreshed_at=row.last_refreshed_at,
+    )
 
 
 class AtlasSessionRow(OrmBase):

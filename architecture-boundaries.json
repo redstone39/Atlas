@@ -171,6 +171,16 @@
       ]
     },
     {
+      "id": "answer_behavior",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/answer_behavior"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/answer_behavior/public.py"
+      ]
+    },
+    {
       "id": "turn_execution",
       "role": "module",
       "path_prefixes": [
@@ -298,11 +308,13 @@
         "web/src/features/agent-access/index.ts",
         "web/src/features/conversation-audit/index.ts",
         "web/src/features/document-library/index.ts",
+        "web/src/features/document-processing/index.ts",
         "web/src/features/identity-session/index.ts",
         "web/src/features/invite-acceptance/index.ts",
         "web/src/features/knowledge-library/index.ts",
         "web/src/features/model-routing/index.ts",
         "web/src/features/ops/index.ts",
+        "web/src/features/processing-plugins/index.ts",
         "web/src/features/project-governance/index.ts",
         "web/src/features/team-administration/index.ts",
         "web/src/features/user-administration/index.ts",

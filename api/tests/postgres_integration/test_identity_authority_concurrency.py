@@ -267,7 +267,7 @@ def test_browser_session_and_raw_agent_authority_use_current_rows(
             project_id=project_id,
         )
         assert allowed.status == "allowed"
-        assert allowed.decision is not None and allowed.decision.allowed
+        assert allowed.access_decision_id
         with postgres_runtime.session_factory() as session:
             token = session.get(AtlasAgentTokenRow, f"token-{PREFIX}-agent")
             token.status = "revoked"

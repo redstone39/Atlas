@@ -53,6 +53,9 @@ from atlas_production.infrastructure.persistence.audit_events import (
 from atlas_production.infrastructure.persistence.project_governance import (
     AtlasProjectRow,
 )
+from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    read_effective_document_scope_with_team_ids,
+)
 from atlas_production.infrastructure.postgres_project_adapter import (
     PostgresProjectGovernanceRepository,
 )
@@ -64,6 +67,7 @@ from atlas_production.modules.identity_access.agent_contracts import (
 )
 from atlas_production.modules.identity_access.agent_ports import AgentAccessRepository
 from atlas_production.modules.identity_access.contracts import IdentityAuditCommand
+from atlas_production.modules.identity_access.directory_ports import DirectoryRepository
 from atlas_production.modules.identity_access.ports import (
     IdentityAccessRepository,
     InviteScopeGrantPort,
@@ -214,7 +218,7 @@ def _parameter_shape(owner: type[object], name: str) -> tuple[tuple[object, ...]
 @pytest.mark.parametrize(
     ("contract", "implementation"),
     [
-        (IdentityAccessRepository, PostgresIdentityAccessRepository),
+        (DirectoryRepository, PostgresIdentityAccessRepository),
         (InviteScopeGrantPort, PostgresInviteScopeGrantAdapter),
         (AgentAccessRepository, PostgresAgentAccessRepository),
         (TeamAccessRepository, PostgresTeamAccessRepository),
@@ -225,9 +229,15 @@ def test_route_facing_adapters_cover_every_public_port_signature(
     contract: type[object],
     implementation: type[object],
 ) -> None:
+    contract_owners = (
+        (DirectoryRepository, IdentityAccessRepository)
+        if contract is DirectoryRepository
+        else (contract,)
+    )
     contract_methods = {
         name
-        for name, value in contract.__dict__.items()
+        for owner in contract_owners
+        for name, value in owner.__dict__.items()
         if callable(value) and not name.startswith("_")
     }
     assert contract_methods
@@ -670,6 +680,14 @@ class _Rows:
         return list(self.values)
 
 
+
+class _ExecutionResult:
+    def __init__(self, values):
+        self.values = values
+
+    def scalars(self):
+        return list(self.values)
+
 class _AclSession:
     def __init__(
         self,
@@ -731,15 +749,31 @@ class _AclSession:
             return _Rows(self.teams)
         raise AssertionError(f"unexpected scalar entity: {entity}")
 
+    def execute(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is AtlasPermissionGrantRow:
+            return _ExecutionResult(self.grants)
+        if entity is AtlasTeamMembershipRow:
+            return _ExecutionResult(self.memberships)
+        if entity is AtlasProjectRow:
+            return _ExecutionResult(self.projects)
+        if entity is AtlasTeamRow:
+            return _ExecutionResult(self.teams)
+        raise AssertionError(f"unexpected execute entity: {entity}")
+
     def rollback(self):
         return None
 
 
-def _actor(*, active: bool = True) -> AtlasUserRow:
+def _actor(
+    *,
+    active: bool = True,
+    system_role: str = "user",
+) -> AtlasUserRow:
     return AtlasUserRow(
         actor_id="user-unit", display_name="Unit User",
-        email="unit@example.test", system_role="user", password_digest=None,
-        active=active, actor_type="user", created_at=NOW,
+        email="unit@example.test", system_role=system_role,
+        password_digest=None, active=active, actor_type="user", created_at=NOW,
     )
 
 
@@ -822,11 +856,15 @@ def _grant(
     )
 
 
-def _membership(team_id: str) -> AtlasTeamMembershipRow:
+def _membership(
+    team_id: str,
+    *,
+    role: str = "member",
+) -> AtlasTeamMembershipRow:
     return AtlasTeamMembershipRow(
         membership_id=f"membership-{team_id}", team_id=team_id,
         member_actor_type="user", member_actor_id="user-unit",
-        role="member", status="active", created_at=NOW, removed_at=None,
+        role=role, status="active", created_at=NOW, removed_at=None,
     )
 
 
@@ -904,6 +942,142 @@ def test_team_document_inheritance_off_excludes_parent_scope() -> None:
     assert authority.effective_document_scope(
         actor_type="user", actor_id="user-unit", action="read_original",
     ) == {("team", "team-child")}
+
+
+def _resolved_owner_scope(
+    session: _AclSession,
+    owner_scope: tuple[str, str] | None,
+) -> tuple[set[tuple[str, str]], set[str], bool]:
+    requested_scope = (
+        {owner_scope}
+        if owner_scope is not None
+        else {("project", "project-unit"), ("team", "team-unit")}
+    )
+    return read_effective_document_scope_with_team_ids(
+        session,
+        actor_type="user",
+        actor_id="user-unit",
+        requested_scope=requested_scope,
+        owner_scope_type=owner_scope[0] if owner_scope else None,
+        owner_scope_id=owner_scope[1] if owner_scope else None,
+    )
+
+
+def test_scope_resolver_generic_caller_never_derives_owner_authority() -> None:
+    session = _AclSession(actor=_actor(), role="admin")
+    session.memberships = [_membership("team-unit", role="admin")]
+
+    scope, team_ids, can_administer = _resolved_owner_scope(session, None)
+
+    assert scope == {("project", "project-unit"), ("team", "team-unit")}
+    assert team_ids == {"team-unit"}
+    assert can_administer is False
+
+
+@pytest.mark.parametrize(
+    ("owner_scope", "membership_role", "project_role", "expected"),
+    (
+        (("team", "team-unit"), "admin", "viewer", True),
+        (("team", "team-unit"), "member", "admin", False),
+        (("team", "team-other"), "admin", "admin", False),
+        (("project", "project-unit"), "member", "admin", True),
+        (("project", "project-unit"), "member", "contributor", False),
+        (("project", "project-other"), "admin", "admin", False),
+    ),
+)
+def test_scope_resolver_derives_only_exact_owner_scope_administration(
+    owner_scope: tuple[str, str],
+    membership_role: str,
+    project_role: str,
+    expected: bool,
+) -> None:
+    session = _AclSession(actor=_actor(), role=project_role)
+    session.memberships = [
+        _membership("team-unit", role=membership_role)
+    ]
+
+    assert _resolved_owner_scope(session, owner_scope)[2] is expected
+
+
+def test_scope_resolver_rejects_inherited_parent_team_as_admin_authority() -> None:
+    child = _team("team-child", "team-parent")
+    parent = _team("team-parent", None)
+    session = _AclSession(
+        actor=_actor(),
+        teams=[child, parent],
+        memberships=[
+            _membership("team-child", role="admin")
+        ],
+        grants=[],
+        projects=[],
+    )
+
+    scope, _, can_administer = _resolved_owner_scope(
+        session, ("team", "team-parent")
+    )
+
+    assert scope == {("team", "team-parent")}
+    assert can_administer is False
+
+
+def test_scope_resolver_preserves_project_same_tier_deny_precedence() -> None:
+    session = _AclSession(
+        actor=_actor(),
+        grants=[
+            _grant(
+                "grant-allow",
+                subject_type="team",
+                subject_id="team-unit",
+                role="admin",
+                effect="allow",
+            ),
+            _grant(
+                "grant-deny",
+                subject_type="team",
+                subject_id="team-unit",
+                role="admin",
+                effect="deny",
+            ),
+        ],
+    )
+
+    assert _resolved_owner_scope(
+        session, ("project", "project-unit")
+    )[2] is False
+
+
+@pytest.mark.parametrize(
+    ("actor", "expected_scope", "expected"),
+    (
+        (_actor(system_role="admin"), {("project", "project-unit")}, True),
+        (_actor(active=False), set(), False),
+    ),
+)
+def test_scope_resolver_handles_system_admin_and_inactive_actor(
+    actor: AtlasUserRow,
+    expected_scope: set[tuple[str, str]],
+    expected: bool,
+) -> None:
+    session = _AclSession(actor=actor)
+
+    scope, _, can_administer = _resolved_owner_scope(
+        session, ("project", "project-unit")
+    )
+
+    assert scope == expected_scope
+    assert can_administer is expected
+
+
+def test_scope_resolver_rejects_cross_wired_owner_arguments() -> None:
+    session = _AclSession(actor=_actor())
+
+    with pytest.raises(ValueError, match="provided together"):
+        read_effective_document_scope_with_team_ids(
+            session,
+            actor_type="user",
+            actor_id="user-unit",
+            owner_scope_type="team",
+        )
 
 
 def test_owner_commit_revalidates_revoked_system_admin_authority() -> None:
@@ -1042,9 +1216,9 @@ def test_raw_agent_principal_matrix(kwargs: dict[str, object], expected: str) ->
     )
     assert result.status == expected
     if expected == "allowed":
-        assert result.agent is not None
-        assert result.token is not None
-        assert result.decision is not None and result.decision.allowed
+        assert result.actor_id == session.actor.actor_id
+        assert result.token_fingerprint
+        assert result.access_decision_id
         assert session.commits == 1
         assert session.scalar_calls == 4
         assert session.added
@@ -1262,8 +1436,6 @@ def test_audit_consumer_is_bounded_evidence_only() -> None:
     adapter = PostgresAuditConsumerAdapter(owner)
     assert adapter.recent_events(limit=50) == []
     assert owner.limit == 50
-    assert adapter.recent_audit_events(limit=25) == []
-    assert owner.limit == 25
     assert set(adapter.__class__.__dict__) >= {"recent_events"}
     assert not hasattr(adapter, "authorize")
     assert tuple(inspect.signature(

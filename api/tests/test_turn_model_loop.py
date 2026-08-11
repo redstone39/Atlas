@@ -43,6 +43,7 @@ from atlas_production.modules.result_governance.public import (
     PostHocAnswerAssessmentResultV2,
     PostHocAnswerAssessmentV2,
 )
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorInputV1
 from atlas_production.modules.retrieval.public import (
     DeclaredEvidenceItemV1,
     DeclaredEvidenceMappingV1,
@@ -67,7 +68,6 @@ from atlas_production.modules.retrieval.public import (
     VisualInspectionResultV1,
 )
 from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorInputV1,
     DeepReasoningContractError,
     DeepReasoningEvaluationResultV1,
     DeepReasoningPlanResultV1,

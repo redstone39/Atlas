@@ -95,7 +95,7 @@ def test_runtime_app_preserves_auth_cookie_and_correlation_header() -> None:
 
     response = client.post(
         "/api/v1/auth/sessions",
-        json={"email": "user@example.test", "password": "secret"},
+        json={"identifier": "user@example.test", "password": "secret"},
     )
 
     assert response.status_code == 200

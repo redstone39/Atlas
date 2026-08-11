@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from atlas_production.async_runtime import offline_embedding_cache
-from atlas_production.async_runtime.vector_index import MODEL_ALLOW_PATTERNS
+from atlas_production.async_runtime.embedding_model_contract import MODEL_ALLOW_PATTERNS
 
 
 def _write_snapshot(cache_dir: Path) -> Path:

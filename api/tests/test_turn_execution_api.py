@@ -299,7 +299,7 @@ def test_sse_drains_terminal_event_committed_between_fetch_and_status() -> None:
     assert "event: terminal_completed" in response.text
 
 
-def test_retry_is_fresh_turn_execution_and_create_has_no_knowledge_scope() -> None:
+def test_retry_has_no_scope_and_create_accepts_only_create_scope_tags() -> None:
     client = TestClient(create_app(_composition()))
     retried = client.post(
         "/api/v1/workspace/turns/turn-1/retry",
@@ -308,6 +308,30 @@ def test_retry_is_fresh_turn_execution_and_create_has_no_knowledge_scope() -> No
     assert retried.status_code == 202
     assert retried.json()["turn_id"] == "turn-2"
     assert retried.json()["execution_id"] == "execution-2"
+
+    created = client.post(
+        "/api/v1/workspace/conversations",
+        json={
+            "title": "Conversation",
+            "tag_refs": [
+                {"tag_type": "team", "tag_id": "team-a"},
+                {"tag_type": "project", "tag_id": "project-b"},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    assert "tag_refs" not in created.json()["conversation"]
+
+    duplicate = client.post(
+        "/api/v1/workspace/conversations",
+        json={
+            "tag_refs": [
+                {"tag_type": "team", "tag_id": "team-a"},
+                {"tag_type": "team", "tag_id": "team-a"},
+            ]
+        },
+    )
+    assert duplicate.status_code == 422
 
     rejected = client.post(
         "/api/v1/workspace/conversations",

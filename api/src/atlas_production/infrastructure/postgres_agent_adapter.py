@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
-from typing import Callable, Literal
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,6 +29,7 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasAgentTokenRow,
     AtlasUserRow,
 )
+from atlas_production.modules.agent_runtime.public import AgentQueryAuthorizationV1
 from atlas_production.modules.identity_access.agent_contracts import (
     AgentAuditCommand,
     AgentProjectGrantView,
@@ -36,7 +37,6 @@ from atlas_production.modules.identity_access.agent_contracts import (
 from atlas_production.modules.identity_access.agent_ports import AgentAccessRepository
 from atlas_production.modules.identity_access.agent_service import AgentAccessService
 from atlas_production.modules.identity_access.records import (
-    AccessDecisionRecord,
     AgentTokenRecord,
     UserRecord,
 )
@@ -252,19 +252,6 @@ class PostgresAgentAccessRepository(AgentAccessRepository):
         return buffer
 
 
-@dataclass(frozen=True, slots=True)
-class AgentQueryAuthorization:
-    status: Literal[
-        "invalid_token",
-        "invalid_agent",
-        "revoked",
-        "denied",
-        "allowed",
-    ]
-    token: AgentTokenRecord | None = None
-    agent: UserRecord | None = None
-    decision: AccessDecisionRecord | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class PostgresAgentQueryAuthority:
@@ -277,9 +264,9 @@ class PostgresAgentQueryAuthority:
         *,
         raw_token: str | None,
         project_id: str,
-    ) -> AgentQueryAuthorization:
+    ) -> AgentQueryAuthorizationV1:
         if not raw_token:
-            return AgentQueryAuthorization("invalid_token")
+            return AgentQueryAuthorizationV1("invalid_token")
         digest = agent_token_digest(raw_token)
         session = self.session_factory()
         with session:
@@ -292,7 +279,7 @@ class PostgresAgentQueryAuthority:
                 ).all()
                 if len(token_rows) != 1:
                     session.rollback()
-                    return AgentQueryAuthorization("invalid_token")
+                    return AgentQueryAuthorizationV1("invalid_token")
                 token_id = token_rows[0].token_id
                 token_actor_id = token_rows[0].actor_id
                 acquire_owner_locks(
@@ -327,7 +314,7 @@ class PostgresAgentQueryAuthority:
                 )
                 if token_row is None:
                     session.rollback()
-                    return AgentQueryAuthorization("invalid_token")
+                    return AgentQueryAuthorizationV1("invalid_token")
                 token = _token_record(token_row)
                 actor_row = session.scalar(
                     select(AtlasUserRow)
@@ -340,14 +327,19 @@ class PostgresAgentQueryAuthority:
                     or not actor_row.active
                 ):
                     session.rollback()
-                    return AgentQueryAuthorization("invalid_agent", token=token)
+                    return AgentQueryAuthorizationV1(
+                        "invalid_agent",
+                        actor_id=token.actor_id,
+                        token_fingerprint=token.token_fingerprint,
+                    )
                 agent = _user_record(actor_row)
                 if token.status != "active":
                     session.rollback()
-                    return AgentQueryAuthorization(
+                    return AgentQueryAuthorizationV1(
                         "revoked",
-                        token=token,
-                        agent=agent,
+                        actor_id=agent.actor_id,
+                        token_id=token.token_id,
+                        token_fingerprint=token.token_fingerprint,
                     )
                 decision = ActionAwareAclAuthority.resolve_in_session(
                     session,
@@ -359,11 +351,11 @@ class PostgresAgentQueryAuthority:
                 )
                 AccessDecisionWriter(session).append(decision)
                 session.commit()
-                return AgentQueryAuthorization(
+                return AgentQueryAuthorizationV1(
                     "allowed" if decision.allowed else "denied",
-                    token=token,
-                    agent=agent,
-                    decision=decision,
+                    actor_id=agent.actor_id,
+                    token_fingerprint=token.token_fingerprint,
+                    access_decision_id=decision.decision_id,
                 )
             except Exception:
                 session.rollback()
@@ -381,7 +373,6 @@ def build_postgres_agent_access(
 
 
 __all__ = [
-    "AgentQueryAuthorization",
     "PostgresAgentAccessRepository",
     "PostgresAgentQueryAuthority",
     "build_postgres_agent_access",

@@ -14,6 +14,7 @@ import zlib
 from atlas_production.infrastructure.provider_key_cipher import (
     AesGcmCredentialCipher,
     CredentialCryptoError,
+    model_routing_request_fingerprint,
 )
 from atlas_production.infrastructure.postgres_owner.identity import IdentityRepository
 from atlas_production.infrastructure.postgres_owner.model_routing import (
@@ -214,7 +215,10 @@ class PostgresModelRoutingAdapter:
         return replay
 
     def fingerprint_request(self, canonical_payload: bytes) -> str:
-        return self._cipher().request_fingerprint(canonical_payload)
+        try:
+            return model_routing_request_fingerprint(canonical_payload)
+        except CredentialCryptoError as exc:
+            raise ModelRoutingError(exc.code, exc.message_code, 503) from exc
 
     def get_connection(self, connection_id: str) -> ProviderConnectionRecord | None:
         return self._reader.get_connection(connection_id)

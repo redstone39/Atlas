@@ -12,7 +12,7 @@ from atlas_production.infrastructure.persistence import (
     retrieval,
     result_governance,
     turn_runtime,
-    turn_execution,
+    answer_behavior,
 )
 from atlas_production.infrastructure.persistence.schema import OrmBase
 
@@ -23,7 +23,7 @@ OWNER_MODULES = (
     conversation,
     retrieval,
     turn_runtime,
-    turn_execution,
+    answer_behavior,
 )
 OWNER_BY_TABLE = {
     table_name: module.OWNER
@@ -68,7 +68,7 @@ def test_owner_tables_are_registered_once_and_partitioned() -> None:
         + len(audit_events.TURN_AUDIT_OWNER_TABLES)
     )
     assert expected <= set(OrmBase.metadata.tables)
-    assert len(expected) == 45
+    assert len(expected) == 46
 
 
 def test_owner_tables_have_no_cross_owner_foreign_keys() -> None:

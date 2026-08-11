@@ -1,4 +1,4 @@
-"""Turn-execution-owned append-only global Answer behavior revisions."""
+"""Answer-behavior-owned append-only global guidance revisions."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .base import OrmBase
 
 
-OWNER = "turn_execution"
+OWNER = "answer_behavior"
 
 
 class AtlasTurnAnswerBehaviorRevisionRow(OrmBase):

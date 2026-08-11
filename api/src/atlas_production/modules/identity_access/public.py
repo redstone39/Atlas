@@ -1,3 +1,17 @@
+from .directory_records import (
+    DirectoryConnectionRecord,
+    DirectoryGatewayError,
+    DirectoryPrincipal,
+    DirectorySecretRecord,
+    ExternalIdentityRecord,
+)
+from .directory_ports import (
+    DirectoryCredentialCipher,
+    DirectoryFilterValidator,
+    DirectoryGateway,
+    DirectoryRepository,
+)
+from .directory_service import DirectoryIdentityService, canonical_identifier
 from .records import (
     AccessDecisionRecord,
     UserRecord,
@@ -41,6 +55,20 @@ from .api_models import (
     AgentTokenIssueResult,
     AgentUserListResult,
 )
+from .api_models import (
+    DirectoryConnectionConfig,
+    DirectoryConnectionCreateRequest,
+    DirectoryConnectionListResult,
+    DirectoryConnectionStatus,
+    DirectoryConnectionTestResult,
+    DirectoryConnectionUpdateRequest,
+    DirectoryProfileSummary,
+    DirectoryUserCandidate,
+    DirectoryUserImportRequest,
+    DirectoryUserImportResult,
+    DirectoryUserSearchRequest,
+    DirectoryUserSearchResult,
+)
 
 from .agent_contracts import (
     AgentAccessError,
@@ -70,6 +98,29 @@ from .team_ports import TeamAccessRepository
 from .team_service import TeamAccessService
 
 __all__ = [
+    "DirectoryConnectionRecord",
+    "DirectoryGatewayError",
+    "DirectoryPrincipal",
+    "DirectorySecretRecord",
+    "ExternalIdentityRecord",
+    "DirectoryCredentialCipher",
+    "DirectoryFilterValidator",
+    "DirectoryGateway",
+    "DirectoryRepository",
+    "DirectoryIdentityService",
+    "canonical_identifier",
+    "DirectoryConnectionConfig",
+    "DirectoryConnectionCreateRequest",
+    "DirectoryConnectionListResult",
+    "DirectoryConnectionStatus",
+    "DirectoryConnectionTestResult",
+    "DirectoryConnectionUpdateRequest",
+    "DirectoryProfileSummary",
+    "DirectoryUserCandidate",
+    "DirectoryUserImportRequest",
+    "DirectoryUserImportResult",
+    "DirectoryUserSearchRequest",
+    "DirectoryUserSearchResult",
     "AccessDecisionRecord",
     "UserRecord",
     "ActorContext",

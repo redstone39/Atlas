@@ -7,7 +7,7 @@ from typing import Literal, Protocol, TypedDict
 from atlas_production.infrastructure.bounded_artifact_writer import (
     ProcessingArtifactFence,
 )
-from atlas_production.infrastructure.postgres_owner.document_processing import (
+from atlas_production.modules.processing_pipeline.job_records import (
     ProcessingExecutionSnapshot,
 )
 from atlas_production.modules.model_routing.contracts import ModelInvocationHandle

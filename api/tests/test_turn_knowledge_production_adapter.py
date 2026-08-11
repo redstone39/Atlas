@@ -162,6 +162,10 @@ def test_navigation_map_rejects_revision_from_foreign_identity() -> None:
 
 class FakeRows:
     current = True
+    def current_scope(self, *, actor_id: str):
+        assert actor_id == "actor-1"
+        return frozenset({("team", "team-a"), ("project", "project-b")})
+
 
     def grant_authority(self, *, actor_id: str, conversation_id: str, deadline_at=None):
         return GrantAuthorityState(actor_id, conversation_id, True, "authority-snapshot", 7)
@@ -282,6 +286,37 @@ def test_authorized_grant_resource_source_uses_opaque_ref_and_exact_pins() -> No
     assert resource.processing_generation_ref == "processing-generation-9"
     assert resource.index_generation_ref == "index-17"
     assert resource.modalities == ["text", "figure"]
+
+
+def test_authorized_grant_source_delegates_current_scope() -> None:
+    source = ProductionAuthorizedGrantResourceSource(FakeRows())
+
+    assert source.current_scope(actor_id="actor-1") == frozenset(
+        {("team", "team-a"), ("project", "project-b")}
+    )
+
+
+def test_selected_scope_empty_intersection_never_falls_back_to_all(
+    monkeypatch,
+) -> None:
+    observed = []
+
+    def _scope(_session, **facts):
+        observed.append(facts["requested_scope"])
+        return set()
+
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_turn_knowledge_production.read_effective_document_scope",
+        _scope,
+    )
+    source = PostgresProductionKnowledgeRowSource(lambda: SimpleNamespace())
+
+    assert source._authorized_documents_in_session(
+        SimpleNamespace(),
+        actor_id="actor-1",
+        requested_scope={("team", "team-revoked")},
+    ) == ()
+    assert observed == [{("team", "team-revoked")}]
 
 
 def test_backend_is_deterministic_exact_current_and_model_safe() -> None:

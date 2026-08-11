@@ -277,12 +277,16 @@ def test_startup_sweeper_default_respects_runtime_read_limit() -> None:
     assert runtime.sweeps == [500]
 
 
-def test_api_lifespan_fails_carriers_before_stopping_expiry_sweep() -> None:
+def test_api_lifespan_stops_carrier_reconciler_then_expiry_sweeper() -> None:
     order: list[str] = []
 
     class CarrierLifecycle:
         def shutdown(self) -> None:
             order.append("carrier_shutdown")
+
+    class ReconcilerLifecycle:
+        def stop(self) -> None:
+            order.append("release_reconciler_stop")
 
     class SweeperLifecycle:
         def stop(self) -> None:
@@ -291,10 +295,15 @@ def test_api_lifespan_fails_carriers_before_stopping_expiry_sweep() -> None:
     values = {name: object() for name in ApiComposition.__dataclass_fields__}
     values.update(
         turn_execution_carrier=CarrierLifecycle(),
+        turn_resource_release_reconciler=ReconcilerLifecycle(),
         turn_lease_failure_sweeper=SweeperLifecycle(),
     )
 
     with TestClient(create_app(ApiComposition(**values))):
         pass
 
-    assert order == ["carrier_shutdown", "sweeper_stop"]
+    assert order == [
+        "carrier_shutdown",
+        "release_reconciler_stop",
+        "sweeper_stop",
+    ]

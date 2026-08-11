@@ -25,7 +25,10 @@ from atlas_production.infrastructure.persistence.artifact_storage import (
     AtlasArtifactRow,
     AtlasStorageBlobRow,
 )
-from atlas_production.infrastructure.persistence.conversation import AtlasTurnConversationRow
+from atlas_production.infrastructure.persistence.conversation import (
+    AtlasTurnConversationRow,
+    AtlasTurnConversationScopeTagRow,
+)
 from atlas_production.infrastructure.persistence.document_intake import (
     AtlasDocumentRow,
     AtlasDocumentTagRow,
@@ -207,6 +210,7 @@ class ProductionKnowledgeRowSource(Protocol):
         conversation_id: str,
         deadline_at: datetime | None = None,
     ) -> GrantAuthorityState: ...
+    def current_scope(self, *, actor_id: str) -> frozenset[tuple[str, str]]: ...
     def grant_resources(
         self,
         *,
@@ -284,6 +288,14 @@ class PostgresProductionKnowledgeRowSource:
             conversation_id=conversation_id,
             deadline_at=deadline_at,
         ).authority
+    def current_scope(self, *, actor_id: str) -> frozenset[tuple[str, str]]:
+        with self._session_factory() as session:
+            return frozenset(
+                read_effective_document_scope(
+                    session, actor_type="user", actor_id=actor_id
+                )
+            )
+
 
     def grant_resources(
         self,
@@ -305,8 +317,26 @@ class PostgresProductionKnowledgeRowSource:
                 and conversation.status == "active"
                 and (conversation.owner_actor_id == actor_id or actor.system_role == "admin")
             )
+            scope_rows = session.execute(
+                select(
+                    AtlasTurnConversationScopeTagRow.tag_type,
+                    AtlasTurnConversationScopeTagRow.tag_id,
+                ).where(
+                    AtlasTurnConversationScopeTagRow.conversation_id
+                    == conversation_id
+                )
+            ).all()
+            requested_scope = (
+                {(row.tag_type, row.tag_id) for row in scope_rows}
+                if scope_rows
+                else None
+            )
             documents = (
-                self._authorized_documents_in_session(session, actor_id=actor_id)
+                self._authorized_documents_in_session(
+                    session,
+                    actor_id=actor_id,
+                    requested_scope=requested_scope,
+                )
                 if authorized
                 else ()
             )
@@ -346,10 +376,17 @@ class PostgresProductionKnowledgeRowSource:
             return self._authorized_documents_in_session(session, actor_id=actor_id)
 
     def _authorized_documents_in_session(
-        self, session: Session, *, actor_id: str
+        self,
+        session: Session,
+        *,
+        actor_id: str,
+        requested_scope: set[tuple[str, str]] | None = None,
     ) -> tuple[CurrentDocumentResource, ...]:
         scope = read_effective_document_scope(
-            session, actor_type="user", actor_id=actor_id
+            session,
+            actor_type="user",
+            actor_id=actor_id,
+            requested_scope=requested_scope,
         )
         if not scope:
             return ()
@@ -1509,6 +1546,9 @@ class ProductionAuthorizedGrantResourceSource:
 
     def __init__(self, rows: ProductionKnowledgeRowSource) -> None:
         self._rows = rows
+    def current_scope(self, *, actor_id: str) -> frozenset[tuple[str, str]]:
+        return self._rows.current_scope(actor_id=actor_id)
+
 
     def resources_for_grant(
         self,

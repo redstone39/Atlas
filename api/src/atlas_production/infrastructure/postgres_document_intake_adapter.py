@@ -45,11 +45,7 @@ from atlas_production.infrastructure.postgres_locks import acquire_mixed_owner_l
 from atlas_production.infrastructure.postgres_owner.audit import AccessDecisionWriter
 from atlas_production.infrastructure.postgres_owner.document_processing import (
     DocumentLifecycleMutationCommand,
-    DocumentLifecycleProcessingAcceptance,
-    ProcessingJobRecord,
-    ProcessingJobAuthorizationState,
     SessionFactory,
-    VerifiedDocumentRestoreSet,
 )
 from atlas_production.infrastructure.postgres_owner.lock_keys import (
     identity_actor_owner_key,
@@ -69,12 +65,24 @@ from atlas_production.modules.document_intake.records import (
     DocumentTagRecord,
     DocumentVersionRecord,
 )
+from atlas_production.modules.document_intake.library_records import (
+    DocumentLibraryItemProjection,
+    DocumentLibraryRequestProjection,
+    DocumentLifecycleRequestInput,
+    RequestedDocumentScopeProjection,
+)
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     PermissionGrantRecord,
     TeamMembershipRecord,
     TeamRecord,
     UserRecord,
+)
+from atlas_production.modules.processing_pipeline.job_records import (
+    DocumentLifecycleProcessingAcceptance,
+    ProcessingJobAuthorizationState,
+    ProcessingJobRecord,
+    VerifiedDocumentRestoreSet,
 )
 from atlas_production.modules.project_governance.records import ProjectRecord
 from atlas_production.rbac import (
@@ -142,54 +150,6 @@ def _audit_event(command: DocumentAuditCommand) -> AuditEventRecord:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class DocumentLibraryItemProjection:
-    """All mutable SQL facts used to render one library item in one request."""
-
-    document: DocumentRecord
-    tags: tuple[DocumentTagRecord, ...]
-    scope_labels: tuple[tuple[str, str, str], ...]
-    ready_evidence_count: int
-    original_artifact_available: bool
-    can_view: bool
-    can_administer: bool
-    can_edit: bool
-    can_view_logs: bool
-    download_available: bool
-    events: tuple[AuditEventRecord, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentLibraryRequestProjection:
-    authenticated_actor: UserRecord
-    items: tuple[DocumentLibraryItemProjection, ...]
-    authorization_state: ProcessingJobAuthorizationState
-
-
-@dataclass(frozen=True, slots=True)
-class RequestedDocumentScopeProjection:
-    scope_type: str
-    scope_id: str
-    exists: bool
-    active: bool
-    label: str | None
-    can_upload: bool
-    denial_audit_event: AuditEventRecord | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentLifecycleRequestInput:
-    presented_browser_session_token: str
-    actor_type: str
-    actor_id: str
-    expected_document: DocumentRecord
-    document: DocumentRecord
-    tags: tuple[DocumentTagRecord, ...]
-    audit_events: tuple[AuditEventRecord, ...]
-    denial_audit_event: AuditEventRecord
-    versions: tuple[DocumentVersionRecord, ...] = ()
-    processing_acceptance: DocumentLifecycleProcessingAcceptance | None = None
-    restore_verification: VerifiedDocumentRestoreSet | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1251,12 +1211,8 @@ class PostgresDocumentIntakeAdapter:
 
 __all__ = [
     "DocumentIntakeJourneyFacade",
-    "DocumentLifecycleRequestInput",
-    "DocumentLibraryItemProjection",
-    "DocumentLibraryRequestProjection",
     "DocumentUploadAuthorityCommand",
     "DocumentUploadAuthorityWriter",
     "PostgresDocumentIntakeAdapter",
-    "RequestedDocumentScopeProjection",
     "document_upload_authority_lock_plan",
 ]

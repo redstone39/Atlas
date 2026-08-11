@@ -558,6 +558,7 @@ def _protected_open_request() -> owner.ProtectedArtifactOpenInput:
         record_success_evidence=False,
         candidate_scope=frozenset({("project", "project-1")}),
         candidate_team_ids=frozenset(),
+        expected_can_administer_owner_scope=False,
         access_decision=None,
         audit_events=(),
         observed_at="2026-07-17T00:00:00+00:00",
@@ -953,7 +954,7 @@ def test_protected_open_fails_before_evidence_when_token_actor_is_inactive(
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), False),
     )
 
     with pytest.raises(owner.ArtifactProtectedOpenUnauthenticated) as raised:
@@ -982,7 +983,7 @@ def test_protected_open_validates_token_without_extending_revoke_lock_or_leaking
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), False),
     )
 
     opener = owner.ProtectedArtifactOpenCommand(Factory(session)).execute(
@@ -1008,7 +1009,7 @@ def test_protected_open_commits_evidence_and_returns_post_commit_descriptor(monk
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), False),
     )
     decision = _decision()
     opener = owner.ProtectedArtifactOpenCommand(Factory(session)).execute(
@@ -1025,6 +1026,7 @@ def test_protected_open_commits_evidence_and_returns_post_commit_descriptor(monk
             record_success_evidence=True,
             candidate_scope=frozenset({("project", "project-1")}),
             candidate_team_ids=frozenset(),
+            expected_can_administer_owner_scope=False,
             access_decision=decision,
             audit_events=(_event(decision_id=decision.decision_id),),
             observed_at="2026-07-17T00:00:00+00:00",
@@ -1053,7 +1055,7 @@ def test_protected_denial_commits_before_withholding_output(monkeypatch) -> None
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: (set(), set()),
+        lambda *_args, **_kwargs: (set(), set(), False),
     )
     decision = _decision(allowed=False)
     with pytest.raises(owner.ArtifactProtectedOpenDenied):
@@ -1066,7 +1068,9 @@ def test_protected_denial_commits_before_withholding_output(monkeypatch) -> None
                 presented_browser_session_token=BROWSER_SESSION_TOKEN,
                 record_success_evidence=False,
                 candidate_scope=frozenset({("project", "project-1")}),
-                candidate_team_ids=frozenset(), access_decision=decision,
+                candidate_team_ids=frozenset(),
+                expected_can_administer_owner_scope=False,
+                access_decision=decision,
                 audit_events=(_event(decision_id=decision.decision_id),),
                 observed_at="2026-07-17T00:00:00+00:00",
                 read_lease=_read_lease(),
@@ -1106,13 +1110,18 @@ def test_protected_policy_denial_commits_exact_evidence_before_output(
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: (
+            {("project", "project-1")},
+            set(),
+            system_role == "admin",
+        ),
     )
     decision = _decision(allowed=False, reason=reason)
     request = replace(
         _protected_open_request(),
         expected_document=document,
         access_decision=decision,
+        expected_can_administer_owner_scope=system_role == "admin",
         audit_events=(_event(decision_id=decision.decision_id),),
     )
 
@@ -1138,7 +1147,7 @@ def test_protected_policy_denial_rejects_inexact_reason(monkeypatch) -> None:
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), False),
     )
     wrong = _decision(allowed=False, reason="scope_denied")
 
@@ -1230,12 +1239,13 @@ def test_system_admin_bypasses_member_download_policy_when_acl_allows(monkeypatc
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), True),
     )
     decision = _decision()
     request = replace(
         _protected_open_request(),
         expected_document=document,
+        expected_can_administer_owner_scope=True,
         record_success_evidence=True,
         access_decision=decision,
         audit_events=(_event(decision_id=decision.decision_id),),
@@ -1252,6 +1262,135 @@ def test_system_admin_bypasses_member_download_policy_when_acl_allows(monkeypatc
     }
 
 
+@pytest.mark.parametrize(
+    ("scope_type", "scope_id", "team_ids"),
+    (
+        ("team", "team-1", {"team-1"}),
+        ("project", "project-1", set()),
+    ),
+)
+def test_owner_scope_admin_bypasses_member_policy_at_terminal_owner(
+    monkeypatch,
+    scope_type: str,
+    scope_id: str,
+    team_ids: set[str],
+) -> None:
+    session = RecordingSession()
+    document = replace(
+        _document(),
+        scope_type=scope_type,
+        scope_id=scope_id,
+        allow_member_download=False,
+    )
+    artifact = replace(
+        _artifact(),
+        owner_scope_type=scope_type,
+        owner_scope_id=scope_id,
+    )
+    binding = replace(_binding(), scope_type=scope_type, scope_id=scope_id)
+    _prime_protected_rows(session)
+    _prime_protected_graph(session)
+    session.rows[(owner.AtlasDocumentRow, document.document_id)] = owner._row(
+        document, owner.AtlasDocumentRow
+    )
+    session.rows[(rows.AtlasArtifactRow, artifact.artifact_id)] = owner._row(
+        artifact, rows.AtlasArtifactRow
+    )
+    session.results[0] = Result(
+        scalars=(
+            owner.AtlasDocumentTagRow(
+                document_id=document.document_id,
+                tag_type=scope_type,
+                tag_id=scope_id,
+                created_at=NOW,
+            ),
+        )
+    )
+    session.results[1] = Result(
+        scalars=(owner._row(binding, rows.AtlasArtifactScopeBindingRow),)
+    )
+    captured: dict[str, str] = {}
+
+    def resolve(*_args, **kwargs):
+        captured["owner_scope_type"] = kwargs["owner_scope_type"]
+        captured["owner_scope_id"] = kwargs["owner_scope_id"]
+        return {(scope_type, scope_id)}, team_ids, True
+
+    monkeypatch.setattr(
+        owner,
+        "read_effective_document_scope_with_team_ids",
+        resolve,
+    )
+    decision = replace(
+        _decision(),
+        project_id=scope_id if scope_type == "project" else None,
+        scope_type=scope_type,
+        scope_id=scope_id,
+    )
+    event = replace(
+        _event(decision_id=decision.decision_id),
+        project_id=decision.project_id,
+    )
+    request = replace(
+        _protected_open_request(),
+        expected_document=document,
+        expected_artifact=artifact,
+        expected_tag_refs=frozenset({(scope_type, scope_id)}),
+        candidate_scope=frozenset({(scope_type, scope_id)}),
+        candidate_team_ids=frozenset(team_ids),
+        expected_can_administer_owner_scope=True,
+        record_success_evidence=True,
+        access_decision=decision,
+        audit_events=(event,),
+    )
+
+    opener = owner.ProtectedArtifactOpenCommand(Factory(session)).execute(request)
+
+    assert opener.artifact_id == "artifact-1"
+    assert captured == {
+        "owner_scope_type": scope_type,
+        "owner_scope_id": scope_id,
+    }
+    assert session.commits == 1
+
+
+@pytest.mark.parametrize(
+    ("expected", "current"),
+    ((False, True), (True, False)),
+)
+def test_owner_scope_admin_currentness_change_conflicts_before_commit(
+    monkeypatch,
+    expected: bool,
+    current: bool,
+) -> None:
+    session = RecordingSession()
+    _prime_protected_rows(session)
+    _prime_protected_graph(session)
+    monkeypatch.setattr(
+        owner,
+        "read_effective_document_scope_with_team_ids",
+        lambda *_args, **_kwargs: (
+            {("project", "project-1")},
+            set(),
+            current,
+        ),
+    )
+    request = replace(
+        _protected_open_request(),
+        expected_can_administer_owner_scope=expected,
+    )
+
+    with pytest.raises(
+        owner.ArtifactCommandConflict,
+        match="administration currentness",
+    ):
+        owner.ProtectedArtifactOpenCommand(Factory(session)).execute(request)
+
+    assert session.commits == 0
+    assert session.rollbacks == 1
+    assert session.added == []
+
+
 def test_system_admin_does_not_bypass_acl_denial(monkeypatch) -> None:
     session = RecordingSession()
     document = replace(_document(), allow_member_download=False)
@@ -1264,7 +1403,7 @@ def test_system_admin_does_not_bypass_acl_denial(monkeypatch) -> None:
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: (set(), set()),
+        lambda *_args, **_kwargs: (set(), set(), True),
     )
     decision = _decision(allowed=False, reason="scope_denied")
 
@@ -1274,6 +1413,7 @@ def test_system_admin_does_not_bypass_acl_denial(monkeypatch) -> None:
                 _protected_open_request(),
                 expected_document=document,
                 access_decision=decision,
+                expected_can_administer_owner_scope=True,
                 audit_events=(_event(decision_id=decision.decision_id),),
             )
         )
@@ -1299,7 +1439,7 @@ def test_protected_head_skips_success_evidence_and_rejects_stale_blob(monkeypatc
     monkeypatch.setattr(
         owner,
         "read_effective_document_scope_with_team_ids",
-        lambda *_args, **_kwargs: ({("project", "project-1")}, set()),
+        lambda *_args, **_kwargs: ({("project", "project-1")}, set(), False),
     )
     request = owner.ProtectedArtifactOpenInput(
         expected_document=_document(), expected_version=_version(),
@@ -1309,7 +1449,10 @@ def test_protected_head_skips_success_evidence_and_rejects_stale_blob(monkeypatc
         presented_browser_session_token=BROWSER_SESSION_TOKEN,
         record_success_evidence=False,
         candidate_scope=frozenset({("project", "project-1")}),
-        candidate_team_ids=frozenset(), access_decision=None, audit_events=(),
+        candidate_team_ids=frozenset(),
+        expected_can_administer_owner_scope=False,
+        access_decision=None,
+        audit_events=(),
         observed_at="2026-07-17T00:00:00+00:00",
         read_lease=_read_lease(),
     )

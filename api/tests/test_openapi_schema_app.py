@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "40a6cd6790b537327adbb9f5097b1b97c74d0a73e8017636795ebb5aa44bab5c"
+    "26d362b5da7f38c866b19073c6a7b1b2e821da7eb289a9193b0a1b0a046c6d00"
 )
 
 
@@ -29,6 +29,17 @@ def test_schema_only_app_matches_fixed_openapi_without_runtime_services() -> Non
     assert vars(app.state) == {"_state": {}}
     assert app.openapi() == json.loads(FIXTURE.read_text())
     assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == EXPECTED_FIXTURE_SHA256
+
+
+def test_agent_query_openapi_declares_only_fail_closed_outcomes() -> None:
+    schema = create_openapi_app().openapi()
+    responses = schema["paths"]["/api/v1/agent/queries"]["post"]["responses"]
+
+    assert set(responses) == {"401", "403", "422", "501"}
+    for status_code in ("401", "403", "501"):
+        assert responses[status_code]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/ErrorResponse"
+        }
 
 
 def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
@@ -77,6 +88,10 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
             "anyOf"
         ][0]["enum"]
     ) == {"processing", "completed", "failed_closed"}
+    assert "tag_refs" in schemas["WorkspaceConversationCreateV1"]["properties"]
+    assert "tag_refs" not in schemas["ConversationV1"]["properties"]
+    assert "tag_refs" not in schemas["WorkspaceTurnCreateV1"]["properties"]
+    assert "tag_refs" not in schemas["WorkspaceTurnRetryV1"]["properties"]
     assert "CitationViewerManifest" not in schemas
 
 

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from atlas_production.modules.answer_behavior.public import (
+    AnswerBehaviorOwner,
+    project_answer_behavior,
+)
 from atlas_production.modules.authorization.public import GrantDocumentResourceOwner
 from atlas_production.modules.context_engineering.public import ContextEngineeringReader
 from atlas_production.modules.retrieval.public import KnowledgeToolObservationV1
 from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorOwner,
     TurnModelHistorySummaryV4,
     TurnModelInputV3,
     TurnModelRecentExchangeV3,
@@ -16,7 +19,6 @@ from atlas_production.modules.turn_execution.public import (
 from atlas_production.modules.turn_runtime.public import ExecutionSnapshotV1
 
 from .turn_capability_projection import project_turn_model_capabilities
-from .answer_behavior_projection import project_answer_behavior
 
 
 class PublicOwnerTurnModelInputSource:

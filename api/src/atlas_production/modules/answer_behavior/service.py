@@ -2,23 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
 from atlas_production.modules.identity_access.records import UserRecord
 
-from .public import (
-    AnswerBehaviorError,
-    AnswerBehaviorStatus,
-    AnswerBehaviorUpdateRequest,
-)
-
-
-class AnswerBehaviorRepository(Protocol):
-    def status(self) -> AnswerBehaviorStatus: ...
-
-    def update(
-        self, *, actor_id: str, payload: AnswerBehaviorUpdateRequest
-    ) -> AnswerBehaviorStatus: ...
+from .api_models import AnswerBehaviorStatus, AnswerBehaviorUpdateRequest
+from .contracts import AnswerBehaviorError
+from .ports import AnswerBehaviorRepository
 
 
 class AnswerBehaviorService:

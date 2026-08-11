@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -22,12 +23,26 @@ IMAGE_OVERRIDE = (
     REPOSITORY / "infra" / "docker-compose.portainer-smb.offline-images.yml"
 )
 IMAGE_LOCK = REPOSITORY / "infra" / "portainer-offline-image-lock.json"
+EMBEDDING_MODEL_CONTRACT = (
+    REPOSITORY
+    / "api"
+    / "src"
+    / "atlas_production"
+    / "async_runtime"
+    / "embedding_model_contract.py"
+)
 OFFLINE_RUNBOOK = REPOSITORY / "docs" / "deployment" / "portainer-smb-offline.md"
 SMB_RUNBOOK = REPOSITORY / "docs" / "deployment" / "portainer-smb.md"
 PRODUCTION_NOTICES = REPOSITORY / "THIRD_PARTY_NOTICES.md"
 RENDERER_NOTICES = REPOSITORY / "office-renderer" / "THIRD_PARTY_NOTICES.md"
 COMPOSE_FILES = (BASE, SMB_OVERRIDE, IMAGE_OVERRIDE)
-BUILD_SERVICES = ("api", "plugin-runner", "office-renderer", "web")
+BUILD_SERVICES = (
+    "api",
+    "embedding-model-init",
+    "plugin-runner",
+    "office-renderer",
+    "web",
+)
 VARIABLE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 IMAGE_PREFIX_RE = re.compile(r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*$")
@@ -43,6 +58,32 @@ STANDARD_PROXY_VARIABLES = {
 
 class BundleError(RuntimeError):
     pass
+
+
+def embedding_model_content_digest() -> str:
+    contract = runpy.run_path(str(EMBEDDING_MODEL_CONTRACT))
+    content_digest = contract.get("MODEL_CONTENT_DIGEST")
+    if not isinstance(content_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", content_digest
+    ):
+        raise BundleError("embedding model content digest contract is invalid")
+    return content_digest
+
+
+def validate_embedding_model_reference(
+    model: dict[str, object],
+    *,
+    image_prefix: str,
+    platform: str,
+) -> None:
+    expected = (
+        f"{image_prefix}/embedding-model:{embedding_model_content_digest()}-"
+        f"{platform.replace('/', '-')}"
+    )
+    services = model.get("services", {})
+    initializer = services.get("embedding-model-init", {})
+    if initializer.get("image") != expected:
+        raise BundleError("resolved embedding model image reference is invalid")
 
 
 def compose_interpolations(value: str) -> list[str]:
@@ -345,6 +386,11 @@ def write_bundle(
     )
     docker_environment = docker_command_environment(environment)
     model = resolved_model(environment)
+    validate_embedding_model_reference(
+        model,
+        image_prefix=image_prefix,
+        platform=platform,
+    )
     compose_path = output / "docker-compose.yml"
     compose_path.write_text(
         render_compose_yaml(

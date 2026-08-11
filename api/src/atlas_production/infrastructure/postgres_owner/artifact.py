@@ -175,6 +175,7 @@ class ProtectedArtifactOpenInput:
     record_success_evidence: bool
     candidate_scope: frozenset[tuple[str, str]]
     candidate_team_ids: frozenset[str]
+    expected_can_administer_owner_scope: bool
     access_decision: AccessDecisionRecord | None
     audit_events: tuple[AuditEventRecord, ...]
     observed_at: str
@@ -2341,12 +2342,25 @@ class ProtectedArtifactOpenCommand:
                     if binding.binding_kind in {"owner", "authorization"}
                     and binding.scope_id is not None
                 }
-                resolved_scope, team_ids = read_effective_document_scope_with_team_ids(
+                (
+                    resolved_scope,
+                    team_ids,
+                    current_can_administer_owner_scope,
+                ) = read_effective_document_scope_with_team_ids(
                     session,
                     actor_type=request.actor_type,
                     actor_id=request.actor_id,
                     requested_scope=set(request.candidate_scope),
+                    owner_scope_type=document.scope_type,
+                    owner_scope_id=document.scope_id,
                 )
+                if (
+                    current_can_administer_owner_scope
+                    != request.expected_can_administer_owner_scope
+                ):
+                    raise ArtifactCommandConflict(
+                        "owner scope administration currentness changed"
+                    )
                 allowed = (
                     resolved_scope == set(request.candidate_scope)
                     and team_ids == set(request.candidate_team_ids)
@@ -2354,7 +2368,7 @@ class ProtectedArtifactOpenCommand:
                     and not document.source_download_restricted
                     and (
                         document.allow_member_download
-                        or actor.system_role == "admin"
+                        or current_can_administer_owner_scope
                     )
                 )
                 policy_denial_reason = (
@@ -2363,7 +2377,7 @@ class ProtectedArtifactOpenCommand:
                     else (
                         "member_download_policy"
                         if not document.allow_member_download
-                        and actor.system_role != "admin"
+                        and not current_can_administer_owner_scope
                         else None
                     )
                 )

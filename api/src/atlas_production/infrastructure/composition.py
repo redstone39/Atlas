@@ -11,6 +11,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from atlas_production.async_runtime.vector_index import VectorIndex
+from atlas_production.async_runtime.public import best_effort_dispatch
 from atlas_production.infrastructure.artifact_storage_config_adapter import (
     RootOnlyStorageTargetConfig,
 )
@@ -19,12 +20,12 @@ from atlas_production.infrastructure.artifact_storage_filesystem_adapter import 
 )
 from atlas_production.infrastructure.persistence import artifact_storage as rows
 from atlas_production.infrastructure.postgres_agent_adapter import (
-    PostgresAgentQueryAuthority,
     build_postgres_agent_access,
 )
+from atlas_production.infrastructure.processing_jobs_authorization import (
+    RbacProcessingJobsAuthorization,
+)
 from atlas_production.infrastructure.postgres_audit_adapter import (
-    PostgresAuditConsumerAdapter,
-    PostgresReadAuditWriter,
     build_postgres_audit_adapter,
 )
 from atlas_production.infrastructure.postgres_document_artifact_provider import (
@@ -42,9 +43,15 @@ from atlas_production.infrastructure.postgres_document_upload import (
     NewDocumentUploadJourneyCommand,
     NewDocumentUploadRequestBoundaryCommand,
 )
+from atlas_production.infrastructure.envelope_cipher import AesGcmEnvelopeCipher
+from atlas_production.infrastructure.ldap_directory_gateway import (
+    LdapDirectoryGateway,
+    validate_directory_filter,
+)
 from atlas_production.infrastructure.postgres_identity_adapter import (
     PostgresCurrentPrincipal,
-    build_postgres_identity_access,
+    PostgresIdentityAccessRepository,
+    PostgresInviteScopeGrantAdapter,
 )
 from atlas_production.infrastructure.postgres_model_routing_adapter import PostgresModelRoutingAdapter
 from atlas_production.infrastructure.postgres_ops_adapter import PostgresOpsAdapter
@@ -141,16 +148,33 @@ from atlas_production.infrastructure.postgres_owner.artifact import (
     ProtectedArtifactOpenCommand,
     TargetControlCommand,
 )
+from atlas_production.modules.audit.public import AdminAuditEventReadService
+from atlas_production.modules.agent_runtime.public import AgentRuntimeApplication
 from atlas_production.modules.conversation_audit.service import ConversationAuditService
 from atlas_production.modules.model_routing.service import ModelRoutingService
-from atlas_production.modules.ops.service import OpsReadinessService
+from atlas_production.modules.ops.public import OpsReadinessService
+from atlas_production.modules.identity_access.directory_service import DirectoryIdentityService
 from atlas_production.modules.identity_access.agent_service import AgentAccessService
 from atlas_production.modules.identity_access.service import IdentityAccessService
 from atlas_production.modules.identity_access.team_service import TeamAccessService
-from atlas_production.modules.processing_pipeline.service import ProcessingRegistryService
+from atlas_production.modules.document_intake.public import (
+    DocumentLibraryApplication,
+    DocumentLibraryExceptionTypes,
+    DocumentLifecycleRequestInput,
+    DocumentUploadAccessDenied,
+    DocumentUploadReplayConflict,
+    DocumentUploadUnauthenticated,
+)
+from atlas_production.modules.processing_pipeline.public import (
+    DocumentLifecycleDenied,
+    DocumentLifecycleProcessingAcceptance,
+    DocumentProcessingCurrentnessConflict,
+    ProcessingJobsApplication,
+    ProcessingRegistryService,
+)
 from atlas_production.modules.project_governance.service import ProjectGovernanceService
 from atlas_production.modules.workspace_turn.public import WorkspaceTurnApplication
-from atlas_production.modules.turn_execution.service import AnswerBehaviorService
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorService
 from atlas_production.providers import default_provider_adapter_factory
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
 from atlas_production.modules.artifact_storage.records import (
@@ -168,25 +192,28 @@ class ApiComposition:
 
     current_principal: PostgresCurrentPrincipal
     identity_access: IdentityAccessService
+    directory_identity: DirectoryIdentityService
     agent_access: AgentAccessService
-    agent_query_authority: PostgresAgentQueryAuthority
+    agent_runtime: AgentRuntimeApplication
     team_access: TeamAccessService
     project_governance: ProjectGovernanceService
     processing_registry: ProcessingRegistryService
     document_intake: PostgresDocumentIntakeAdapter
     document_processing: PostgresDocumentProcessingAdapter
+    document_library: DocumentLibraryApplication
+    processing_jobs: ProcessingJobsApplication
     model_routing: ModelRoutingService
     answer_behavior: AnswerBehaviorService
     ops_readiness: OpsReadinessService
     conversation_audit: ConversationAuditService
     workspace_turn: WorkspaceTurnApplication
-    audit_reader: PostgresAuditConsumerAdapter
-    audit_writer: PostgresReadAuditWriter
+    admin_audit_events: AdminAuditEventReadService
     artifact_storage: PostgresArtifactStorageAdapter
     protected_originals: PostgresProtectedOriginalJourneyProvider
     document_uploads: PostgresDocumentUploadJourneyProvider
     document_restore_proofs: PostgresDocumentRestoreProofProvider
     turn_execution_carrier: ThreadTurnCarrier
+    turn_resource_release_reconciler: TurnResourceReleaseReconciler
     turn_lease_failure_sweeper: TurnLeaseFailureSweeper
 
 
@@ -204,6 +231,13 @@ class _CredentialEncryptionProbe:
             return True
         except CredentialCryptoError:
             return False
+
+class _EnvironmentDirectoryCipher:
+    def encrypt(self, **kwargs):
+        return AesGcmEnvelopeCipher.from_environment().encrypt(**kwargs)
+
+    def decrypt(self, secret, **kwargs):
+        return AesGcmEnvelopeCipher.from_environment().decrypt(secret, **kwargs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,8 +337,33 @@ def build_api_composition(
     filesystem = _active_artifact_filesystem(selected)
     artifact_storage = _artifact_adapter(selected, filesystem)
 
-    identity_access, current_principal = build_postgres_identity_access(
-        session_factory
+    identity_repository = PostgresIdentityAccessRepository(session_factory)
+    current_principal = PostgresCurrentPrincipal(identity_repository)
+    directory_cipher = _EnvironmentDirectoryCipher()
+
+    def directory_custom_ca(connection_id: str) -> str | None:
+        secret = identity_repository.get_directory_secret(
+            connection_id, "custom_ca"
+        )
+        if secret is None:
+            return None
+        return directory_cipher.decrypt(
+            secret,
+            domain="identity_directory_custom_ca",
+            owner_id=connection_id,
+            owner_kind="directory_connection",
+        )
+
+    directory_identity = DirectoryIdentityService(
+        identity_repository,
+        LdapDirectoryGateway(custom_ca_resolver=directory_custom_ca),
+        directory_cipher,
+        validate_directory_filter,
+    )
+    identity_access = IdentityAccessService(
+        identity_repository,
+        PostgresInviteScopeGrantAdapter(identity_repository),
+        directory_identity,
     )
     agent_access, agent_query_authority = build_postgres_agent_access(
         session_factory
@@ -312,6 +371,7 @@ def build_api_composition(
     team_access = build_postgres_team_access(session_factory)
     project_governance = build_postgres_project_governance(session_factory)
     audit_reader, audit_writer = build_postgres_audit_adapter(session_factory)
+    agent_runtime = AgentRuntimeApplication(agent_query_authority, audit_writer)
 
     processing_registry = ProcessingRegistryService(
         PostgresProcessingAdapter(session_factory),
@@ -320,6 +380,12 @@ def build_api_composition(
     )
     document_intake = PostgresDocumentIntakeAdapter(session_factory)
     document_processing = PostgresDocumentProcessingAdapter(session_factory)
+    processing_jobs = ProcessingJobsApplication(
+        document_processing,
+        document_intake,
+        RbacProcessingJobsAuthorization(),
+        best_effort_dispatch,
+    )
     model_routing = ModelRoutingService(
         PostgresModelRoutingAdapter(
             session_factory,
@@ -428,13 +494,14 @@ def build_api_composition(
             session_factory
         ),
     )
-    TurnResourceReleaseReconciler(
+    turn_resource_release_reconciler = TurnResourceReleaseReconciler(
         runtime=strict_runtime,
         authorization=strict_authorization,
         retrieval=strict_retrieval,
         generation_retention=generation_retention,
         contexts=strict_contexts,
-    ).start()
+    )
+    turn_resource_release_reconciler.start()
 
     conversation_audit = ConversationAuditService(workspace_turn, audit_writer)
 
@@ -449,6 +516,22 @@ def build_api_composition(
     )
     document_restore_proofs = PostgresDocumentRestoreProofProvider(
         session_factory, filesystem
+    )
+    document_library = DocumentLibraryApplication(
+        document_intake,
+        document_processing,
+        document_uploads,
+        document_restore_proofs,
+        DocumentLifecycleRequestInput,
+        DocumentLifecycleProcessingAcceptance,
+        DocumentLibraryExceptionTypes(
+            DocumentUploadAccessDenied,
+            DocumentUploadUnauthenticated,
+            DocumentUploadReplayConflict,
+            DocumentLifecycleDenied,
+            DocumentProcessingCurrentnessConflict,
+        ),
+        best_effort_dispatch,
     )
     ops_readiness = OpsReadinessService(
         PostgresOpsAdapter(
@@ -465,19 +548,20 @@ def build_api_composition(
         current_principal=current_principal,
         identity_access=identity_access,
         agent_access=agent_access,
-        agent_query_authority=agent_query_authority,
+        directory_identity=directory_identity,
+        agent_runtime=agent_runtime,
         team_access=team_access,
         project_governance=project_governance,
         processing_registry=processing_registry,
         document_intake=document_intake,
         document_processing=document_processing,
+        processing_jobs=processing_jobs,
         model_routing=model_routing,
         answer_behavior=answer_behavior,
         ops_readiness=ops_readiness,
         conversation_audit=conversation_audit,
         workspace_turn=workspace_turn,
-        audit_reader=audit_reader,
-        audit_writer=audit_writer,
+        admin_audit_events=AdminAuditEventReadService(audit_reader, audit_writer),
         artifact_storage=artifact_storage,
         protected_originals=PostgresProtectedOriginalJourneyProvider(
             session_factory
@@ -485,6 +569,8 @@ def build_api_composition(
         document_uploads=document_uploads,
         document_restore_proofs=document_restore_proofs,
         turn_execution_carrier=turn_execution_carrier,
+        turn_resource_release_reconciler=turn_resource_release_reconciler,
+        document_library=document_library,
         turn_lease_failure_sweeper=turn_lease_failure_sweeper,
     )
 

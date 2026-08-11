@@ -15,7 +15,14 @@ from atlas_production.modules.identity_access.records import (
     UserRecord,
 )
 from atlas_production.modules.project_governance.records import ProjectRecord
-from atlas_production.rbac import actor_team_tiers, effective_document_scope
+from atlas_production.rbac import (
+    actor_team_tiers,
+    direct_team_role,
+    effective_document_scope,
+    is_system_admin,
+    resolve_access,
+    team_role_covers,
+)
 
 from .document_intake import AtlasDocumentRow, AtlasDocumentTagRow
 from .identity_access import (
@@ -88,11 +95,13 @@ def read_effective_document_scope(
 ) -> set[tuple[str, str]]:
     """Resolve current Project/Team scope without publishing shared state."""
 
-    scope, _team_ids = read_effective_document_scope_with_team_ids(
-        session,
-        actor_type=actor_type,
-        actor_id=actor_id,
-        requested_scope=requested_scope,
+    scope, _team_ids, _can_administer_owner_scope = (
+        read_effective_document_scope_with_team_ids(
+            session,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            requested_scope=requested_scope,
+        )
     )
     return scope
 
@@ -103,8 +112,12 @@ def read_effective_document_scope_with_team_ids(
     actor_type: str,
     actor_id: str,
     requested_scope: set[tuple[str, str]] | None = None,
-) -> tuple[set[tuple[str, str]], set[str]]:
-    """Resolve current scope plus exact Team ancestors used by RBAC."""
+    owner_scope_type: str | None = None,
+    owner_scope_id: str | None = None,
+) -> tuple[set[tuple[str, str]], set[str], bool]:
+    """Resolve current scope, exact Team ancestors, and owner administration."""
+    if (owner_scope_type is None) != (owner_scope_id is None):
+        raise ValueError("owner scope type and id must be provided together")
 
     actor_row = session.get(AtlasUserRow, actor_id)
     if (
@@ -112,7 +125,7 @@ def read_effective_document_scope_with_team_ids(
         or actor_row.actor_type != actor_type
         or not actor_row.active
     ):
-        return set(), set()
+        return set(), set(), False
     actor = _record(actor_row, UserRecord)
     state = RequestAuthorizationState(users={actor.actor_id: actor})
     requested_project_ids = (
@@ -251,7 +264,28 @@ def read_effective_document_scope_with_team_ids(
         if actor.system_role == "admin"
         else set(actor_team_tiers(state, actor_type, actor_id))
     )
-    return resolved_scope, effective_team_ids
+    can_administer_owner_scope = False
+    if owner_scope_type is not None and owner_scope_id is not None:
+        can_administer_owner_scope = is_system_admin(
+            state, actor_type, actor_id
+        ) or (
+            owner_scope_type == "team"
+            and team_role_covers(
+                direct_team_role(state, actor_type, actor_id, owner_scope_id),
+                "admin",
+            )
+        ) or (
+            owner_scope_type == "project"
+            and resolve_access(
+                state,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                project_id=owner_scope_id,
+                action="permission_manage",
+                persist=False,
+            ).allowed
+        )
+    return resolved_scope, effective_team_ids, can_administer_owner_scope
 
 
 def lock_current_retrieval_scope(

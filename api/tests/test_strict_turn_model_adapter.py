@@ -22,6 +22,7 @@ from atlas_production.modules.model_routing.public import (
 from atlas_production.modules.model_routing.provider_contracts import (
     validate_json_schema_value,
 )
+from atlas_production.modules.answer_behavior.public import AnswerBehaviorInputV1
 from atlas_production.modules.retrieval.public import (
     DiscoverRelevantDocumentsV1,
     KnowledgeCatalogPageV1,
@@ -34,7 +35,6 @@ from atlas_production.modules.retrieval.public import (
     VisualInspectionResultV1,
 )
 from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorInputV1,
     DeepReasoningContractError,
     FinalizeAnswerV1,
     GateCorrectionFeedbackV1,

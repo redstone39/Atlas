@@ -2,6 +2,7 @@ x-atlas-worker: &atlas-worker
   build:
     context: ..
     dockerfile: api/Dockerfile
+    target: api
   restart: unless-stopped
   read_only: true
   tmpfs:
@@ -51,6 +52,7 @@ services:
     build:
       context: ..
       dockerfile: api/Dockerfile
+      target: api
     restart: "no"
     read_only: true
     tmpfs:
@@ -74,10 +76,37 @@ services:
       - -m
       - atlas_production.infrastructure.local_pilot_init
 
+  embedding-model-init:
+    image: atlas-embedding-model:e052ba4b733767ddea9fd3e6640ff41a0a83599baea0b0eadd97189d92f2d396
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+      target: embedding-model
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ATLAS_FASTEMBED_CACHE: /var/lib/atlas-fastembed
+      ATLAS_EMBEDDING_OFFLINE: "true"
+      HF_HOME: /var/lib/atlas-fastembed/huggingface
+      HF_HUB_CACHE: /var/lib/atlas-fastembed/huggingface/hub
+      HF_XET_CACHE: /var/lib/atlas-fastembed/huggingface/xet
+      XDG_CACHE_HOME: /var/lib/atlas-fastembed/xdg
+      HF_HUB_DISABLE_XET: "1"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - atlas-production-fastembed:/var/lib/atlas-fastembed
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.async_runtime.offline_embedding_cache
+
   api:
     build:
       context: ..
       dockerfile: api/Dockerfile
+      target: api
     environment:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
       ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
@@ -103,6 +132,8 @@ services:
       - "127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}:8002"
     depends_on:
       artifact-storage-init:
+        condition: service_completed_successfully
+      embedding-model-init:
         condition: service_completed_successfully
     volumes:
       - atlas-production-plugin-packages:/var/lib/atlas/plugins
@@ -209,6 +240,8 @@ services:
     depends_on:
       artifact-storage-init:
         condition: service_completed_successfully
+      embedding-model-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       plugin-runner:
@@ -234,6 +267,8 @@ services:
       - atlas-production-fastembed:/var/lib/atlas-fastembed
     depends_on:
       artifact-storage-init:
+        condition: service_completed_successfully
+      embedding-model-init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy

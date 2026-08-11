@@ -97,3 +97,68 @@ def test_prepare_tokenizer_cache_restores_process_state_after_failure(
 
     assert os.environ.get("TIKTOKEN_CACHE_DIR") == original_cache
     assert offline_tokenizer_cache.tiktoken_load.read_file is original_reader
+
+
+def test_main_download_prepares_cache_and_prints_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_prepare(*, cache_dir: Path, download: bool) -> dict[str, object]:
+        observed.update(cache_dir=cache_dir, download=download)
+        return {"status": "succeeded", "mode": "download_and_verify"}
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        offline_tokenizer_cache, "prepare_tokenizer_cache", fake_prepare
+    )
+    monkeypatch.setattr("sys.argv", ["offline_tokenizer_cache", "--download"])
+
+    assert offline_tokenizer_cache.main() == 0
+    assert observed == {"cache_dir": tmp_path / "cache", "download": True}
+    assert (
+        capsys.readouterr().out
+        == '{"mode": "download_and_verify", "status": "succeeded"}\n'
+    )
+
+
+def test_main_without_flag_verifies_offline_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_prepare(*, cache_dir: Path, download: bool) -> dict[str, object]:
+        observed.update(cache_dir=cache_dir, download=download)
+        return {"status": "succeeded", "mode": "offline_verify"}
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        offline_tokenizer_cache, "prepare_tokenizer_cache", fake_prepare
+    )
+    monkeypatch.setattr("sys.argv", ["offline_tokenizer_cache"])
+
+    assert offline_tokenizer_cache.main() == 0
+    assert observed == {"cache_dir": tmp_path / "cache", "download": False}
+    assert capsys.readouterr().out == '{"mode": "offline_verify", "status": "succeeded"}\n'
+
+
+def test_main_failure_prints_only_safe_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        offline_tokenizer_cache,
+        "prepare_tokenizer_cache",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("sensitive detail")),
+    )
+    monkeypatch.setattr("sys.argv", ["offline_tokenizer_cache"])
+
+    assert offline_tokenizer_cache.main() == 1
+    assert (
+        capsys.readouterr().out
+        == '{"status": "failed", "error_code": "offline_tokenizer_cache_invalid"}\n'
+    )

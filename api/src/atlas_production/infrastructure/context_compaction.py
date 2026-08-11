@@ -17,7 +17,8 @@ from atlas_production.infrastructure.history_authority import (
     history_exchange_payload,
     history_summary_payload,
 )
-from atlas_production.infrastructure.answer_behavior_projection import (
+from atlas_production.modules.answer_behavior.public import (
+    AnswerBehaviorOwner,
     project_answer_behavior,
 )
 from atlas_production.infrastructure.turn_capability_projection import (
@@ -46,7 +47,6 @@ from atlas_production.modules.model_routing.public import (
     require_provider_wire_within_limits,
 )
 from atlas_production.modules.turn_execution.public import (
-    AnswerBehaviorOwner,
     TurnModelHistorySummaryV4,
     TurnModelInputV3,
     TurnModelRecentExchangeV3,

@@ -10,13 +10,13 @@ from typing import Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from atlas_production.infrastructure.persistence.turn_execution import (
+from atlas_production.infrastructure.persistence.answer_behavior import (
     AtlasTurnAnswerBehaviorRevisionRow,
 )
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
-from atlas_production.modules.turn_execution.public import (
+from atlas_production.modules.answer_behavior.public import (
     AnswerBehaviorError,
     AnswerBehaviorRevisionV1,
     AnswerBehaviorStatus,

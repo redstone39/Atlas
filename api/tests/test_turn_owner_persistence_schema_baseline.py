@@ -12,7 +12,7 @@ from atlas_production.infrastructure.persistence import (
     retrieval,
     result_governance,
     turn_runtime,
-    turn_execution,
+    answer_behavior,
 )
 
 
@@ -53,10 +53,24 @@ def test_development_baseline_registers_every_owner_table() -> None:
         retrieval.OWNER_TABLES,
         result_governance.TURN_RESULT_GOVERNANCE_OWNER_TABLES,
         turn_runtime.OWNER_TABLES,
-        turn_execution.OWNER_TABLES,
+        answer_behavior.OWNER_TABLES,
     )
     assert baseline.ATR020_OWNER_TABLES == expected
     assert {table.name for table in baseline._atr020_tables()} == expected
+
+
+def test_conversation_scope_tags_are_normalized_owner_state() -> None:
+    table = conversation.AtlasTurnConversationScopeTagRow.__table__
+    assert table.name == "atlas_turn_conversation_scope_tags"
+    assert [column.name for column in table.primary_key.columns] == [
+        "conversation_id",
+        "tag_type",
+        "tag_id",
+    ]
+    assert next(iter(table.c.conversation_id.foreign_keys)).ondelete == "CASCADE"
+    assert {
+        constraint.name for constraint in table.constraints
+    } >= {"ck_atlas_turn_conversation_scope_tag_type"}
 
 
 def test_development_baseline_remains_the_single_root_revision() -> None:

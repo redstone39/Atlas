@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from secrets import token_urlsafe
 from typing import Callable
 
 from sqlalchemy.orm import Session
@@ -41,6 +42,12 @@ from atlas_production.modules.identity_access.ports import (
     IdentityAccessRepository,
     InviteScopeGrantPort,
 )
+from atlas_production.modules.identity_access.directory_ports import DirectoryRepository
+from atlas_production.modules.identity_access.directory_records import (
+    DirectoryConnectionRecord,
+    DirectorySecretRecord,
+    ExternalIdentityRecord,
+)
 from atlas_production.modules.identity_access.records import (
     PermissionGrantRecord,
     TeamMembershipRecord,
@@ -73,6 +80,26 @@ class _IdentityMutationBuffer:
     original_users: dict[str, UserRecord | None] = field(default_factory=dict)
     invites: dict[str, UserInviteRecord] = field(default_factory=dict)
     original_invites: dict[str, UserInviteRecord | None] = field(default_factory=dict)
+    directory_connections: dict[str, DirectoryConnectionRecord] = field(
+        default_factory=dict
+    )
+    original_directory_connections: dict[
+        str, DirectoryConnectionRecord | None
+    ] = field(default_factory=dict)
+    directory_secrets: dict[tuple[str, str], DirectorySecretRecord] = field(
+        default_factory=dict
+    )
+    original_directory_secrets: dict[
+        tuple[str, str], DirectorySecretRecord | None
+    ] = field(default_factory=dict)
+    deleted_directory_secrets: set[tuple[str, str]] = field(default_factory=set)
+    external_identities: dict[str, ExternalIdentityRecord] = field(
+        default_factory=dict
+    )
+    original_external_identities: dict[
+        str, ExternalIdentityRecord | None
+    ] = field(default_factory=dict)
+    sessions: list[tuple[str, str]] = field(default_factory=list)
     team_membership: TeamMembershipRecord | None = None
     expected_team_membership: TeamMembershipRecord | None = None
     project_grant: PermissionGrantRecord | None = None
@@ -81,7 +108,7 @@ class _IdentityMutationBuffer:
     committed: bool = False
 
 
-class PostgresIdentityAccessRepository(IdentityAccessRepository):
+class PostgresIdentityAccessRepository(DirectoryRepository):
     """Exact route-facing Identity port backed by named PostgreSQL owners."""
 
     def __init__(
@@ -135,6 +162,22 @@ class PostgresIdentityAccessRepository(IdentityAccessRepository):
             yield
         finally:
             self._buffer.reset(token)
+    @contextmanager
+    def directory_mutation(
+        self,
+        owner_key: str,
+        *,
+        actor_ids: tuple[str, ...] = (),
+        authorization_actor_ids: tuple[str, ...] = (),
+        connection_ids: tuple[str, ...] = (),
+    ) -> AbstractContextManager[None]:
+        del connection_ids
+        with self.identity_mutation(
+            owner_key,
+            actor_ids=actor_ids,
+            authorization_actor_ids=authorization_actor_ids,
+        ):
+            yield
 
     def actor_for_token(self, token: str | None) -> UserRecord | None:
         return self.owner.actor_for_token(token)
@@ -207,6 +250,149 @@ class PostgresIdentityAccessRepository(IdentityAccessRepository):
         if user.actor_id not in buffer.original_users:
             buffer.original_users[user.actor_id] = self.owner.get_user(user.actor_id)
         buffer.users[user.actor_id] = replace(user)
+    def list_directory_connections(self) -> list[DirectoryConnectionRecord]:
+        connections = {
+            item.connection_id: item
+            for item in self.owner.list_directory_connections()
+        }
+        buffer = self._buffer.get()
+        if buffer is not None:
+            connections.update(buffer.directory_connections)
+        return [
+            replace(connections[key])
+            for key in sorted(
+                connections,
+                key=lambda key: (connections[key].priority, key),
+            )
+        ]
+
+    def get_directory_connection(
+        self, connection_id: str
+    ) -> DirectoryConnectionRecord | None:
+        buffer = self._buffer.get()
+        if buffer is not None and connection_id in buffer.directory_connections:
+            return replace(buffer.directory_connections[connection_id])
+        record = self.owner.get_directory_connection(connection_id)
+        if buffer is not None:
+            buffer.original_directory_connections.setdefault(connection_id, record)
+        return replace(record) if record is not None else None
+
+    def put_directory_connection(self, connection: DirectoryConnectionRecord) -> None:
+        buffer = self._require_buffer()
+        if connection.connection_id not in buffer.original_directory_connections:
+            buffer.original_directory_connections[
+                connection.connection_id
+            ] = self.owner.get_directory_connection(connection.connection_id)
+        buffer.directory_connections[connection.connection_id] = replace(connection)
+
+    def expect_directory_connection(
+        self, connection: DirectoryConnectionRecord
+    ) -> None:
+        buffer = self._require_buffer()
+        buffer.original_directory_connections.setdefault(
+            connection.connection_id,
+            replace(connection),
+        )
+
+    def get_directory_secret(
+        self, connection_id: str, secret_kind: str
+    ) -> DirectorySecretRecord | None:
+        key = (connection_id, secret_kind)
+        buffer = self._buffer.get()
+        if buffer is not None:
+            if key in buffer.deleted_directory_secrets:
+                return None
+            if key in buffer.directory_secrets:
+                return replace(buffer.directory_secrets[key])
+        record = self.owner.get_directory_secret(connection_id, secret_kind)
+        if buffer is not None:
+            buffer.original_directory_secrets.setdefault(key, record)
+        return replace(record) if record is not None else None
+
+    def put_directory_secret(self, secret: DirectorySecretRecord) -> None:
+        buffer = self._require_buffer()
+        key = (secret.connection_id, secret.secret_kind)
+        if key not in buffer.original_directory_secrets:
+            buffer.original_directory_secrets[key] = self.owner.get_directory_secret(*key)
+        buffer.deleted_directory_secrets.discard(key)
+        buffer.directory_secrets[key] = replace(secret)
+
+    def expect_directory_secret(self, secret: DirectorySecretRecord) -> None:
+        buffer = self._require_buffer()
+        buffer.original_directory_secrets.setdefault(
+            (secret.connection_id, secret.secret_kind),
+            replace(secret),
+        )
+
+    def delete_directory_secret(self, connection_id: str, secret_kind: str) -> None:
+        buffer = self._require_buffer()
+        key = (connection_id, secret_kind)
+        if key not in buffer.original_directory_secrets:
+            buffer.original_directory_secrets[key] = self.owner.get_directory_secret(*key)
+        buffer.directory_secrets.pop(key, None)
+        buffer.deleted_directory_secrets.add(key)
+
+    def get_external_identity(
+        self, actor_id: str
+    ) -> ExternalIdentityRecord | None:
+        buffer = self._buffer.get()
+        if buffer is not None and actor_id in buffer.external_identities:
+            return replace(buffer.external_identities[actor_id])
+        record = self.owner.get_external_identity(actor_id)
+        if buffer is not None:
+            buffer.original_external_identities.setdefault(actor_id, record)
+        return replace(record) if record is not None else None
+
+    def get_external_identity_by_subject(
+        self, connection_id: str, external_subject: str
+    ) -> ExternalIdentityRecord | None:
+        buffer = self._buffer.get()
+        if buffer is not None:
+            matches = [
+                item
+                for item in buffer.external_identities.values()
+                if item.connection_id == connection_id
+                and item.external_subject == external_subject
+            ]
+            if len(matches) == 1:
+                return replace(matches[0])
+        record = self.owner.get_external_identity_by_subject(
+            connection_id, external_subject
+        )
+        if record is not None and buffer is not None:
+            buffer.original_external_identities.setdefault(record.actor_id, record)
+        return replace(record) if record is not None else None
+
+    def list_external_identities(self) -> list[ExternalIdentityRecord]:
+        identities = {
+            item.actor_id: item
+            for item in self.owner.list_external_identities()
+        }
+        buffer = self._buffer.get()
+        if buffer is not None:
+            identities.update(buffer.external_identities)
+        return [replace(identities[key]) for key in sorted(identities)]
+
+    def put_external_identity(self, identity: ExternalIdentityRecord) -> None:
+        buffer = self._require_buffer()
+        if identity.actor_id not in buffer.original_external_identities:
+            buffer.original_external_identities[
+                identity.actor_id
+            ] = self.owner.get_external_identity(identity.actor_id)
+        buffer.external_identities[identity.actor_id] = replace(identity)
+
+    def expect_external_identity(self, identity: ExternalIdentityRecord) -> None:
+        buffer = self._require_buffer()
+        buffer.original_external_identities.setdefault(
+            identity.actor_id,
+            replace(identity),
+        )
+
+    def stage_session(self, actor_id: str) -> str:
+        buffer = self._require_buffer()
+        token = token_urlsafe(24)
+        buffer.sessions.append((token, actor_id))
+        return token
 
     def issue_session(self, actor_id: str) -> str:
         return self.issue_session_command.execute(actor_id)
@@ -378,6 +564,39 @@ class PostgresIdentityAccessRepository(IdentityAccessRepository):
                             (actor_id, buffer.original_users.get(actor_id))
                             for actor_id in buffer.users
                         ),
+                        sessions=tuple(buffer.sessions),
+                        directory_connections=tuple(
+                            buffer.directory_connections.values()
+                        ),
+                        expected_directory_connections=tuple(
+                            (connection_id, expected)
+                            for connection_id, expected in (
+                                buffer.original_directory_connections.items()
+                            )
+                        ),
+                        directory_secrets=tuple(buffer.directory_secrets.values()),
+                        expected_directory_secrets=tuple(
+                            (connection_id, secret_kind, expected)
+                            for (
+                                connection_id,
+                                secret_kind,
+                            ), expected in buffer.original_directory_secrets.items()
+                        ),
+                        deleted_directory_secrets=tuple(
+                            sorted(buffer.deleted_directory_secrets)
+                        ),
+                        external_identities=tuple(
+                            buffer.external_identities.values()
+                        ),
+                        expected_external_identities=tuple(
+                            (actor_id, expected)
+                            for actor_id, expected in (
+                                buffer.original_external_identities.items()
+                            )
+                        ),
+                        reject_directory_alias_conflicts=bool(
+                            buffer.external_identities
+                        ),
                         invite_transitions=tuple(
                             InviteTransition(
                                 record=invite,
@@ -443,6 +662,12 @@ class PostgresIdentityAccessRepository(IdentityAccessRepository):
                     'invite.already_pending_for_email',
                     409,
                     rejection.event_id,
+                ) from exc
+            if buffer.owner_key.startswith("identity:directory-"):
+                raise IdentityAccessError(
+                    "directory_conflict",
+                    "directory.concurrent_change",
+                    409,
                 ) from exc
             raise IdentityAccessError(
                 "admin_action_rejected",

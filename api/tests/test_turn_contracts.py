@@ -320,6 +320,42 @@ def test_conversation_response_language_defaults_and_rejects_unknown_values() ->
         ConversationCreateV1.model_validate({"response_language": "ja"})
 
 
+def test_conversation_scope_tags_are_create_only_canonical_and_unique() -> None:
+    command = ConversationCreateV1.model_validate(
+        {
+            "tag_refs": [
+                {"tag_type": "team", "tag_id": "team-b"},
+                {"tag_type": "project", "tag_id": "project-a"},
+            ]
+        }
+    )
+    assert [
+        (ref.tag_type, ref.tag_id) for ref in command.tag_refs
+    ] == [("project", "project-a"), ("team", "team-b")]
+
+    with pytest.raises(ValidationError):
+        ConversationCreateV1.model_validate(
+            {
+                "tag_refs": [
+                    {"tag_type": "team", "tag_id": "team-a"},
+                    {"tag_type": "team", "tag_id": "team-a"},
+                ]
+            }
+        )
+    with pytest.raises(ValidationError):
+        ConversationCreateV1.model_validate(
+            {"tag_refs": [{"tag_type": "document", "tag_id": "document-a"}]}
+        )
+    with pytest.raises(ValidationError):
+        ConversationCreateV1.model_validate(
+            {
+                "tag_refs": [
+                    {"tag_type": "team", "tag_id": "team-a", "label": "forbidden"}
+                ]
+            }
+        )
+
+
 def test_model_route_policy_v4_api_requires_and_round_trips_execution_limits() -> None:
     payload = {
         "route_id": "route-v4",

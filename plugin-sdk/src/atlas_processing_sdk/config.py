@@ -31,7 +31,7 @@ def login_and_store(base_url: str, email: str, password: str) -> dict[str, str]:
         raise AdminClientError("email and password are required")
     request = urllib.request.Request(
         base_url.rstrip("/") + "/api/v1/auth/sessions",
-        data=json.dumps({"email": email, "password": password}, separators=(",", ":")).encode(),
+        data=json.dumps({"identifier": email, "password": password}, separators=(",", ":")).encode(),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
