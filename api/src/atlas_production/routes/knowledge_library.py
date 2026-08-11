@@ -49,6 +49,7 @@ def list_knowledge_documents(request: Request) -> KnowledgeDocumentListResult | 
         actor_type=actor.actor_type,
         actor_id=actor.actor_id,
         presented_browser_session_token=session_token(request) or "",
+        record_workspace_query_decisions=True,
     )
     authorized_scope = effective_document_scope(
         projection.authorization_state,

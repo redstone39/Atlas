@@ -111,6 +111,7 @@ services:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
       ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
       ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
+      ATLAS_CREDENTIAL_MASTER_KEYRING: ${ATLAS_CREDENTIAL_MASTER_KEYRING:-}
       ATLAS_PLUGIN_RUNNER_URL: http://plugin-runner:8013
       ATLAS_OFFICE_RENDERER_URL: http://office-renderer:8014
       ATLAS_REDIS_URL: redis://redis:6379/0
@@ -210,7 +211,7 @@ services:
       redis:
         condition: service_healthy
     command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.dispatch", "--loglevel=INFO", "--concurrency=1"]
-    mem_limit: 256m
+    mem_limit: 512m
 
   celery-processing:
     <<: *atlas-worker
@@ -218,6 +219,7 @@ services:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
       ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
       ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
+      ATLAS_CREDENTIAL_MASTER_KEYRING: ${ATLAS_CREDENTIAL_MASTER_KEYRING:-}
       ATLAS_REDIS_URL: redis://redis:6379/0
       ATLAS_PDF_MAX_PAGES: ${ATLAS_PDF_MAX_PAGES:-3000}
       ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS: ${ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS-60}
@@ -304,7 +306,7 @@ services:
       redis:
         condition: service_healthy
     command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
-    mem_limit: 256m
+    mem_limit: 512m
 
   web:
     build:

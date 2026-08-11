@@ -11,6 +11,7 @@ import {
   MessageSources,
   sliceCodePoints,
 } from "./features/workspace/WorkspaceFeature";
+import { DirectoryAdministrationFeature } from "./features/directory-administration";
 import { sessionQueryClient } from "./shared/session-query-client";
 import { THEME_STORAGE_KEY } from "./shared/theme";
 import {
@@ -3232,6 +3233,52 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Request failed.")).not.toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("/admin/directory clears accepted secrets before a projection refresh failure", async () => {
+    mockApi(adminSession, readyReadiness);
+    const onRefresh = vi.fn().mockRejectedValue(new Error("projection refresh failed"));
+    render(
+      <DirectoryAdministrationFeature
+        onNotice={vi.fn()}
+        onRefresh={onRefresh}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Directory sources" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add directory" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Display name"), {
+      target: { value: "Refresh Failure AD" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Host"), {
+      target: { value: "ad.example.test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Bind DN"), {
+      target: { value: "CN=Atlas,OU=Services,DC=example,DC=test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Bind password"), {
+      target: { value: "accepted-secret-canary" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("User base DN"), {
+      target: { value: "OU=People,DC=example,DC=test" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Custom CA certificate (PEM)"), {
+      target: { value: "-----BEGIN CERTIFICATE-----\naccepted-ca-canary" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save directory" }));
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("accepted-secret-canary")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/accepted-ca-canary/)).not.toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.filter(
+        ([input, init]) =>
+          String(input) === "/api/v1/admin/directory-connections" &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
   });
 
   it("/admin/directory creates, tests, searches, imports, and exposes read-only directory profiles", async () => {

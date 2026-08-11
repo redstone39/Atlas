@@ -642,6 +642,7 @@ class PostgresDocumentIntakeAdapter:
         presented_browser_session_token: str,
         document_id: str | None = None,
         include_events: bool = False,
+        record_workspace_query_decisions: bool = False,
     ) -> DocumentLibraryRequestProjection:
         """Read list/detail/events facts from one request-bounded Session."""
 
@@ -840,6 +841,19 @@ class PostgresDocumentIntakeAdapter:
                 actor_id=actor_id,
                 action="read_original",
             )
+            if record_workspace_query_decisions:
+                writer = AccessDecisionWriter(session)
+                for project_id in sorted(project_ids):
+                    writer.append(
+                        resolve_access(
+                            authorization_state,
+                            actor_type=actor_type,
+                            actor_id=actor_id,
+                            project_id=project_id,
+                            action="workspace_query",
+                            persist=False,
+                        )
+                    )
             processing_identity_ids = {
                 document.processing_identity_id
                 for document in documents
@@ -1035,11 +1049,14 @@ class PostgresDocumentIntakeAdapter:
                     download_available=download,
                     events=tuple(grouped_events[document.document_id]),
                 )
-            return DocumentLibraryRequestProjection(
+            projection = DocumentLibraryRequestProjection(
                 authenticated_actor=actor,
                 items=tuple(project(document) for document in documents),
                 authorization_state=authorization_state,
             )
+            if record_workspace_query_decisions:
+                session.commit()
+            return projection
 
     def capture_upload_authority(
         self,

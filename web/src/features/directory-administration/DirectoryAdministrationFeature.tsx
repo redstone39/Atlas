@@ -178,9 +178,9 @@ export function DirectoryAdministrationFeature({
           toast.success(message);
         }
       }
+      onSuccess?.();
       await refreshConnections(false);
       await onRefresh();
-      onSuccess?.();
     } catch (error) {
       const message = error instanceof Error ? error.message : t("admin.actionFailed");
       setActionError(message);

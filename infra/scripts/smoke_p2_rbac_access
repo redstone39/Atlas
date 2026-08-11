@@ -117,14 +117,35 @@ api_post "/api/v1/admin/projects" \
   "{\"project_id\":\"${project_id}\",\"name\":\"${project_name_label}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}" >/dev/null
 
 printf 'Atlas contextual RBAC smoke fixture.\n' >"$fixture_file"
-curl -fsS -b "$cookie_file" -c "$cookie_file" \
-  -F "document_id=${document_id}" \
-  -F "scope_type=project" \
-  -F "scope_id=${project_id}" \
-  -F "allow_member_download=true" \
-  -F "idempotency_key=upload-${document_id}" \
-  -F "file=@${fixture_file};filename=rbac-smoke.txt;type=text/plain" \
-  "${api_url}/api/v1/admin/document-library" >/dev/null
+upload="$(
+  curl -fsS -b "$cookie_file" -c "$cookie_file" \
+    -F "document_id=${document_id}" \
+    -F "scope_type=project" \
+    -F "scope_id=${project_id}" \
+    -F "allow_member_download=true" \
+    -F "idempotency_key=upload-${document_id}" \
+    -F "file=@${fixture_file};filename=rbac-smoke.txt;type=text/plain" \
+    "${api_url}/api/v1/admin/document-library"
+)"
+status_url="$(printf '%s' "$upload" | json_field status_url)"
+document_status=""
+for _ in {1..90}; do
+  document_status="$(
+    curl -fsS -b "$cookie_file" "${api_url}${status_url}" | json_field status
+  )"
+  if [[ "$document_status" == "ready" || "$document_status" == "ready_with_warnings" ]]; then
+    break
+  fi
+  if [[ "$document_status" == "failed" ]]; then
+    echo "RBAC smoke document processing failed" >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [[ "$document_status" != "ready" && "$document_status" != "ready_with_warnings" ]]; then
+  echo "RBAC smoke document processing did not become ready" >&2
+  exit 1
+fi
 
 user_api_post "/api/v1/auth/sessions" \
   "{\"identifier\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
@@ -134,7 +155,7 @@ api_post "/api/v1/admin/teams" \
 api_post "/api/v1/admin/teams" \
   "{\"team_id\":\"${child_team_id}\",\"name\":\"Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}" >/dev/null
 api_post "/api/v1/admin/teams/${child_team_id}/members" \
-  "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${actor_id}\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
+  "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${actor_id}\",\"role\":\"admin\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
 
 api_post "/api/v1/admin/projects/${project_id}/members" \
   "{\"subject_type\":\"team\",\"subject_id\":\"${parent_team_id}\",\"role\":\"admin\",\"effect\":\"deny\",\"idempotency_key\":\"grant-parent-deny-${suffix}\"}" >/dev/null
