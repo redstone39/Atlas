@@ -1,5 +1,5 @@
-import { ScopedTeamAdministrationFeature } from "../features/team-administration/index";
-import type { AppDestination, AppRouteMatch } from "../shared/routes";
+import { ScopedTeamAdministrationFeature } from "../../features/team-administration/index";
+import type { AppDestination, AppRouteMatch } from "../../shared/routes";
 
 export function ScopedTeamAdminPage({
   detail,

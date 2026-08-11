@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "../components/ui/button";
+import { Button } from "../ui/button";
 import {
   Card,
   CardContent,
-} from "../components/ui/card";
+} from "../ui/card";
 import {
   LoadErrorState,
   LoadingState,
@@ -14,13 +14,13 @@ import {
   StatusBadge,
   serverMessage,
   StatusRow,
-} from "../shared/product-ui";
+} from "../../shared/product-ui";
 import {
   opsApi,
   SetupRecoveryCard,
   type ReadinessState,
-} from "../features/ops/index";
-import { isAbortError, sessionQueryClient } from "../shared/session-query-client";
+} from "../../features/ops/index";
+import { isAbortError, sessionQueryClient } from "../../shared/session-query-client";
 
 export function OpsPage({
   canManageSetup,

@@ -6,12 +6,12 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-} from "../components/ui/card";
-import { LanguageSwitch } from "../shared/product-ui";
-import { ThemeSwitch } from "../shared/theme";
-import type { SessionState } from "../features/identity-session/index";
-import type { ManagementNavGroup } from "../shared/navigation";
-import type { AppRoute } from "../shared/routes";
+} from "../ui/card";
+import { LanguageSwitch } from "../../shared/product-ui";
+import { ThemeSwitch } from "../../shared/theme";
+import type { SessionState } from "../../features/identity-session/index";
+import type { ManagementNavGroup } from "../../shared/navigation";
+import type { AppRoute } from "../../shared/routes";
 
 export function SettingsPage({
   session,

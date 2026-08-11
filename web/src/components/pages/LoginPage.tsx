@@ -1,7 +1,7 @@
 import {
   LoginFeature,
   type SessionState,
-} from "../features/identity-session/index";
+} from "../../features/identity-session/index";
 
 export function LoginPage({
   session,

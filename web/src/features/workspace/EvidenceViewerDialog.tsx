@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { PDFDocumentLoadingTask } from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import {
@@ -13,6 +12,11 @@ import {
 import { Spinner } from "../../components/ui/spinner";
 import { cn } from "../../lib/utils";
 import type { DeclaredEvidencePreview } from "./api";
+
+const pdfWorkerUrl = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
 export type EvidenceViewerWatermark = {
   displayName: string | null;

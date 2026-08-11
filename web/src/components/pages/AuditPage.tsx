@@ -1,5 +1,5 @@
-import { ConversationAuditFeature } from "../features/conversation-audit/index";
-import type { AppRoute } from "../shared/routes";
+import { ConversationAuditFeature } from "../../features/conversation-audit/index";
+import type { AppRoute } from "../../shared/routes";
 
 export function AuditPage({
   route,

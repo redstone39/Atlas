@@ -1,4 +1,4 @@
-import { DirectoryAdministrationFeature } from "../features/directory-administration";
+import { DirectoryAdministrationFeature } from "../../features/directory-administration";
 
 export function AdminDirectoryPage({
   onNotice,

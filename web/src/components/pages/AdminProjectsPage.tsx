@@ -1,7 +1,7 @@
-import type { SessionState } from "../features/identity-session/index";
-import { ProjectGovernanceFeature } from "../features/project-governance/index";
-import { userAdministrationApi } from "../features/user-administration/index";
-import type { AppDestination, AppRouteMatch } from "../shared/routes";
+import type { SessionState } from "../../features/identity-session/index";
+import { ProjectGovernanceFeature } from "../../features/project-governance/index";
+import { userAdministrationApi } from "../../features/user-administration/index";
+import type { AppDestination, AppRouteMatch } from "../../shared/routes";
 
 
 export function AdminProjectsPage({

@@ -1,5 +1,5 @@
-import { UserAdministrationFeature } from "../features/user-administration/index";
-import type { AppRoute, AppRouteMatch } from "../shared/routes";
+import { UserAdministrationFeature } from "../../features/user-administration/index";
+import type { AppRoute, AppRouteMatch } from "../../shared/routes";
 
 export function AdminUsersPage({
   currentActorId,

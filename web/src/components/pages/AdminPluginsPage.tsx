@@ -1,4 +1,4 @@
-import { ProcessingPluginsFeature } from "../features/processing-plugins";
+import { ProcessingPluginsFeature } from "../../features/processing-plugins";
 
 export function AdminPluginsPage() {
   return <ProcessingPluginsFeature />;

@@ -132,7 +132,9 @@ describe("EvidenceViewerDialog", () => {
     expect(canvas).toHaveClass("max-w-full");
     expect(canvas).toHaveStyle({ width: "400px", height: "auto" });
     expect(pdfMocks.getDocument).toHaveBeenCalledOnce();
-    expect(pdfMocks.workerOptions.workerSrc).toBe("pdf-worker");
+    expect(pdfMocks.workerOptions.workerSrc).toMatch(
+      /pdfjs-dist\/build\/pdf\.worker\.min\.mjs$/,
+    );
     expect(pdfRender.getPage).toHaveBeenCalledWith(1);
     expect(pdfRender.getViewport).toHaveBeenCalledWith({ scale: 1.35 });
     expectWatermark("Workspace User · user-a · 2026-07-29T10:20:30.000Z");

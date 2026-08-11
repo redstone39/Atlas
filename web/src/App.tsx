@@ -23,22 +23,22 @@ import {
   type AppRoute,
 } from "./shared/routes";
 import { AtlasThemeProvider } from "./shared/theme";
-import { AdminDocumentLibraryPage } from "./pages/AdminDocumentLibraryPage";
-import { AdminDirectoryPage } from "./pages/AdminDirectoryPage";
-import { AdminModelsPage } from "./pages/AdminModelsPage";
-import { AdminPluginsPage } from "./pages/AdminPluginsPage";
-import { AdminProjectsPage } from "./pages/AdminProjectsPage";
-import { AdminTeamsPage } from "./pages/AdminTeamsPage";
-import { AdminUsersPage } from "./pages/AdminUsersPage";
-import { AcceptInvitePage } from "./pages/AcceptInvitePage";
-import { AgentAccessPage } from "./pages/AgentAccessPage";
-import { AuditPage } from "./pages/AuditPage";
-import { LoginPage } from "./pages/LoginPage";
-import { KnowledgeLibraryPage } from "./pages/KnowledgeLibraryPage";
-import { OpsPage } from "./pages/OpsPage";
-import { ScopedTeamAdminPage } from "./pages/ScopedTeamAdminPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { WorkspacePage } from "./pages/WorkspacePage";
+import { AdminDocumentLibraryPage } from "./components/pages/AdminDocumentLibraryPage";
+import { AdminDirectoryPage } from "./components/pages/AdminDirectoryPage";
+import { AdminModelsPage } from "./components/pages/AdminModelsPage";
+import { AdminPluginsPage } from "./components/pages/AdminPluginsPage";
+import { AdminProjectsPage } from "./components/pages/AdminProjectsPage";
+import { AdminTeamsPage } from "./components/pages/AdminTeamsPage";
+import { AdminUsersPage } from "./components/pages/AdminUsersPage";
+import { AcceptInvitePage } from "./components/pages/AcceptInvitePage";
+import { AgentAccessPage } from "./components/pages/AgentAccessPage";
+import { AuditPage } from "./components/pages/AuditPage";
+import { LoginPage } from "./components/pages/LoginPage";
+import { KnowledgeLibraryPage } from "./components/pages/KnowledgeLibraryPage";
+import { OpsPage } from "./components/pages/OpsPage";
+import { ScopedTeamAdminPage } from "./components/pages/ScopedTeamAdminPage";
+import { SettingsPage } from "./components/pages/SettingsPage";
+import { WorkspacePage } from "./components/pages/WorkspacePage";
 
 export default function App() {
   return (

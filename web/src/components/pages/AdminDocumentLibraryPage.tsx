@@ -1,7 +1,7 @@
-import { DocumentLibraryFeature } from "../features/document-library/index";
-import type { SessionState } from "../features/identity-session/index";
-import { teamAdministrationApi } from "../features/team-administration/index";
-import { workspaceApi } from "../features/workspace/index";
+import { DocumentLibraryFeature } from "../../features/document-library/index";
+import type { SessionState } from "../../features/identity-session/index";
+import { teamAdministrationApi } from "../../features/team-administration/index";
+import { workspaceApi } from "../../features/workspace/index";
 
 export function AdminDocumentLibraryPage({
   session,
