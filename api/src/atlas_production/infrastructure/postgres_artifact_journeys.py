@@ -319,12 +319,13 @@ class ProtectedOriginalPreimageDenialCommand:
 
 
 def _row_record(row: object, record_type):
-    return record_type(
-        **{
-            name: getattr(row, name)
-            for name in record_type.__dataclass_fields__
-        }
-    )
+    values = {
+        name: getattr(row, name)
+        for name in record_type.__dataclass_fields__
+    }
+    if record_type is ArtifactRecord:
+        values["metadata"] = dict(getattr(row, "metadata_json"))
+    return record_type(**values)
 
 
 @dataclass(frozen=True, slots=True)

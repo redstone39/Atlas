@@ -8,7 +8,13 @@ api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}"
 web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}"
 cookie_file="$(mktemp)"
 user_cookie_file="$(mktemp)"
+web_cookie_file="$(mktemp)"
+web_login_headers="$(mktemp)"
+web_session_file="$(mktemp)"
+web_anonymous_session_file="$(mktemp)"
 fixture_file="$(mktemp)"
+original_head_body="$(mktemp)"
+original_get_body="$(mktemp)"
 suffix="$(date +%s)"
 project_id="proj-p2-rbac-${suffix}"
 document_id="doc-p2-rbac-${suffix}"
@@ -24,7 +30,16 @@ compose() {
 }
 
 cleanup() {
-  rm -f "$cookie_file" "$user_cookie_file" "$fixture_file"
+  rm -f \
+    "$cookie_file" \
+    "$user_cookie_file" \
+    "$web_cookie_file" \
+    "$web_login_headers" \
+    "$web_session_file" \
+    "$web_anonymous_session_file" \
+    "$fixture_file" \
+    "$original_head_body" \
+    "$original_get_body"
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -100,6 +115,81 @@ compose up --build -d
 wait_for_url "production API" "${api_url}/api/v1/ops/health"
 wait_for_url "production Web" "${web_url}/login"
 
+web_login_status="$(
+  curl -sS \
+    -D "$web_login_headers" \
+    -o "$web_session_file" \
+    -b "$web_cookie_file" \
+    -c "$web_cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$(admin_login_json)" \
+    -w '%{http_code}' \
+    "${web_url}/api/v1/auth/sessions"
+)"
+if [[ "$web_login_status" != "200" ]]; then
+  echo "Web-origin bootstrap admin login failed with HTTP ${web_login_status}" >&2
+  exit 1
+fi
+python3 - "$web_login_headers" "$web_session_file" <<'PY'
+import json
+import pathlib
+import sys
+
+headers = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").lower()
+session = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+if (
+    "set-cookie: atlas_session=" not in headers
+    or "httponly" not in headers
+    or "samesite=lax" not in headers
+):
+    raise SystemExit("Web-origin login did not return the required session cookie attributes")
+if not session.get("authenticated"):
+    raise SystemExit("Web-origin login did not return an authenticated session")
+PY
+
+curl -fsS \
+  -b "$web_cookie_file" \
+  -c "$web_cookie_file" \
+  "${web_url}/api/v1/auth/session" \
+  | python3 -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("authenticated") else 1)'
+
+web_logout_status="$(
+  curl -sS \
+    -o /dev/null \
+    -b "$web_cookie_file" \
+    -c "$web_cookie_file" \
+    -X DELETE \
+    -w '%{http_code}' \
+    "${web_url}/api/v1/auth/session"
+)"
+if [[ "$web_logout_status" != "204" ]]; then
+  echo "Web-origin logout failed with HTTP ${web_logout_status}" >&2
+  exit 1
+fi
+curl -fsS \
+  -o "$web_anonymous_session_file" \
+  -b "$web_cookie_file" \
+  -c "$web_cookie_file" \
+  "${web_url}/api/v1/auth/session"
+python3 - "$web_anonymous_session_file" <<'PY'
+import json
+import pathlib
+import sys
+
+session = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if session.get("authenticated") or session.get("actor") is not None:
+    raise SystemExit("Web-origin logout did not restore an anonymous session")
+PY
+
+curl -fsS \
+  -b "$web_cookie_file" \
+  -c "$web_cookie_file" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  --data "$(admin_login_json)" \
+  "${web_url}/api/v1/auth/sessions" >/dev/null
+
 api_post "/api/v1/auth/sessions" \
   "$(admin_login_json)" >/dev/null
 
@@ -146,6 +236,44 @@ if [[ "$document_status" != "ready" && "$document_status" != "ready_with_warning
   echo "RBAC smoke document processing did not become ready" >&2
   exit 1
 fi
+
+original_url="${web_url}/api/v1/library/documents/${document_id}/content"
+original_head_status="$(
+  curl -sS \
+    -o "$original_head_body" \
+    -b "$web_cookie_file" \
+    -X HEAD \
+    -w '%{http_code}' \
+    "$original_url"
+)"
+original_get_status="$(
+  curl -sS \
+    -o "$original_get_body" \
+    -b "$web_cookie_file" \
+    -w '%{http_code}' \
+    "$original_url"
+)"
+if [[ "$original_head_status" != "200" || "$original_get_status" != "200" ]]; then
+  echo "Original document HEAD/GET failed through the Web origin" >&2
+  exit 1
+fi
+python3 - "$fixture_file" "$original_head_body" "$original_get_body" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+fixture = pathlib.Path(sys.argv[1]).read_bytes()
+head_body = pathlib.Path(sys.argv[2]).read_bytes()
+get_body = pathlib.Path(sys.argv[3]).read_bytes()
+expected_length = len(fixture)
+expected_digest = hashlib.sha256(fixture).hexdigest()
+if head_body:
+    raise SystemExit("Original document HEAD returned a response body")
+if len(get_body) != expected_length:
+    raise SystemExit("Original document GET returned the wrong byte length")
+if hashlib.sha256(get_body).hexdigest() != expected_digest:
+    raise SystemExit("Original document GET returned the wrong SHA-256")
+PY
 
 user_api_post "/api/v1/auth/sessions" \
   "{\"identifier\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null

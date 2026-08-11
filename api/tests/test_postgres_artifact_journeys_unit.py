@@ -13,7 +13,8 @@ from atlas_production.infrastructure import (
     postgres_artifact_storage_adapter as adapter,
 )
 from atlas_production.infrastructure.postgres_owner import artifact as owner
-from atlas_production.modules.artifact_storage.records import StorageFence
+from atlas_production.infrastructure.persistence.artifact_storage import AtlasArtifactRow
+from atlas_production.modules.artifact_storage.records import ArtifactRecord, StorageFence
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     UserRecord,
@@ -26,6 +27,31 @@ NOW = "2026-07-18T00:00:00+00:00"
 TOKEN = "browser-token-do-not-log"
 DIGEST = hashlib.sha256(b"abc").hexdigest()
 FENCE = StorageFence("target-1", 1, "f" * 64, 1)
+
+def test_artifact_row_record_maps_persisted_metadata_json() -> None:
+    metadata = {"source_filename": "manual.pdf"}
+    row = AtlasArtifactRow(
+        artifact_id="artifact-1",
+        artifact_class="original_document",
+        blob_id="blob-1",
+        checksum_algorithm="sha256",
+        checksum_value=DIGEST,
+        byte_size=3,
+        content_type="application/pdf",
+        owner_scope_type="project",
+        owner_scope_id="project-1",
+        lifecycle_status="active",
+        logical_identity="original:document-1",
+        metadata_json=metadata,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    record = journeys._row_record(row, ArtifactRecord)
+
+    assert record.metadata == metadata
+    assert record.metadata is not metadata
+
 
 
 class Authority:
