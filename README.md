@@ -40,7 +40,7 @@ source material outside disposable volumes when it must be loaded again.
 
 ## Runtime components
 
-- `web/`: React, TypeScript, and Vite user interface.
+- `web/`: React, TypeScript, and Next.js App Router user interface.
 - `api/`: FastAPI application, owner use cases, PostgreSQL repositories, and
   migrations.
 - `plugin-sdk/` and `plugin-runner/`: controlled processing plugin contracts and

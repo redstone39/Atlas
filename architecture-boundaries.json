@@ -286,10 +286,9 @@
       "id": "frontend_composition",
       "role": "composition",
       "path_prefixes": [
-        "web/src/App.tsx",
-        "web/src/main.tsx",
-        "web/src/i18n.ts",
         "web/src/app",
+        "web/src/components/shell",
+        "web/src/i18n.ts",
         "web/src/locales"
       ],
       "public_contracts": []
@@ -297,7 +296,10 @@
     {
       "id": "frontend_pages",
       "role": "transport",
-      "path_prefixes": ["web/src/pages"],
+      "path_prefixes": [
+        "web/src/components/pages",
+        "web/src/server"
+      ],
       "public_contracts": []
     },
     {
@@ -378,7 +380,7 @@
       "language": "typescript",
       "kind": "forbid_prefix",
       "source_prefixes": ["shared", "components/ui", "hooks", "lib"],
-      "forbidden_target_prefixes": ["app", "pages", "features"],
+      "forbidden_target_prefixes": ["app", "components/pages", "features"],
       "allowed_target_ids": []
     },
     {
@@ -386,7 +388,7 @@
       "language": "typescript",
       "kind": "forbid_prefix",
       "source_prefixes": ["features"],
-      "forbidden_target_prefixes": ["app", "pages"],
+      "forbidden_target_prefixes": ["app", "components/pages"],
       "allowed_target_ids": []
     },
     {
@@ -400,7 +402,7 @@
       "id": "frontend-consumers-use-feature-public-api",
       "language": "typescript",
       "kind": "public_api_only",
-      "source_prefixes": ["pages", "api", "types"],
+      "source_prefixes": ["components/pages", "api", "types"],
       "target_root": "features",
       "public_target_suffixes": ["/index"]
     },
@@ -408,7 +410,7 @@
       "id": "frontend-pages-do-not-import-app",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["pages"],
+      "source_prefixes": ["components/pages"],
       "forbidden_target_prefixes": ["app"],
       "allowed_target_ids": []
     },
@@ -416,8 +418,8 @@
       "id": "frontend-pages-do-not-import-pages",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["pages"],
-      "forbidden_target_prefixes": ["pages"],
+      "source_prefixes": ["components/pages"],
+      "forbidden_target_prefixes": ["components/pages"],
       "allowed_target_ids": []
     }
   ],

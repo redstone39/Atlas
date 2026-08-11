@@ -44,7 +44,7 @@ MIT-licensed direct selections:
 `@base-ui/react`, `@hookform/resolvers`, `@radix-ui/react-label`,
 `@radix-ui/react-slot`, `@radix-ui/react-tabs`, `@shadcn/react`,
 `clsx`, `cmdk`, `date-fns`, `embla-carousel-react`, `i18next`,
-`input-otp`, `next-themes`, `radix-ui`, `react`, `react-day-picker`,
+`input-otp`, `next`, `next-themes`, `radix-ui`, `react`, `react-day-picker`,
 `react-dom`, `react-hook-form`, `react-i18next`, `react-markdown`,
 `react-resizable-panels`, `recharts`, `remark-gfm`, `sonner`,
 `tailwind-merge`, `vaul`, and `zod`.

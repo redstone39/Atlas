@@ -1,18 +1,32 @@
-FROM node:22-alpine
+FROM node:22-alpine AS deps
 
-WORKDIR /app
+WORKDIR /app/web
 
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
-COPY web/components.json web/index.html web/tsconfig.json web/vite.config.ts ./
-COPY web/src ./src
-COPY contracts /contracts
+FROM node:22-alpine AS builder
 
-ENV ATLAS_PRODUCTION_API_PROXY_TARGET=http://api:8002
+WORKDIR /app
 
-RUN npm run build
+COPY --from=deps /app/web/node_modules ./web/node_modules
+COPY web ./web
+COPY contracts ./contracts
+RUN cd web && npm run build
+
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=5174
+
+COPY --from=builder /app/web/.next/standalone ./
+COPY --from=builder /app/web/.next/static ./web/.next/static
+
+WORKDIR /app/web
 
 EXPOSE 5174
 
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5174"]
+CMD ["node", "server.js"]

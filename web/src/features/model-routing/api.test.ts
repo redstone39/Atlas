@@ -248,8 +248,8 @@ describe("provider connection and model routing API boundary", () => {
     expect(feature).toContain("overflow-x-auto");
     expect(feature).not.toContain("deleteProviderConnection");
     expect(feature).not.toContain("deleteModelRoute");
-    const page = readFileSync("src/pages/AdminModelsPage.tsx", "utf8");
-    expect(page).toContain('from "../features/model-routing/index"');
+    const page = readFileSync("src/components/pages/AdminModelsPage.tsx", "utf8");
+    expect(page).toContain('from "../../features/model-routing/index"');
     expect(page).not.toContain("useState");
     expect(existsSync("src/api.ts")).toBe(false);
     expect(existsSync("src/types.ts")).toBe(false);

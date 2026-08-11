@@ -64,7 +64,8 @@ api_pid="$!"
 
 (
   cd web
-  npm run dev
+  npm run build
+  npm run start
 ) >"$web_log" 2>&1 &
 web_pid="$!"
 

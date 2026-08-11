@@ -584,8 +584,8 @@ describe("workspace feature boundary", () => {
       expect(feature).not.toContain(forbidden);
     }
 
-    const page = readFileSync("src/pages/WorkspacePage.tsx", "utf8");
-    expect(page).toContain('from "../features/workspace/index"');
+    const page = readFileSync("src/components/pages/WorkspacePage.tsx", "utf8");
+    expect(page).toContain('from "../../features/workspace/index"');
     for (const forbidden of ["useState", "useEffect", "fetch(", "api."]) {
       expect(page).not.toContain(forbidden);
     }

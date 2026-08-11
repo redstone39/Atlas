@@ -79,8 +79,8 @@ describe("conversation audit API and feature boundary", () => {
     expect(feature).not.toContain('from "../../types"');
     expect(feature).toContain('from "../workspace/index"');
 
-    const page = readFileSync("src/pages/AuditPage.tsx", "utf8");
-    expect(page).toContain('from "../features/conversation-audit/index"');
+    const page = readFileSync("src/components/pages/AuditPage.tsx", "utf8");
+    expect(page).toContain('from "../../features/conversation-audit/index"');
     expect(page).not.toContain("useState");
 
     expect(existsSync("src/api.ts")).toBe(false);
