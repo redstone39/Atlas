@@ -1,5 +1,5 @@
 import { CheckCircle2, KeyRound } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -18,12 +18,14 @@ import { Spinner } from "../../components/ui/spinner";
 import { serverMessage } from "../../shared/product-ui";
 import { inviteAcceptanceApi } from "./api";
 
-export function AcceptInviteFeature({ onDone }: { onDone: () => void }) {
+export function AcceptInviteFeature({
+  token,
+  onDone,
+}: {
+  token: string;
+  onDone: () => void;
+}) {
   const { t } = useTranslation();
-  const token = useMemo(
-    () => new URLSearchParams(window.location.search).get("token") ?? "",
-    [],
-  );
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [pending, setPending] = useState(false);

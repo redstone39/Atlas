@@ -1,5 +1,16 @@
 import { ProcessingPluginsFeature } from "../../features/processing-plugins";
 
-export function AdminPluginsPage() {
-  return <ProcessingPluginsFeature />;
+export function AdminPluginsPage({
+  initialTab,
+  requestedRunId,
+}: {
+  initialTab: "plugins" | "runs";
+  requestedRunId: string | null;
+}) {
+  return (
+    <ProcessingPluginsFeature
+      initialTab={initialTab}
+      requestedRunId={requestedRunId}
+    />
+  );
 }

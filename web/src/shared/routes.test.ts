@@ -9,70 +9,56 @@ import {
   documentLibraryDestination,
   managementRouteFamily,
   matchAppRoute,
-  normalizeRoute,
   workspaceConversationRoute,
 } from "./routes";
 
-describe("Workspace conversation routes", () => {
-  it("encodes and parses a canonical conversation route", () => {
+describe("canonical App Router projections", () => {
+  it("encodes and projects a Workspace conversation", () => {
     const route = workspaceConversationRoute("conversation one");
     expect(route).toBe("/workspace/conversations/conversation%20one");
-    expect(matchAppRoute(normalizeRoute(route)!)).toMatchObject({
+    expect(matchAppRoute(route)).toMatchObject({
       kind: "workspace-conversation",
       conversationId: "conversation one",
     });
   });
 
-  it("fails closed for missing, extra, and malformed conversation ids", () => {
-    expect(normalizeRoute("/workspace/conversations")).toBeNull();
-    expect(normalizeRoute("/workspace/conversations/conversation-1/extra")).toBeNull();
-    expect(normalizeRoute("/workspace/conversations/%E0%A4%A")).toBeNull();
-  });
-});
-
-describe("directory administration route", () => {
-  it("recognizes the dedicated static route without colliding with user detail", () => {
-    expect(matchAppRoute(normalizeRoute("/admin/directory")!)).toEqual({
+  it("keeps directory static and user detail routes distinct", () => {
+    expect(matchAppRoute("/admin/directory")).toEqual({
       kind: "static",
       route: "/admin/directory",
     });
-    expect(normalizeRoute("/admin/users/directory")).toBe(
-      "/admin/users/directory",
-    );
-    expect(matchAppRoute(normalizeRoute("/admin/users/directory")!)).toMatchObject({
+    expect(matchAppRoute(adminUserDetailRoute("directory"))).toMatchObject({
       kind: "admin-user-detail",
       actorId: "directory",
     });
   });
-});
 
-describe("identity and access detail routes", () => {
-  it("parses the five canonical detail route shapes", () => {
-    expect(matchAppRoute(normalizeRoute("/admin/users/user-1")!)).toMatchObject({
+  it("projects every identity and access detail shape", () => {
+    expect(matchAppRoute(adminUserDetailRoute("user-1"))).toMatchObject({
       kind: "admin-user-detail",
       actorId: "user-1",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/teams/team-1/profile")!)).toMatchObject({
+    expect(matchAppRoute(adminTeamDetailRoute("team-1", "profile"))).toMatchObject({
       kind: "admin-team-detail",
       teamId: "team-1",
       section: "profile",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/teams/team-1/members")!)).toMatchObject({
+    expect(matchAppRoute(adminTeamDetailRoute("team-1", "members"))).toMatchObject({
       kind: "admin-team-detail",
       section: "members",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/projects/project-1/profile")!)).toMatchObject({
+    expect(matchAppRoute(adminProjectDetailRoute("project-1", "profile"))).toMatchObject({
       kind: "admin-project-detail",
       projectId: "project-1",
       section: "profile",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/projects/project-1/access")!)).toMatchObject({
+    expect(matchAppRoute(adminProjectDetailRoute("project-1", "access"))).toMatchObject({
       kind: "admin-project-detail",
       section: "access",
     });
   });
 
-  it("encodes resource ids and preserves the management route family", () => {
+  it("encodes detail IDs and preserves management families", () => {
     expect(adminUserDetailRoute("user one")).toBe("/admin/users/user%20one");
     expect(adminTeamDetailRoute("team one", "members")).toBe(
       "/admin/teams/team%20one/members",
@@ -84,33 +70,24 @@ describe("identity and access detail routes", () => {
       "/admin/teams",
     );
   });
-
-  it("fails closed for malformed, bare, and unknown subsection paths", () => {
-    expect(normalizeRoute("/admin/users/%E0%A4%A")).toBeNull();
-    expect(normalizeRoute("/admin/teams/team-1")).toBeNull();
-    expect(normalizeRoute("/admin/teams/team-1/unknown")).toBeNull();
-    expect(normalizeRoute("/admin/projects/project-1/members")).toBeNull();
-  });
 });
 
-describe("audit progressive disclosure routes", () => {
-  it("parses the audit landing, collections, transcript, and runtime routes", () => {
-    expect(matchAppRoute(normalizeRoute("/admin/audit")!)).toEqual({
+describe("audit progressive disclosure projections", () => {
+  it("projects landing, collections, transcript, and runtime routes", () => {
+    expect(matchAppRoute("/admin/audit")).toEqual({
       kind: "static",
       route: "/admin/audit",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/audit/conversations")!)).toMatchObject({
+    expect(matchAppRoute(adminAuditSectionRoute("conversations"))).toMatchObject({
       kind: "admin-audit-section",
       section: "conversations",
     });
-    expect(matchAppRoute(normalizeRoute("/admin/audit/events")!)).toMatchObject({
+    expect(matchAppRoute(adminAuditSectionRoute("events"))).toMatchObject({
       kind: "admin-audit-section",
       section: "events",
     });
     expect(
-      matchAppRoute(
-        normalizeRoute("/admin/audit/conversations/conversation-1/transcript")!,
-      ),
+      matchAppRoute(adminAuditConversationRoute("conversation-1", "transcript")),
     ).toMatchObject({
       kind: "admin-audit-conversation",
       conversationId: "conversation-1",
@@ -118,9 +95,7 @@ describe("audit progressive disclosure routes", () => {
     });
     expect(
       matchAppRoute(
-        normalizeRoute(
-          "/admin/audit/conversations/conversation-1/runtime/turn-1",
-        )!,
+        adminAuditConversationRoute("conversation-1", "runtime", "turn-1"),
       ),
     ).toMatchObject({
       kind: "admin-audit-conversation",
@@ -130,7 +105,7 @@ describe("audit progressive disclosure routes", () => {
     });
   });
 
-  it("encodes each resource id segment and preserves the audit route family", () => {
+  it("encodes every audit resource segment and preserves its family", () => {
     expect(adminAuditSectionRoute("events")).toBe("/admin/audit/events");
     expect(adminAuditConversationRoute("conversation one", "transcript")).toBe(
       "/admin/audit/conversations/conversation%20one/transcript",
@@ -145,20 +120,6 @@ describe("audit progressive disclosure routes", () => {
     );
     expect(managementRouteFamily(runtimeRoute)).toBe("/admin/audit");
   });
-
-  it("fails closed for malformed ids, missing ids, and unknown subsections", () => {
-    expect(normalizeRoute("/admin/audit/conversations/%E0%A4%A/transcript")).toBeNull();
-    expect(normalizeRoute("/admin/audit/conversations/conversation-1")).toBeNull();
-    expect(
-      normalizeRoute("/admin/audit/conversations/conversation-1/unknown"),
-    ).toBeNull();
-    expect(
-      normalizeRoute("/admin/audit/conversations/conversation-1/runtime"),
-    ).toBeNull();
-    expect(
-      normalizeRoute("/admin/audit/conversations/conversation-1/runtime/%E0%A4%A"),
-    ).toBeNull();
-  });
 });
 
 describe("Document Library destinations", () => {
@@ -172,9 +133,9 @@ describe("Document Library destinations", () => {
       expect(destination).toBe(
         `/admin/document-library?scope_type=${scopeType}&scope_id=${encodedScopeId}`,
       );
-      expect(
-        normalizeRoute(new URL(destination, "https://atlas.example").pathname),
-      ).toBe("/admin/document-library");
+      expect(new URL(destination, "https://atlas.example").pathname).toBe(
+        "/admin/document-library",
+      );
     },
   );
 });

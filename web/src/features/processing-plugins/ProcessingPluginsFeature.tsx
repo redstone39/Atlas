@@ -32,13 +32,16 @@ const ref = (plugin: ProcessingPluginVersion) => ({
 const pluginKey = (plugin: ProcessingPluginVersion) =>
   `${plugin.plugin_id}@${plugin.plugin_version}@${plugin.package_digest}`;
 
-export function ProcessingPluginsFeature() {
+export function ProcessingPluginsFeature({
+  initialTab,
+  requestedRunId,
+}: {
+  initialTab: "plugins" | "runs";
+  requestedRunId: string | null;
+}) {
   const { t } = useTranslation();
-  const searchParams = new URLSearchParams(window.location.search);
-  const initialTab = searchParams.get("run") || searchParams.get("tab") === "runs"
-    ? "runs"
-    : "plugins";
-  const [activeTab, setActiveTab] = useState<"plugins" | "profiles" | "runs">(initialTab);
+  const [activeTab, setActiveTab] =
+    useState<"plugins" | "profiles" | "runs">(initialTab);
   const [plugins, setPlugins] = useState<ProcessingPluginVersion[]>([]);
   const [profiles, setProfiles] = useState<ProcessingProfile[]>([]);
   const [runs, setRuns] = useState<ProcessingRun[]>([]);
@@ -111,8 +114,9 @@ export function ProcessingPluginsFeature() {
       try {
         const result = await processingPluginsApi.listRuns();
         setRuns(result.items); setRunsReady(true);
-        const requestedRun = searchParams.get("run");
-        if (requestedRun) setRunDetail(await processingPluginsApi.showRun(requestedRun));
+        if (requestedRunId) {
+          setRunDetail(await processingPluginsApi.showRun(requestedRunId));
+        }
       } catch (cause) {
         setRunsError(cause instanceof Error ? cause.message : t("plugins.loadFailed"));
       } finally {

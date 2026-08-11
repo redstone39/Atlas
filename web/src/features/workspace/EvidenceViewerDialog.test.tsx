@@ -21,9 +21,6 @@ vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: pdfMocks.workerOptions,
 }));
 
-vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({
-  default: "pdf-worker",
-}));
 
 const originalCreateObjectUrl = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
 const originalRevokeObjectUrl = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");

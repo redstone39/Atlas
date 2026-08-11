@@ -90,12 +90,14 @@ type TagKey = Exclude<ScopeKey, "all">;
 
 export function DocumentLibraryFeature({
   session,
+  initialScope,
   loadTeams,
   loadWorkspaceScope,
   onNotice,
   onRefresh,
 }: {
   session: DocumentLibrarySessionView;
+  initialScope: DocumentTagRef | null;
   loadTeams: LoadDocumentTeams;
   loadWorkspaceScope: LoadWorkspaceDocumentScope;
   onNotice: (message: string) => void;
@@ -104,7 +106,9 @@ export function DocumentLibraryFeature({
   const { t, i18n } = useTranslation();
   const [documents, setDocuments] = useState<DocumentLibrarySummary[]>([]);
   const [teams, setTeams] = useState<DocumentTeamView[]>([]);
-  const [selectedScopeKey, setSelectedScopeKey] = useState<ScopeKey>(() => initialScopeKey());
+  const [selectedScopeKey, setSelectedScopeKey] = useState<ScopeKey>(() =>
+    initialScope ? `${initialScope.tag_type}:${initialScope.tag_id}` : "all",
+  );
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [detailEvents, setDetailEvents] = useState<AuditEvent[]>([]);
   const [descriptionDraft, setDescriptionDraft] = useState("");
@@ -918,15 +922,6 @@ export function DocumentLibraryFeature({
   );
 }
 
-function initialScopeKey(): ScopeKey {
-  const params = new URLSearchParams(window.location.search);
-  const scopeType = params.get("scope_type");
-  const scopeId = params.get("scope_id");
-  if ((scopeType === "team" || scopeType === "project") && scopeId) {
-    return `${scopeType}:${scopeId}`;
-  }
-  return "all";
-}
 
 function scopeRefFromKey(scopeKey: ScopeKey): DocumentTagRef | null {
   if (scopeKey === "all") return null;

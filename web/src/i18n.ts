@@ -20,24 +20,22 @@ function normalizeLanguage(language: string | undefined): SupportedLanguage {
   return "en";
 }
 
-function initialLanguage(): SupportedLanguage {
-  if (typeof window === "undefined") {
-    return "en";
-  }
+export async function initializeBrowserLanguage(): Promise<void> {
   const storage = window.localStorage;
   const stored =
     storage && typeof storage.getItem === "function"
       ? storage.getItem(LANGUAGE_STORAGE_KEY)
       : null;
-  if (stored === "en" || stored === "zh-TW") {
-    return stored;
-  }
-  return normalizeLanguage(window.navigator.language);
+  const language =
+    stored === "en" || stored === "zh-TW"
+      ? stored
+      : normalizeLanguage(window.navigator.language);
+  await i18n.changeLanguage(language);
 }
 
 void i18n.use(initReactI18next).init({
   resources,
-  lng: initialLanguage(),
+  lng: "en",
   fallbackLng: "en",
   interpolation: {
     escapeValue: false,

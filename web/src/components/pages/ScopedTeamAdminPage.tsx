@@ -10,7 +10,7 @@ export function ScopedTeamAdminPage({
   detail: Extract<AppRouteMatch, { kind: "admin-team-detail" }> | null;
   onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
 }) {
   return (
     <ScopedTeamAdministrationFeature

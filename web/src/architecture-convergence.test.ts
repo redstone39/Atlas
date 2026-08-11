@@ -52,8 +52,8 @@ describe("frontend compatibility convergence", () => {
       expect(existsSync(resolve(webRoot, relative)), relative).toBe(false);
     }
     expect(
-      readFileSync(resolve(webRoot, "src/pages/SettingsPage.tsx"), "utf8"),
-    ).not.toContain('from "../app/');
+      readFileSync(resolve(webRoot, "src/components/pages/SettingsPage.tsx"), "utf8"),
+    ).not.toContain('from "../../app/');
 
     const routeSource = readFileSync(resolve(webRoot, "src/shared/routes.ts"), "utf8");
     const navigationSource = readFileSync(
@@ -241,11 +241,11 @@ describe("frontend compatibility convergence", () => {
 
   it("owns shared sidebar chrome without a global authenticated header", () => {
     const accountMenuSource = readFileSync(
-      resolve(webRoot, "src/app/AccountMenu.tsx"),
+      resolve(webRoot, "src/components/shell/AccountMenu.tsx"),
       "utf8",
     );
     const productShellSource = readFileSync(
-      resolve(webRoot, "src/app/ProductShell.tsx"),
+      resolve(webRoot, "src/components/shell/ProductShell.tsx"),
       "utf8",
     );
     const documentContentSource = readFileSync(
@@ -256,7 +256,10 @@ describe("frontend compatibility convergence", () => {
       resolve(webRoot, "src/features/workspace/WorkspaceFeature.tsx"),
       "utf8",
     );
-    const appSource = readFileSync(resolve(webRoot, "src/App.tsx"), "utf8");
+    const workspaceScreenSource = readFileSync(
+      resolve(webRoot, "src/app/(authenticated)/workspace/screen.tsx"),
+      "utf8",
+    );
 
     expect(accountMenuSource).toContain("export function AccountMenu");
     expect(accountMenuSource).not.toContain("download-center");
@@ -268,8 +271,8 @@ describe("frontend compatibility convergence", () => {
     expect(documentContentSource).toContain('method: "HEAD"');
     expect(documentContentSource).not.toContain("download-deliveries");
     expect(documentContentSource).not.toMatch(/requestBlob|createObjectURL|response\.blob/);
-    expect(appSource).toContain('from "./app/AccountMenu"');
-    expect(appSource).toContain("renderAccountMenu={(options)");
+    expect(workspaceScreenSource).toContain('from "@/components/shell/AccountMenu"');
+    expect(workspaceScreenSource).toContain("renderAccountMenu={(options)");
     expect(workspaceSource).toContain("renderAccountMenu({");
     expect(workspaceSource).toContain('t("nav.knowledgeLibrary")');
     expect(workspaceSource).toContain('activeView === "/library"');
@@ -282,11 +285,13 @@ describe("frontend compatibility convergence", () => {
     expect(productShellSource).toContain('route.startsWith("/workspace/conversations/")');
     expect(productShellSource).not.toContain('{ route: "/library" as const');
     expect(accountMenuSource).not.toContain('onNavigate("/library")');
-    expect(appSource).toContain("renderSidebarHeader={(options)");
+    expect(workspaceScreenSource).toContain("renderSidebarHeader={(options)");
 
     const accountMenuDefinitions = activeUiSourceFiles(resolve(webRoot, "src"))
       .filter((file) => readFileSync(file, "utf8").includes("function AccountMenu"));
-    expect(accountMenuDefinitions).toEqual([resolve(webRoot, "src/app/AccountMenu.tsx")]);
+    expect(accountMenuDefinitions).toEqual([
+      resolve(webRoot, "src/components/shell/AccountMenu.tsx"),
+    ]);
   });
 
   it("keeps every data-backed route on an explicit initial loading surface", () => {
@@ -309,7 +314,7 @@ describe("frontend compatibility convergence", () => {
       "src/features/processing-plugins/ProcessingPluginsFeature.tsx",
       "src/features/agent-access/AgentStatusList.tsx",
       "src/features/conversation-audit/ConversationAuditFeature.tsx",
-      "src/pages/OpsPage.tsx",
+      "src/components/pages/OpsPage.tsx",
     ]) {
       expect(readFileSync(resolve(webRoot, relative), "utf8"), relative)
         .toContain("LoadingState");
@@ -336,9 +341,50 @@ describe("frontend compatibility convergence", () => {
     );
     expect(workspaceSource).toContain("historyLoadError");
 
-    const appSource = readFileSync(resolve(webRoot, "src/App.tsx"), "utf8");
-    const opsPageSource = readFileSync(resolve(webRoot, "src/pages/OpsPage.tsx"), "utf8");
-    expect(appSource).not.toContain("readinessLoadError");
+    expect(existsSync(resolve(webRoot, "src/App.tsx"))).toBe(false);
+    const opsPageSource = readFileSync(
+      resolve(webRoot, "src/components/pages/OpsPage.tsx"),
+      "utf8",
+    );
     expect(opsPageSource).toContain("loadError");
+  });
+
+  it("keeps Next App Router as the only production route owner", () => {
+    for (const relative of [
+      "src/app/layout.tsx",
+      "src/app/page.tsx",
+      "src/app/(public)/login/page.tsx",
+      "src/app/(public)/accept-invite/page.tsx",
+      "src/app/(authenticated)/layout.tsx",
+      "src/app/(authenticated)/workspace/page.tsx",
+      "src/app/(authenticated)/workspace/conversations/[conversationId]/page.tsx",
+      "src/app/(authenticated)/admin/users/[actorId]/page.tsx",
+      "src/app/(authenticated)/admin/teams/[teamId]/members/page.tsx",
+      "src/app/(authenticated)/admin/projects/[projectId]/access/page.tsx",
+      "src/app/(authenticated)/admin/audit/conversations/[conversationId]/runtime/[turnId]/page.tsx",
+      "src/app/(authenticated)/[...unavailable]/page.tsx",
+      "src/app/api/[...path]/route.ts",
+    ]) {
+      expect(existsSync(resolve(webRoot, relative)), relative).toBe(true);
+    }
+    for (const relative of [
+      "index.html",
+      "vite.config.ts",
+      "src/App.tsx",
+      "src/main.tsx",
+      "src/vite-env.d.ts",
+    ]) {
+      expect(existsSync(resolve(webRoot, relative)), relative).toBe(false);
+    }
+    expect(readFileSync(resolve(webRoot, "src/shared/routes.ts"), "utf8"))
+      .not.toContain("normalizeRoute");
+    for (const relative of [
+      "src/features/project-governance/ProjectGovernanceFeature.tsx",
+      "src/features/team-administration/ScopedTeamAdministrationFeature.tsx",
+      "src/features/user-administration/UserAdministrationFeature.tsx",
+    ]) {
+      expect(readFileSync(resolve(webRoot, relative), "utf8"), relative)
+        .not.toMatch(/pushState|replaceState|PopStateEvent/);
+    }
   });
 });

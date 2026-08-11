@@ -187,8 +187,7 @@ export function UserAdministrationFeature({
           (user) => user.actor_type === "user" && user.actor_id === detail.actorId,
         )
       ) {
-        window.history.replaceState({}, "", "/admin/users");
-        window.dispatchEvent(new PopStateEvent("popstate"));
+        onNavigate("/admin/users");
       }
       onSuccess?.();
     } catch (err) {

@@ -17,7 +17,7 @@ export function AdminProjectsPage({
   detail: Extract<AppRouteMatch, { kind: "admin-project-detail" }> | null;
   onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
 }) {
   return (
     <ProjectGovernanceFeature

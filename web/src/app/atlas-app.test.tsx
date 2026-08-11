@@ -4,16 +4,18 @@ import { readFileSync } from "node:fs";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
-import i18n from "./i18n";
+vi.mock("next/navigation", () => import("../test/next-navigation-mock"));
+
+import App from "./atlas-app.test-support";
+import i18n, { LANGUAGE_STORAGE_KEY } from "../i18n";
 import {
   claimsInPresentationOrder,
   MessageSources,
   sliceCodePoints,
-} from "./features/workspace/WorkspaceFeature";
-import { DirectoryAdministrationFeature } from "./features/directory-administration";
-import { sessionQueryClient } from "./shared/session-query-client";
-import { THEME_STORAGE_KEY } from "./shared/theme";
+} from "../features/workspace/WorkspaceFeature";
+import { DirectoryAdministrationFeature } from "../features/directory-administration";
+import { sessionQueryClient } from "../shared/session-query-client";
+import { THEME_STORAGE_KEY } from "../shared/theme";
 import {
   adminSession,
   adminDetailDto,
@@ -39,7 +41,7 @@ import {
   workspaceDetailDto,
   workspaceProjectionDto,
   runtimeEventStream,
-} from "./App.test-support";
+} from "../App.test-support";
 
 beforeEach(() => {
   sessionQueryClient.resetSession();
@@ -3215,6 +3217,7 @@ describe("Atlas production web", () => {
       return fallbackFetch(input, init);
     });
     await i18n.changeLanguage("zh-TW");
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-TW");
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "模型" })).toBeInTheDocument();

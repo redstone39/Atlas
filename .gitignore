@@ -11,3 +11,4 @@
 **/dist/
 web/node_modules/
 .next/
+*.tsbuildinfo

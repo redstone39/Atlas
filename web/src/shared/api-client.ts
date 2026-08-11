@@ -1,6 +1,6 @@
 import { ApiError } from "./user-messages";
 
-export const API_BASE = import.meta.env.VITE_ATLAS_PRODUCTION_API_BASE ?? "";
+export const API_BASE = "";
 
 export async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isFormData = options.body instanceof FormData;

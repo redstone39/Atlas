@@ -1,5 +1,6 @@
 import { Copy, FileText, MailPlus, ShieldCheck, Trash2, UserRoundPlus, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -67,10 +68,11 @@ export function ScopedTeamAdministrationFeature({
   detail: Extract<AppRouteMatch, { kind: "admin-team-detail" }> | null;
   onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
+  const pathname = usePathname();
   const [teams, setTeams] = useState<TeamRecord[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [members, setMembers] = useState<TeamMemberSummary[]>([]);
@@ -94,6 +96,8 @@ export function ScopedTeamAdministrationFeature({
   const selectedTeamIdRef = useRef("");
   const membersRequestIdRef = useRef(0);
   const candidatesRequestIdRef = useRef(0);
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
 
   const selectedTeam =
     detail && detail.teamId === selectedTeamId
@@ -219,15 +223,13 @@ export function ScopedTeamAdministrationFeature({
     if (!selectedTeamId) return;
     setPendingAction(actionName);
     setActionError("");
+    const originRoute = adminTeamDetailRoute(selectedTeamId, "members");
     try {
       const result = await action();
       onNotice(result.message_code);
       toast.success(serverMessage(result, t));
-      await onRefresh();
-      if (
-        window.location.pathname ===
-        adminTeamDetailRoute(selectedTeamId, "members")
-      ) {
+      const routeRetained = await onRefresh();
+      if (routeRetained && pathnameRef.current === originRoute) {
         await Promise.all([refreshMembers(selectedTeamId), refreshCandidates(selectedTeamId)]);
       }
       onSuccess?.();

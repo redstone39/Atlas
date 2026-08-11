@@ -123,7 +123,7 @@ export function TeamAdministrationFeature({
   detail: Extract<AppRouteMatch, { kind: "admin-team-detail" }> | null;
   onNavigate: (route: AppDestination) => void;
   onNotice: (message: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const isMobile = useIsMobile();

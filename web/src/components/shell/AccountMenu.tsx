@@ -2,7 +2,7 @@ import { ChevronsUpDown, LogOut, Settings, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { Button } from "../components/ui/button";
+import { Button } from "../ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,10 +11,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
-import type { SessionState } from "../features/identity-session/index";
-import { cn } from "../lib/utils";
-import type { AppRoute } from "../shared/routes";
+} from "../ui/dropdown-menu";
+import type { SessionState } from "../../features/identity-session/index";
+import { cn } from "../../lib/utils";
+import type { AppRoute } from "../../shared/routes";
 
 export function AccountMenu({
   session,

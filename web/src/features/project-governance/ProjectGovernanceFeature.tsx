@@ -1,5 +1,6 @@
 import { CheckCircle2, FileText, Plus, Save, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -60,8 +61,6 @@ import type { AdminActionResult } from "../../shared/api-contracts";
 import {
   adminProjectDetailRoute,
   documentLibraryDestination,
-  matchAppRoute,
-  normalizeRoute,
 } from "../../shared/routes";
 import { projectGovernanceApi } from "./api";
 import type {
@@ -90,6 +89,7 @@ export function ProjectGovernanceFeature({
 }: ProjectGovernanceFeatureProps) {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
+  const pathname = usePathname();
   const [projects, setProjects] = useState<ProjectAdminSummary[]>([]);
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showEditProject, setShowEditProject] = useState(false);
@@ -125,6 +125,8 @@ export function ProjectGovernanceFeature({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const projectEditorGenerationRef = useRef(0);
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
 
   const selectedProject =
     detail && detail.projectId === selectedProjectId
@@ -306,18 +308,19 @@ export function ProjectGovernanceFeature({
   ): Promise<boolean> {
     setPendingAction(actionName);
     setActionError("");
+    const originRoute = selectedProject
+      ? adminProjectDetailRoute(selectedProject.project_id, "access")
+      : null;
     try {
       await action();
       onNotice(successMessage);
       toast.success(successMessage);
-      await onRefresh();
-      const currentRoute = normalizeRoute(window.location.pathname);
-      const currentMatch = currentRoute ? matchAppRoute(currentRoute) : null;
+      const routeRetained = await onRefresh();
       if (
+        routeRetained &&
         selectedProject &&
-        currentMatch?.kind === "admin-project-detail" &&
-        currentMatch.projectId === selectedProject.project_id &&
-        currentMatch.section === "access"
+        originRoute &&
+        pathnameRef.current === originRoute
       ) {
         await Promise.all([
           refreshProjectMembers(selectedProject.project_id),

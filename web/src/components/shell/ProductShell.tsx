@@ -2,20 +2,20 @@ import { MessageSquareText, PanelLeft, PanelLeftClose, Settings } from "lucide-r
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Button } from "../components/ui/button";
+import { Button } from "../ui/button";
 import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetHeader,
   SheetTitle,
-} from "../components/ui/sheet";
-import type { SessionState } from "../features/identity-session/index";
+} from "../ui/sheet";
+import type { SessionState } from "../../features/identity-session/index";
 import {
   ManagementNav,
   type ManagementNavGroup,
-} from "../shared/navigation";
-import { managementRouteFamily, type AppRoute } from "../shared/routes";
+} from "../../shared/navigation";
+import { managementRouteFamily, type AppRoute } from "../../shared/routes";
 import { AccountMenu } from "./AccountMenu";
 
 export function SidebarHeader({
