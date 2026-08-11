@@ -17,6 +17,7 @@ PYTHON_PROJECTS = (
     ROOT / "plugin-runner/pyproject.toml",
     ROOT / "office-renderer/pyproject.toml",
 )
+API_LOCK = ROOT / "api/uv.lock"
 INTERNAL_PYTHON_PACKAGES = {"atlas-processing-sdk"}
 CONTAINER_FILES = (
     ROOT / "api/Dockerfile",
@@ -50,6 +51,18 @@ def python_dependencies(path: Path) -> set[str]:
     }
 
 
+def locked_notice_dependencies() -> set[str]:
+    text = API_LOCK.read_text(encoding="utf-8")
+    ldap = re.search(
+        r'(?ms)^\[\[package\]\]\nname = "ldap3"\n.*?(?=^\[\[package\]\]|\Z)',
+        text,
+    )
+    pyasn1 = re.search(r'(?m)^\[\[package\]\]\nname = "pyasn1"$', text)
+    if ldap is None or '{ name = "pyasn1" },' not in ldap.group(0) or pyasn1 is None:
+        raise ValueError("ldap3 must retain its locked pyasn1 dependency")
+    return {"pyasn1"}
+
+
 def web_dependencies() -> set[str]:
     package = json.loads((ROOT / "web/package.json").read_text(encoding="utf-8"))
     return set(package.get("dependencies", {}))
@@ -59,21 +72,24 @@ def container_dependencies() -> set[str]:
     selected: set[str] = set()
     for path in CONTAINER_FILES:
         text = path.read_text(encoding="utf-8")
-        selected.update(
-            match.group(1)
-            for match in re.finditer(r"(?m)^FROM\s+([^\s]+)", text)
-            if not match.group(1).startswith("${")
+        stage_aliases = set(
+            re.findall(r"(?mi)^FROM\s+[^\s]+\s+AS\s+([^\s]+)", text)
         )
         selected.update(
-            match.group(1)
-            for match in re.finditer(r"(?m)^\s*image:\s*([^\s#]+)", text)
-            if not match.group(1).startswith("${")
+            reference
+            for reference in re.findall(r"(?m)^FROM\s+([^\s]+)", text)
+            if not reference.startswith("${") and reference not in stage_aliases
+        )
+        selected.update(
+            reference
+            for reference in re.findall(r"(?m)^\s*image:\s*([^\s#]+)", text)
+            if not reference.startswith(("${", "atlas-"))
         )
     return selected
 
 
 def model_dependency() -> str:
-    path = ROOT / "api/src/atlas_production/async_runtime/vector_index.py"
+    path = ROOT / "api/src/atlas_production/async_runtime/embedding_model_contract.py"
     values: dict[str, str] = {}
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if (
@@ -91,6 +107,7 @@ def main() -> int:
     for path in PYTHON_PROJECTS:
         expected.update(python_dependencies(path))
     expected.update(web_dependencies())
+    expected.update(locked_notice_dependencies())
     expected.update(container_dependencies())
     expected.add(model_dependency())
 

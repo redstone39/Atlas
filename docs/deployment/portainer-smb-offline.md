@@ -1,7 +1,8 @@
 # Offline Portainer bundle
 
 `infra/scripts/build_portainer_smb_offline_bundle` builds a platform-specific,
-image-only delivery directory for `linux/amd64` or `linux/arm64`.
+eight-image delivery directory for `linux/amd64` or `linux/arm64`. The eighth
+reference is the separate content-digest-tagged embedding-model image.
 
 The packaging workstation needs Docker, network access for base images and
 locked build assets, and enough disk space. The target Portainer environment
@@ -18,7 +19,7 @@ infra/scripts/build_portainer_smb_offline_bundle \
 
 The output contains:
 
-- a seven-image archive;
+- one archive containing all eight unique image references;
 - flattened `docker-compose.yml` with `pull_policy: never`;
 - `bundle-manifest.json` and `IMAGE-LOCK.json`;
 - `SHA256SUMS`;
@@ -31,6 +32,19 @@ separately; do not retag an archive for another architecture.
 Before import, verify every `SHA256SUMS` entry and confirm the manifest platform
 matches the Docker host. If an image is missing, re-import the same verified
 archive rather than enabling registry pulls or changing tags.
+
+After deploying the uploaded Compose, confirm `embedding-model-init` exits `0`
+before `api`, `celery-processing`, or `celery-indexing` starts. Its final safe
+status must report `mode=offline_verify` and content digest
+`e052ba4b733767ddea9fd3e6640ff41a0a83599baea0b0eadd97189d92f2d396`.
+Missing or modified model bytes are a startup failure; do not enable a runtime
+download or registry fallback.
+
+For a failed model initialization, verify the archive checksums and the model
+image ID from `bundle-manifest.json`, then re-import the same archive. If the
+image is correct but the initialized cache is invalid, stop the stack, remove
+only the `atlas-production-fastembed` volume, and redeploy the same bundle.
+Do not remove PostgreSQL, Redis, Qdrant, artifact, or SMB data volumes.
 
 The generated Compose accepts only uppercase `HTTP_PROXY`, `HTTPS_PROXY`, and
 `NO_PROXY` stack variables. They are passed only to `api` and

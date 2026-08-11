@@ -2,8 +2,9 @@
 
 Atlas is a self-hosted document knowledge workspace for technical evaluation and
 controlled demonstrations. It combines document intake, governed processing,
-retrieval, conversations, evidence review, administration, and auditable access
-controls in one Docker Compose deployment.
+scoped retrieval and conversations, evidence review, local or LDAP/Active
+Directory identity, administration, and auditable access controls in one Docker
+Compose deployment.
 
 This repository contains a standalone public snapshot of the Atlas runtime. It
 is published for source transparency, technical evaluation, and self-hosted
@@ -53,6 +54,10 @@ and processing state. Redis is the task broker, Qdrant is a non-authoritative
 semantic candidate index, and local or SMB storage contains governed artifact
 bytes.
 
+The separate `embedding-model` image initializes a pinned, digest-verified
+offline cache before the API and processing/indexing workers start. Runtime
+downloads are intentionally disabled.
+
 See [Architecture](docs/architecture.md) for the trust and failure boundaries.
 
 ## Workspace reasoning modes
@@ -77,6 +82,11 @@ Workspace members can remove an idle conversation from their history with the
 Delete action. This archives the conversation; it does not physically delete
 the record. Archived conversations remain available to System Admin through the
 audited administration surface.
+
+New conversations may freeze an optional set of current Team and Project scopes.
+Every fresh or retried turn intersects that selection with the caller's current
+access; revoked scopes remain unavailable and an empty intersection never
+expands back to all accessible knowledge.
 
 ## Local quick start
 
@@ -115,7 +125,7 @@ docker compose -f docker-compose.p1.yml up --build -d
 Observe the initializer and service state:
 
 ```sh
-docker compose -f docker-compose.p1.yml logs artifact-storage-init
+docker compose -f docker-compose.p1.yml logs embedding-model-init artifact-storage-init
 docker compose -f docker-compose.p1.yml ps
 curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
@@ -143,18 +153,33 @@ the documented resettable-development lifecycle.
 
 ## Provider setup
 
-Before storing Provider credentials, configure
-`ATLAS_CREDENTIAL_MASTER_KEY` and `ATLAS_CREDENTIAL_MASTER_KEY_ID`. Provider API
-keys are entered through System Admin and are not read from Provider-specific
-environment variables.
+Before storing Provider credentials or enabling an LDAP/Active Directory
+connection, configure `ATLAS_CREDENTIAL_MASTER_KEY` and
+`ATLAS_CREDENTIAL_MASTER_KEY_ID`. Provider API keys, directory bind passwords,
+and optional custom CA material are entered through System Admin and are not
+read from Provider- or directory-specific environment variables.
 
-System Admin connections use one of three closed profiles:
+Provider connections use one of three closed profiles:
 `openai_compatible`, `azure_openai`, or `anthropic`. Azure connections require
 the resource-root endpoint and an API protocol version; Anthropic uses
 `https://api.anthropic.com`. Atlas persists these connection settings and
 invokes LiteLLM in-process with the stored credential. Route-less execution
 uses only the eligible route explicitly marked as default and never falls back
 to another route.
+
+## LDAP and Active Directory
+
+System Admin can configure and test an `ldap` or `active_directory` connection,
+search and import directory users, and refresh one imported profile. Atlas
+remains authoritative for account activity, system role, grants, ACLs, and
+sessions. Local email authentication is checked first; once an imported
+directory source is selected, unavailable transport, disabled principals,
+invalid credentials, alias conflicts, or a concurrent Atlas deactivation fail
+closed without falling through to another source.
+
+The public snapshot ships unconfigured. It contains no directory endpoint,
+bind credential, custom CA, or imported identity. Live LDAP/Active Directory
+interoperability is not verified by this repository.
 
 See [Configuration](docs/configuration.md) for generation and recovery
 requirements.

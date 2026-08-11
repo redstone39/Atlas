@@ -27,13 +27,15 @@ upstream license and attribution files.
   LLVM/BSD/Boost/MIT components), and `pypdfium2` (BSD-3-Clause for the
   wrapper with Apache-2.0/BSD and other notices for PDFium and its bundled
   dependencies).
-- Other reciprocal terms: `pikepdf` (MPL-2.0) and `psycopg`
-  (LGPL-3.0-only).
+- Other reciprocal terms: `ldap3` 2.9.1 (LGPLv3), `pikepdf` (MPL-2.0),
+  and `psycopg` (LGPL-3.0-only). The locked `pyasn1` dependency used by
+  `ldap3` is BSD-2-Clause.
 
 Upstream evidence is available from each package's PyPI project metadata and
-the license files installed in its wheel. The API's `celery[redis]` extra also
-resolves Redis transport packages whose license files remain in the locked
-environment.
+the license files installed in its wheel. Distributions must preserve the
+`ldap3` and `pyasn1` license files with the other installed package licenses.
+The API's `celery[redis]` extra also resolves Redis transport packages whose
+license files remain in the locked environment.
 
 ## Web runtime dependencies
 

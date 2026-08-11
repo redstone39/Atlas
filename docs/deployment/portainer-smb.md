@@ -31,7 +31,7 @@ Git build context.
 - `ATLAS_ARTIFACT_SWITCH_MODE=operator_accepted_unverified`
 - `ATLAS_ARTIFACT_SWITCH_ACK=I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT`
 - `ATLAS_CREDENTIAL_MASTER_KEY` and `ATLAS_CREDENTIAL_MASTER_KEY_ID` before
-  storing Provider credentials
+  storing Provider or LDAP/Active Directory bind and custom-CA credentials
 
 Optional SMB variables are `ATLAS_SMB_DOMAIN` and
 `ATLAS_SMB_VERSION` (`3.1.1` by default; `3.0` is also supported).
@@ -62,6 +62,12 @@ credentials in proxy URLs unless exposure to Portainer and Docker
 administrators is acceptable.
 
 ## Initialization
+
+Confirm `embedding-model-init` exits `0` before the API and processing/indexing
+workers start. It verifies the separate embedding-model image into the shared
+`atlas-production-fastembed` volume without a network fallback. A missing or
+digest-invalid model cache intentionally keeps those consumers stopped; use
+the recovery procedure in [Offline Portainer bundle](portainer-smb-offline.md).
 
 Confirm `artifact-storage-init` exits `0` and its last JSON record includes:
 

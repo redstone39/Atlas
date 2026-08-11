@@ -2,26 +2,32 @@
 
 Atlas is a single-deployment, self-hosted document knowledge workspace. The
 supported topology contains Web, API, workers, PostgreSQL, Redis, Qdrant,
-processing plugins, an Office renderer, and governed artifact storage.
+processing plugins, an Office renderer, governed artifact storage, and a
+one-shot embedding-model cache initializer.
 
 ## User journey
 
-1. An administrator uploads a document and assigns its access scope.
-2. Document intake and processing create a current, traceable generation.
-3. A user submits a `standard` or `deep` turn in a Workspace conversation.
-4. The runtime resolves current authorization, builds immutable context
-   references, and invokes retrieval and answer tools under bounded budgets.
-   Deep turns additionally run bounded planning, evaluation, and revision.
-5. A terminal transaction publishes the answer, runtime events, safe reasoning
+1. A local or imported directory user authenticates; Atlas remains authoritative
+   for account activity, roles, grants, ACLs, and sessions.
+2. An administrator uploads a document and assigns its access scope.
+3. Document intake and processing create a current, traceable generation.
+4. A user creates a Workspace conversation with default-all knowledge or an
+   immutable Team/Project scope selection, then submits a `standard` or `deep`
+   turn.
+5. The runtime intersects the frozen selection with current authorization,
+   builds immutable context references, and invokes retrieval and answer tools
+   under bounded budgets. Deep turns additionally run bounded planning,
+   evaluation, and revision.
+6. A terminal transaction publishes the answer, runtime events, safe reasoning
    progress, evidence review status, and protected evidence references.
-6. Every later protected read recomputes current authorization and checks exact
+7. Every later protected read recomputes current authorization and checks exact
    artifact lineage.
 
 ## Authority
 
-- PostgreSQL owner repositories are authoritative for identity, projects,
-  grants, documents, processing, conversations, turns, routing, audit, and
-  terminal state.
+- PostgreSQL owner repositories are authoritative for local and imported
+  identities, directory configuration, projects, grants, documents, processing,
+  conversations, turns, routing, audit, and terminal state.
 - Local or SMB storage owns artifact bytes, but it does not grant access or
   define business state.
 - Qdrant supplies semantic candidates. It is not an authorization or lineage
@@ -30,6 +36,9 @@ processing plugins, an Office renderer, and governed artifact storage.
   authority.
 - `turn_execution` coordinates work; `turn_runtime` owns execution state,
   leases, budgets, events, and terminal transitions.
+- The embedding contract owns its model name, revision, allowlist, and content
+  digest. `embedding-model-init` verifies and initializes the shared offline
+  cache; its image and volume are carriers, not a second model authority.
 
 Architecture ownership and dependency direction are executable in
 `architecture-boundaries.json` and checked by
@@ -40,6 +49,12 @@ Architecture ownership and dependency direction are executable in
 - Document and conversation access is recalculated from current direct and
   transitive grants on every request.
 - Conversation ownership never grants document access.
+- A conversation's optional Team/Project selection is immutable. Fresh and
+  retry execution intersects it with current ACLs; an empty result remains empty
+  rather than reverting to default-all.
+- Direct Team Admin or exact-scope Project Admin authority may bypass a
+  document's member-download flag only for that document's exact owner scope,
+  and the same capability is rechecked at terminal byte I/O.
 - Evidence preview requires current authorization and exact immutable lineage.
 - An answer's `evidence_aligned` or `questionable` status is a soft comparison
   with model-declared evidence, not a truth guarantee or formal citation
@@ -52,6 +67,22 @@ Architecture ownership and dependency direction are executable in
   closed and do not publish a fabricated successful result.
 - Protected previews do not provide public URLs, persistent viewer tokens, or
   cross-page document navigation.
+
+## Identity directory integration
+
+Identity Access checks a unique local email account first. Only when none exists
+may it select the first-priority enabled LDAP or Active Directory connection
+with exactly one imported external-identity match. Selection is final for that
+attempt: transport failure, disabled directory principal, invalid password,
+alias conflict, inactive Atlas account, or concurrent deactivation fails closed
+without trying another source.
+
+Directory connection metadata and external identities are durable PostgreSQL
+state. Bind passwords and optional custom CA material use the existing
+AES-256-GCM credential keyring with kind-specific authenticated data. Secret
+values are write-only and never returned. Missing or unreadable key material
+makes directory secret operations unavailable; there is no plaintext fallback
+or scheduled directory sync.
 
 ## Provider and model routing
 
@@ -105,8 +136,9 @@ unless the persisted explicit default is currently eligible.
   original content.
 - Workspace: conversation routes, durable execution status, answers, soft
   evidence review, and protected page evidence.
-- System Admin: users, teams, projects, Provider/model routes, plugins,
-  agents/tokens, safe audit events, and conversation runtime inspection.
+- System Admin: users, teams, projects, Provider/model routes, LDAP/Active
+  Directory connections and imported profiles, plugins, agents/tokens, safe
+  audit events, and conversation runtime inspection.
 - Agent query management exists, but `POST /api/v1/agent/queries` currently
   returns `501 feature_deferred`.
 

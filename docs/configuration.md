@@ -1,8 +1,8 @@
 # Configuration
 
 Atlas reads process configuration at startup and stores Provider/model routing
-through System Admin. Environment variables are deployment inputs, not a mutable
-global configuration database.
+and LDAP/Active Directory connection metadata through System Admin. Environment
+variables are deployment inputs, not a mutable global configuration database.
 
 ## Bootstrap administrator
 
@@ -35,10 +35,32 @@ Generate a local evaluation key:
 openssl rand -base64 32
 ```
 
-Keep the active key and key ID stable for as long as encrypted Provider
-credentials must remain readable. Losing them makes those credentials
-unrecoverable. Provider API keys are entered through System Admin; do not add
-Provider-specific keys to `.env`.
+Keep the active key and key ID stable for as long as encrypted Provider or
+directory credentials must remain readable. Losing all matching keys makes
+Provider API keys, directory bind passwords, and custom CA material
+unrecoverable. Enter those secrets through System Admin; do not add
+Provider- or directory-specific credentials to `.env`.
+
+## LDAP and Active Directory connections
+
+System Admin may create `ldap` or `active_directory` connections with `ldaps`
+or `start_tls`, a bind identity, search bases/filters, attribute mappings, and a
+priority. Bind passwords and optional custom CA material are encrypted with the
+credential master key using secret-kind-specific authenticated data. They are
+write-only: list, create, update, test, search, import, and profile-refresh
+responses never return plaintext or ciphertext.
+
+Configure a readable `ATLAS_CREDENTIAL_MASTER_KEY`, its key ID, and any retained
+keyring entries before enabling a directory connection. Missing or unreadable
+key material makes directory secret use unavailable and login through the
+selected source fails closed. Atlas provides no plaintext, per-connection
+environment, or automatic fallback credential path.
+
+Directory integration is unconfigured by default. Local login remains
+available. Imported identities must be created through the System Admin search
+and import flow; Atlas does not run a scheduled directory synchronization.
+Atlas account activity, roles, grants, ACLs, and sessions remain authoritative
+after import.
 
 ## Provider connections
 
@@ -117,7 +139,9 @@ usage with the current route.
 - Plugin trust: `ATLAS_PLUGIN_TRUSTED_KEYS_JSON`,
   `ATLAS_ALLOW_UNSIGNED_PLUGINS`
 - Offline caches: `ATLAS_FASTEMBED_CACHE`, `TIKTOKEN_CACHE_DIR`,
-  `ATLAS_EMBEDDING_OFFLINE`
+  `ATLAS_EMBEDDING_OFFLINE`. Compose initializes the pinned embedding cache from
+  the separate model image before API and processing/indexing consumers start;
+  runtime network download fallback is unsupported.
 - Process proxy for API and `celery-processing`: uppercase `HTTP_PROXY`,
   `HTTPS_PROXY`, and `NO_PROXY`. The Portainer compositions prepend
   `::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web`
