@@ -358,14 +358,12 @@ class ModelRoutingService:
                 api_key = self.repository.decrypt_secret(current, secret)
             updated_routes: list[ModelRouteRecord] = []
             now = utc_now_iso()
-            manual_profile_without_enabled_route = (
-                candidate.provider_type in {"azure_openai", "anthropic"}
-                and not any(route.enabled for route in linked)
+            enabled_routes = [route for route in linked if route.enabled]
+            can_validate = (
+                candidate.provider_type == "openai_compatible"
+                or bool(enabled_routes)
             )
-            if manual_profile_without_enabled_route:
-                candidate.status = "configured"
-                candidate.enabled = False
-            elif validation_needed:
+            if validation_needed and can_validate:
                 try:
                     self._validate_connection(candidate, api_key, linked)
                 except ProviderError:
@@ -383,16 +381,16 @@ class ModelRoutingService:
                 candidate.status = "verified"
                 candidate.enabled = True
                 candidate.last_verified_at = now
-                for route in linked:
-                    if route.enabled:
-                        self._mark_route_ready(route)
-                        route.last_tested_at = now
-                        route.revision += 1
-                        updated_routes.append(route)
-            if manual_profile_without_enabled_route:
-                candidate.enabled = False
+                for route in enabled_routes:
+                    self._mark_route_ready(route)
+                    route.last_tested_at = now
+                    route.revision += 1
+                    updated_routes.append(route)
+            elif validation_needed:
                 candidate.status = "configured"
-            elif payload.enabled is False:
+                candidate.enabled = False
+                candidate.last_verified_at = None
+            if payload.enabled is False:
                 candidate.enabled = False
                 candidate.status = "disabled"
             elif payload.enabled is True and not validation_needed:

@@ -304,6 +304,7 @@ def test_omitted_update_does_not_clear_azure_version() -> None:
         api_version="2024-10-21",
         status="verified",
         enabled=True,
+        last_verified_at="2026-08-14T00:00:00Z",
         revision=4,
     )
     repository = ConnectionRepository(connection)
@@ -315,9 +316,9 @@ def test_omitted_update_does_not_clear_azure_version() -> None:
     )
 
     outcome = service.update_connection(ADMIN, connection.connection_id, payload)
-    assert outcome.result.status == "configured"
-    assert outcome.result.enabled is False
-
+    assert outcome.result.status == "verified"
+    assert outcome.result.enabled is True
+    assert outcome.result.last_verified_at == "2026-08-14T00:00:00Z"
     assert "api_version" not in payload.model_fields_set
     assert outcome.result.revision == 5
     assert outcome.result.api_version == "2024-10-21"
@@ -353,8 +354,9 @@ def test_unlinked_manual_profile_update_stays_configured_and_disabled(
         provider_type=provider_type,
         endpoint_url=endpoint_url,
         api_version=api_version,
-        status="configured",
-        enabled=False,
+        status="verified",
+        enabled=True,
+        last_verified_at="2026-08-14T00:00:00Z",
         revision=4,
     )
     repository = ConnectionRepository(connection)
@@ -382,6 +384,7 @@ def test_unlinked_manual_profile_update_stays_configured_and_disabled(
     assert stored.status == "configured"
     assert stored.enabled is False
     assert stored.api_version == updated_api_version
+    assert stored.last_verified_at is None
     assert repository.secrets[connection.connection_id].version == 2
 
 
