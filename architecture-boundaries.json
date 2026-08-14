@@ -3,14 +3,22 @@
   "source_roots": {
     "backend": {
       "path": "api/src/atlas_production",
-      "extensions": [".py"],
+      "extensions": [
+        ".py"
+      ],
       "exclude_path_prefixes": [],
       "exclude_filename_suffixes": []
     },
     "frontend": {
       "path": "web/src",
-      "extensions": [".ts", ".tsx"],
-      "exclude_path_prefixes": ["web/src/test"],
+      "extensions": [
+        ".ts",
+        ".tsx"
+      ],
+      "exclude_path_prefixes": [
+        "web/src/test",
+        "web/src/App.test-support"
+      ],
       "exclude_filename_suffixes": [
         ".d.ts",
         ".test.ts",
@@ -117,6 +125,16 @@
       "public_contracts": [
         "api/src/atlas_production/modules/project_governance/public.py",
         "api/src/atlas_production/modules/project_governance/records.py"
+      ]
+    },
+    {
+      "id": "notes",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/notes"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/notes/public.py"
       ]
     },
     {
@@ -305,7 +323,9 @@
     {
       "id": "frontend_features",
       "role": "module",
-      "path_prefixes": ["web/src/features"],
+      "path_prefixes": [
+        "web/src/features"
+      ],
       "public_contracts": [
         "web/src/features/agent-access/index.ts",
         "web/src/features/conversation-audit/index.ts",
@@ -341,15 +361,21 @@
       "id": "backend-routes-do-not-import-routes",
       "language": "python",
       "kind": "forbid_prefix",
-      "source_prefixes": ["atlas_production.routes"],
-      "forbidden_target_prefixes": ["atlas_production.routes"],
+      "source_prefixes": [
+        "atlas_production.routes"
+      ],
+      "forbidden_target_prefixes": [
+        "atlas_production.routes"
+      ],
       "allowed_target_ids": []
     },
     {
       "id": "backend-shared-dependency-direction",
       "language": "python",
       "kind": "forbid_prefix",
-      "source_prefixes": ["atlas_production.shared"],
+      "source_prefixes": [
+        "atlas_production.shared"
+      ],
       "forbidden_target_prefixes": [
         "atlas_production.app",
         "atlas_production.routes",
@@ -361,34 +387,73 @@
       "allowed_target_ids": []
     },
     {
+      "id": "notes-excluded-consumer-isolation",
+      "language": "python",
+      "kind": "forbid_prefix",
+      "source_prefixes": [
+        "atlas_production.modules.processing_pipeline",
+        "atlas_production.routes.knowledge_library",
+        "atlas_production.modules.retrieval",
+        "atlas_production.modules.citation_preview",
+        "atlas_production.modules.turn_execution",
+        "atlas_production.modules.turn_runtime"
+      ],
+      "forbidden_target_prefixes": [
+        "atlas_production.modules.notes"
+      ],
+      "allowed_target_ids": []
+    },
+    {
       "id": "backend-module-public-api",
       "language": "python",
       "kind": "cross_slice_public_api",
       "slice_root": "atlas_production.modules",
-      "public_target_suffixes": ["", ".public", ".records"]
+      "public_target_suffixes": [
+        "",
+        ".public",
+        ".records"
+      ]
     },
     {
       "id": "backend-routes-use-module-public-api",
       "language": "python",
       "kind": "public_api_only",
-      "source_prefixes": ["atlas_production.routes"],
+      "source_prefixes": [
+        "atlas_production.routes"
+      ],
       "target_root": "atlas_production.modules",
-      "public_target_suffixes": [".public"]
+      "public_target_suffixes": [
+        ".public"
+      ]
     },
     {
       "id": "frontend-shared-dependency-direction",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["shared", "components/ui", "hooks", "lib"],
-      "forbidden_target_prefixes": ["app", "components/pages", "features"],
+      "source_prefixes": [
+        "shared",
+        "components/ui",
+        "hooks",
+        "lib"
+      ],
+      "forbidden_target_prefixes": [
+        "app",
+        "components/pages",
+        "features"
+      ],
       "allowed_target_ids": []
     },
     {
       "id": "frontend-features-do-not-import-upper-layers",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["features"],
-      "forbidden_target_prefixes": ["app", "components/pages"],
+      "source_prefixes": [
+        "features"
+      ],
+      "forbidden_target_prefixes": [
+        "app",
+        "components/pages"
+      ],
       "allowed_target_ids": []
     },
     {
@@ -396,30 +461,46 @@
       "language": "typescript",
       "kind": "cross_slice_public_api",
       "slice_root": "features",
-      "public_target_suffixes": ["/index"]
+      "public_target_suffixes": [
+        "/index"
+      ]
     },
     {
       "id": "frontend-consumers-use-feature-public-api",
       "language": "typescript",
       "kind": "public_api_only",
-      "source_prefixes": ["components/pages", "api", "types"],
+      "source_prefixes": [
+        "components/pages",
+        "api",
+        "types"
+      ],
       "target_root": "features",
-      "public_target_suffixes": ["/index"]
+      "public_target_suffixes": [
+        "/index"
+      ]
     },
     {
       "id": "frontend-pages-do-not-import-app",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["components/pages"],
-      "forbidden_target_prefixes": ["app"],
+      "source_prefixes": [
+        "components/pages"
+      ],
+      "forbidden_target_prefixes": [
+        "app"
+      ],
       "allowed_target_ids": []
     },
     {
       "id": "frontend-pages-do-not-import-pages",
       "language": "typescript",
       "kind": "forbid_prefix",
-      "source_prefixes": ["components/pages"],
-      "forbidden_target_prefixes": ["components/pages"],
+      "source_prefixes": [
+        "components/pages"
+      ],
+      "forbidden_target_prefixes": [
+        "components/pages"
+      ],
       "allowed_target_ids": []
     }
   ],

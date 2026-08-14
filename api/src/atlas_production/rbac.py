@@ -24,6 +24,7 @@ TEAM_ROLE_ORDER = {
 
 ACTION_REQUIRED_ROLE = {
     "workspace_query": "viewer",
+    "notes_membership": "viewer",
     "citation_copy": "viewer",
     "copy_citation": "viewer",
     "read_derived": "viewer",

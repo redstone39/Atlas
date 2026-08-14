@@ -7,15 +7,18 @@ from .ports import OpsReadinessRepository
 
 
 class OpsReadinessService:
-    def __init__(self, repository: OpsReadinessRepository, artifact_storage=None) -> None:
+    def __init__(self, repository: OpsReadinessRepository, artifact_storage=None, notes_collaboration=None) -> None:
         self.repository = repository
         self.artifact_storage = artifact_storage
+        self.notes_collaboration = notes_collaboration
 
     def readiness(self) -> ReadinessState:
         self.repository.refresh()
         blockers: list[str] = []
         if self.artifact_storage is not None and not self.artifact_storage.readiness_available():
             blockers.append("ops.configure_artifact_storage")
+        if self.notes_collaboration is not None and not self.notes_collaboration.readiness_available():
+            blockers.append("ops.notes_collaboration_is_unavailable")
         if not self.repository.has_projects():
             blockers.append("ops.create_project")
         if not self.repository.has_active_permission():

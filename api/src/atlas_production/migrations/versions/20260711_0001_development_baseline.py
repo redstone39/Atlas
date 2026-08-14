@@ -524,6 +524,190 @@ def upgrade() -> None:
     sa.Column('policy_profile_id', sa.String(), nullable=False),
     sa.PrimaryKeyConstraint('project_id')
     )
+    op.create_table('atlas_note_categories',
+    sa.Column('category_id', sa.String(length=200), nullable=False),
+    sa.Column('scope_type', sa.String(length=20), nullable=False),
+    sa.Column('scope_id', sa.String(length=200), nullable=False),
+    sa.Column('name', sa.String(length=200), nullable=False),
+    sa.Column('lifecycle_status', sa.String(length=20), nullable=False),
+    sa.Column('metadata_revision', sa.BigInteger(), nullable=False),
+    sa.Column('created_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('trashed_actor_id', sa.String(length=200), nullable=True),
+    sa.Column('trashed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("scope_type IN ('project','team')", name='ck_atlas_note_category_scope_type'),
+    sa.CheckConstraint("lifecycle_status IN ('active','trashed')", name='ck_atlas_note_category_lifecycle'),
+    sa.CheckConstraint('char_length(name) BETWEEN 1 AND 200', name='ck_atlas_note_category_name'),
+    sa.CheckConstraint('metadata_revision >= 1', name='ck_atlas_note_category_metadata_revision'),
+    sa.CheckConstraint("(lifecycle_status = 'active' AND trashed_actor_id IS NULL AND trashed_at IS NULL) OR (lifecycle_status = 'trashed' AND trashed_actor_id IS NOT NULL AND trashed_at IS NOT NULL)", name='ck_atlas_note_category_trash_metadata'),
+    sa.PrimaryKeyConstraint('category_id'),
+    sa.UniqueConstraint('category_id', 'scope_type', 'scope_id', name='uq_atlas_note_category_exact_scope'),
+    sa.UniqueConstraint('scope_type', 'scope_id', 'name', name='uq_atlas_note_category_scope_name')
+    )
+    op.create_index('ix_atlas_note_category_scope_lifecycle', 'atlas_note_categories', ['scope_type', 'scope_id', 'lifecycle_status'], unique=False)
+    op.create_table('atlas_notes',
+    sa.Column('note_id', sa.String(length=200), nullable=False),
+    sa.Column('scope_type', sa.String(length=20), nullable=False),
+    sa.Column('scope_id', sa.String(length=200), nullable=False),
+    sa.Column('category_id', sa.String(length=200), nullable=True),
+    sa.Column('title', sa.String(length=500), nullable=False),
+    sa.Column('lifecycle_status', sa.String(length=20), nullable=False),
+    sa.Column('metadata_revision', sa.BigInteger(), nullable=False),
+    sa.Column('accepted_update_head', sa.BigInteger(), nullable=False),
+    sa.Column('savepoint_head', sa.BigInteger(), nullable=False),
+    sa.Column('collaboration_epoch', sa.BigInteger(), nullable=False),
+    sa.Column('created_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('trashed_actor_id', sa.String(length=200), nullable=True),
+    sa.Column('trashed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("scope_type IN ('project','team')", name='ck_atlas_note_scope_type'),
+    sa.CheckConstraint("lifecycle_status IN ('active','trashed')", name='ck_atlas_note_lifecycle'),
+    sa.CheckConstraint('char_length(title) BETWEEN 1 AND 500', name='ck_atlas_note_title'),
+    sa.CheckConstraint('metadata_revision >= 1 AND accepted_update_head >= 1 AND savepoint_head >= 1 AND collaboration_epoch >= 1', name='ck_atlas_note_heads'),
+    sa.CheckConstraint("(lifecycle_status = 'active' AND trashed_actor_id IS NULL AND trashed_at IS NULL) OR (lifecycle_status = 'trashed' AND trashed_actor_id IS NOT NULL AND trashed_at IS NOT NULL)", name='ck_atlas_note_trash_metadata'),
+    sa.ForeignKeyConstraint(['category_id', 'scope_type', 'scope_id'], ['atlas_note_categories.category_id', 'atlas_note_categories.scope_type', 'atlas_note_categories.scope_id'], name='fk_atlas_note_exact_scope_category', initially='DEFERRED', deferrable=True),
+    sa.PrimaryKeyConstraint('note_id')
+    )
+    op.create_index('ix_atlas_note_scope_lifecycle', 'atlas_notes', ['scope_type', 'scope_id', 'lifecycle_status'], unique=False)
+    op.create_index('ix_atlas_note_category', 'atlas_notes', ['category_id'], unique=False)
+    op.create_table('atlas_note_revisions',
+    sa.Column('revision_id', sa.String(length=200), nullable=False),
+    sa.Column('note_id', sa.String(length=200), nullable=False),
+    sa.Column('sequence', sa.BigInteger(), nullable=False),
+    sa.Column('server_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('actor_id', sa.String(length=200), nullable=False),
+    sa.Column('event_kind', sa.String(length=30), nullable=False),
+    sa.Column('raw_yjs_update', sa.LargeBinary(), nullable=False),
+    sa.Column('before_digest', sa.String(length=64), nullable=False),
+    sa.Column('after_digest', sa.String(length=64), nullable=False),
+    sa.Column('change_set', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('restore_source_savepoint_id', sa.String(length=200), nullable=True),
+    sa.CheckConstraint('sequence >= 1', name='ck_atlas_note_revision_sequence'),
+    sa.CheckConstraint("event_kind IN ('create','content_update','body_restore')", name='ck_atlas_note_revision_kind'),
+    sa.CheckConstraint("before_digest ~ '^[0-9a-f]{64}$' AND after_digest ~ '^[0-9a-f]{64}$'", name='ck_atlas_note_revision_digests'),
+    sa.CheckConstraint("(event_kind = 'body_restore' AND restore_source_savepoint_id IS NOT NULL) OR (event_kind <> 'body_restore' AND restore_source_savepoint_id IS NULL)", name='ck_atlas_note_revision_restore_source'),
+    sa.ForeignKeyConstraint(['note_id'], ['atlas_notes.note_id']),
+    sa.PrimaryKeyConstraint('revision_id'),
+    sa.UniqueConstraint('note_id', 'sequence', name='uq_atlas_note_revision_sequence')
+    )
+    op.create_index('ix_atlas_note_revision_note_time', 'atlas_note_revisions', ['note_id', 'server_timestamp'], unique=False)
+    op.create_table('atlas_note_savepoints',
+    sa.Column('savepoint_id', sa.String(length=200), nullable=False),
+    sa.Column('note_id', sa.String(length=200), nullable=False),
+    sa.Column('sequence', sa.BigInteger(), nullable=False),
+    sa.Column('covered_revision', sa.BigInteger(), nullable=False),
+    sa.Column('encoded_yjs_state', sa.LargeBinary(), nullable=False),
+    sa.Column('canonical_body', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('document_schema', sa.String(length=100), nullable=False),
+    sa.Column('body_digest', sa.String(length=64), nullable=False),
+    sa.Column('aggregate_change_set', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('contributor_actor_ids', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint('sequence >= 1 AND covered_revision >= 1', name='ck_atlas_note_savepoint_heads'),
+    sa.CheckConstraint("body_digest ~ '^[0-9a-f]{64}$'", name='ck_atlas_note_savepoint_digest'),
+    sa.ForeignKeyConstraint(['note_id'], ['atlas_notes.note_id']),
+    sa.PrimaryKeyConstraint('savepoint_id'),
+    sa.UniqueConstraint('note_id', 'sequence', name='uq_atlas_note_savepoint_sequence'),
+    sa.UniqueConstraint('note_id', 'covered_revision', name='uq_atlas_note_savepoint_covered_revision')
+    )
+    op.create_index('ix_atlas_note_savepoint_note_time', 'atlas_note_savepoints', ['note_id', 'created_at'], unique=False)
+    op.create_foreign_key('fk_atlas_note_revision_restore_savepoint', 'atlas_note_revisions', 'atlas_note_savepoints', ['restore_source_savepoint_id'], ['savepoint_id'])
+    op.create_table('atlas_note_attachments',
+    sa.Column('attachment_id', sa.String(length=200), nullable=False),
+    sa.Column('note_id', sa.String(length=200), nullable=False),
+    sa.Column('artifact_id', sa.String(length=200), nullable=False),
+    sa.Column('mime_type', sa.String(length=100), nullable=False),
+    sa.Column('byte_size', sa.BigInteger(), nullable=False),
+    sa.Column('sha256', sa.String(length=64), nullable=False),
+    sa.Column('width', sa.BigInteger(), nullable=False),
+    sa.Column('height', sa.BigInteger(), nullable=False),
+    sa.Column('idempotency_key', sa.String(length=200), nullable=False),
+    sa.Column('request_fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('created_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("mime_type IN ('image/png','image/jpeg','image/webp')", name='ck_atlas_note_attachment_mime'),
+    sa.CheckConstraint('byte_size BETWEEN 1 AND 16777216', name='ck_atlas_note_attachment_size'),
+    sa.CheckConstraint("sha256 ~ '^[0-9a-f]{64}$' AND request_fingerprint ~ '^[0-9a-f]{64}$'", name='ck_atlas_note_attachment_digests'),
+    sa.CheckConstraint('width >= 1 AND height >= 1', name='ck_atlas_note_attachment_dimensions'),
+    sa.ForeignKeyConstraint(['note_id'], ['atlas_notes.note_id']),
+    sa.PrimaryKeyConstraint('attachment_id'),
+    sa.UniqueConstraint('artifact_id'),
+    sa.UniqueConstraint('note_id', 'idempotency_key', name='uq_atlas_note_attachment_idempotency')
+    )
+    op.create_index('ix_atlas_note_attachment_note', 'atlas_note_attachments', ['note_id', 'created_at'], unique=False)
+    op.create_table('atlas_notes_settings',
+    sa.Column('settings_key', sa.String(length=30), nullable=False),
+    sa.Column('checkpoint_interval_seconds', sa.BigInteger(), server_default=sa.text('30'), nullable=False),
+    sa.Column('settings_revision', sa.BigInteger(), nullable=False),
+    sa.Column('updated_actor_id', sa.String(length=200), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("settings_key = 'global'", name='ck_atlas_notes_settings_singleton'),
+    sa.CheckConstraint('checkpoint_interval_seconds > 0', name='ck_atlas_notes_settings_positive_interval'),
+    sa.CheckConstraint('settings_revision >= 1', name='ck_atlas_notes_settings_revision'),
+    sa.PrimaryKeyConstraint('settings_key')
+    )
+    op.execute("INSERT INTO atlas_notes_settings (settings_key, checkpoint_interval_seconds, settings_revision, updated_actor_id, updated_at) VALUES ('global', 30, 1, 'system:development-baseline', CURRENT_TIMESTAMP)")
+    op.execute(
+        """
+        CREATE FUNCTION atlas_reject_notes_append_only_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'notes revisions and savepoints are append-only'
+            USING ERRCODE = '23514';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER atlas_note_revisions_append_only
+        BEFORE UPDATE OR DELETE ON atlas_note_revisions
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_notes_append_only_mutation();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER atlas_note_savepoints_append_only
+        BEFORE UPDATE OR DELETE ON atlas_note_savepoints
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_notes_append_only_mutation();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER atlas_note_attachments_immutable
+        BEFORE UPDATE OR DELETE ON atlas_note_attachments
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_notes_append_only_mutation()
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION atlas_reject_notes_physical_delete()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'notes and categories cannot be physically deleted'
+            USING ERRCODE = '23514';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER atlas_notes_no_delete
+        BEFORE DELETE ON atlas_notes
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_notes_physical_delete();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER atlas_note_categories_no_delete
+        BEFORE DELETE ON atlas_note_categories
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_notes_physical_delete();
+        """
+    )
     op.create_table('atlas_promotion_decisions',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -938,7 +1122,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.String(), nullable=False),
     sa.Column('updated_at', sa.String(), nullable=False),
     sa.CheckConstraint("(owner_scope_type = 'system' AND owner_scope_id IS NULL) OR (owner_scope_type <> 'system' AND owner_scope_id IS NOT NULL)", name='ck_atlas_artifact_owner_id'),
-    sa.CheckConstraint("artifact_class IN ('original_document','original_inline_source','document_page_pdf','page_image','processing_native_image','preview','conversation_turn_input','conversation_turn_answer','conversation_summary','protected_model_payload','evidence_pack')", name='ck_atlas_artifact_class'),
+    sa.CheckConstraint("artifact_class IN ('original_document','original_inline_source','document_page_pdf','page_image','processing_native_image','preview','conversation_turn_input','conversation_turn_answer','conversation_summary','protected_model_payload','evidence_pack','note_image')", name='ck_atlas_artifact_class'),
     sa.CheckConstraint("artifact_class NOT IN ('document_page_pdf','page_image','processing_native_image','preview') OR (source_artifact_id IS NOT NULL AND processing_generation IS NOT NULL)", name='ck_atlas_artifact_derived_lineage'),
     sa.CheckConstraint("checksum_algorithm = 'sha256'", name='ck_atlas_artifact_checksum_algorithm'),
     sa.CheckConstraint("checksum_value ~ '^[0-9a-f]{64}$'", name='ck_atlas_artifact_checksum_value'),
@@ -1485,6 +1669,26 @@ def downgrade() -> None:
     bind = op.get_bind()
     for table in reversed(_atr020_tables()):
         table.drop(bind=bind, checkfirst=False)
+    op.execute("DROP TRIGGER IF EXISTS atlas_note_attachments_immutable ON atlas_note_attachments")
+    op.execute("DROP TRIGGER IF EXISTS atlas_note_categories_no_delete ON atlas_note_categories")
+    op.execute("DROP TRIGGER IF EXISTS atlas_notes_no_delete ON atlas_notes")
+    op.execute("DROP FUNCTION IF EXISTS atlas_reject_notes_physical_delete()")
+    op.execute("DROP TRIGGER IF EXISTS atlas_note_savepoints_append_only ON atlas_note_savepoints")
+    op.execute("DROP TRIGGER IF EXISTS atlas_note_revisions_append_only ON atlas_note_revisions")
+    op.execute("DROP FUNCTION IF EXISTS atlas_reject_notes_append_only_mutation()")
+    op.drop_table('atlas_notes_settings')
+    op.drop_index('ix_atlas_note_attachment_note', table_name='atlas_note_attachments')
+    op.drop_table('atlas_note_attachments')
+    op.drop_constraint('fk_atlas_note_revision_restore_savepoint', 'atlas_note_revisions', type_='foreignkey')
+    op.drop_index('ix_atlas_note_savepoint_note_time', table_name='atlas_note_savepoints')
+    op.drop_table('atlas_note_savepoints')
+    op.drop_index('ix_atlas_note_revision_note_time', table_name='atlas_note_revisions')
+    op.drop_table('atlas_note_revisions')
+    op.drop_index('ix_atlas_note_category', table_name='atlas_notes')
+    op.drop_index('ix_atlas_note_scope_lifecycle', table_name='atlas_notes')
+    op.drop_table('atlas_notes')
+    op.drop_index('ix_atlas_note_category_scope_lifecycle', table_name='atlas_note_categories')
+    op.drop_table('atlas_note_categories')
     op.execute("DROP TRIGGER IF EXISTS atlas_artifact_operation_evidence_immutable ON atlas_artifact_operations")
     op.execute("DROP FUNCTION IF EXISTS atlas_reject_artifact_operation_evidence_update()")
     op.execute("DROP TRIGGER IF EXISTS atlas_artifact_source_cycle ON atlas_artifacts")

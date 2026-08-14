@@ -19,6 +19,10 @@ from .contracts import (
     ProjectGovernanceError,
 )
 from .ports import ProjectGovernanceRepository
+from .notes_membership import (
+    CurrentProjectNotesMembershipReader,
+    CurrentProjectNotesMembershipSnapshot,
+)
 from .service import ProjectGovernanceService
 
 __all__ = [
@@ -37,6 +41,8 @@ __all__ = [
     "ProjectActionOutcome",
     "ProjectAuditCommand",
     "ProjectGovernanceError",
+    "CurrentProjectNotesMembershipReader",
+    "CurrentProjectNotesMembershipSnapshot",
     "ProjectGovernanceRepository",
     "ProjectGovernanceService",
 ]

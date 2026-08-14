@@ -26,15 +26,22 @@ from atlas_production.infrastructure.postgres_owner.audit import (
     AccessDecisionWriter,
     AuditEventWriter,
 )
+from atlas_production.modules.identity_access.notes_membership import (
+    CurrentTeamNotesMembershipSnapshot,
+)
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     PermissionGrantRecord,
+)
+from atlas_production.modules.project_governance.notes_membership import (
+    CurrentProjectNotesMembershipSnapshot,
 )
 from atlas_production.modules.project_governance.records import ProjectRecord
 from atlas_production.shared.public import AuditEventRecord
 from atlas_production.shared.public import utc_now_iso
 from atlas_production.rbac import (
     ACTION_REQUIRED_ROLE,
+    MAX_TEAM_DEPTH,
     ROLE_ORDER,
     highest_role,
     role_covers,
@@ -618,10 +625,10 @@ class ActionAwareAclAuthority:
         lock_rows: bool = False,
     ) -> dict[str, int]:
         membership_statement = select(AtlasTeamMembershipRow).where(
-                AtlasTeamMembershipRow.member_actor_type == actor_type,
-                AtlasTeamMembershipRow.member_actor_id == actor_id,
-                AtlasTeamMembershipRow.status == "active",
-            ).order_by(AtlasTeamMembershipRow.membership_id)
+            AtlasTeamMembershipRow.member_actor_type == actor_type,
+            AtlasTeamMembershipRow.member_actor_id == actor_id,
+            AtlasTeamMembershipRow.status == "active",
+        ).order_by(AtlasTeamMembershipRow.membership_id)
         if lock_rows:
             membership_statement = membership_statement.with_for_update()
         memberships = session.scalars(membership_statement).all()
@@ -648,6 +655,60 @@ class ActionAwareAclAuthority:
                 current_id = team.parent_team_id
                 distance += 1
         return tiers
+
+    @staticmethod
+    def _actor_team_tiers_with_validity(
+        session: Session,
+        *,
+        actor_type: str,
+        actor_id: str,
+        lock_rows: bool = False,
+    ) -> tuple[dict[str, int], bool]:
+        membership_statement = select(AtlasTeamMembershipRow).where(
+            AtlasTeamMembershipRow.member_actor_type == actor_type,
+            AtlasTeamMembershipRow.member_actor_id == actor_id,
+            AtlasTeamMembershipRow.status == "active",
+        ).order_by(AtlasTeamMembershipRow.membership_id)
+        if lock_rows:
+            membership_statement = membership_statement.with_for_update()
+        memberships = session.scalars(membership_statement).all()
+        tiers: dict[str, int] = {}
+        invalid_hierarchy = False
+        for membership in memberships:
+            if membership.role not in {"member", "uploader", "admin"}:
+                invalid_hierarchy = True
+                continue
+            distance = 0
+            seen: set[str] = set()
+            path_tiers: dict[str, int] = {}
+            current_id: str | None = membership.team_id
+            valid_path = True
+            while current_id:
+                if current_id in seen or distance >= MAX_TEAM_DEPTH:
+                    valid_path = False
+                    break
+                seen.add(current_id)
+                team = (
+                    session.scalar(
+                        select(AtlasTeamRow)
+                        .where(AtlasTeamRow.team_id == current_id)
+                        .with_for_update()
+                    )
+                    if lock_rows
+                    else session.get(AtlasTeamRow, current_id)
+                )
+                if team is None or team.status != "active":
+                    valid_path = False
+                    break
+                path_tiers[current_id] = 1 + distance
+                current_id = team.parent_team_id
+                distance += 1
+            if not valid_path:
+                invalid_hierarchy = True
+                continue
+            for team_id, tier in path_tiers.items():
+                tiers[team_id] = min(tiers.get(team_id, tier), tier)
+        return tiers, invalid_hierarchy
 
     @classmethod
     def _effective_team_tag_ids(
@@ -690,6 +751,187 @@ class ActionAwareAclAuthority:
             return f"Team {grant.subject_id}"
         return f"Actor {grant.subject_id}"
 
+@dataclass(frozen=True, slots=True)
+class PostgresNotesMembershipAuthority:
+    """Project/Team Notes projection over the existing current authorities."""
+
+    session_factory: SessionFactory
+
+    @staticmethod
+    def _actor_team_notes_memberships_with_validity(
+        session: Session,
+        *,
+        actor_type: str,
+        actor_id: str,
+        lock_rows: bool = False,
+    ) -> tuple[set[str], bool]:
+        membership_statement = select(AtlasTeamMembershipRow).where(
+            AtlasTeamMembershipRow.member_actor_type == actor_type,
+            AtlasTeamMembershipRow.member_actor_id == actor_id,
+            AtlasTeamMembershipRow.status == "active",
+        ).order_by(AtlasTeamMembershipRow.membership_id)
+        if lock_rows:
+            membership_statement = membership_statement.with_for_update()
+        memberships = session.scalars(membership_statement).all()
+        team_ids: set[str] = set()
+        invalid_hierarchy = False
+        for membership in memberships:
+            if membership.role not in {"member", "uploader", "admin"}:
+                invalid_hierarchy = True
+                continue
+            seen: set[str] = set()
+            path_team_ids: set[str] = set()
+            current_id: str | None = membership.team_id
+            distance = 0
+            valid_path = True
+            while current_id:
+                if current_id in seen or distance >= MAX_TEAM_DEPTH:
+                    valid_path = False
+                    break
+                seen.add(current_id)
+                team = (
+                    session.scalar(
+                        select(AtlasTeamRow)
+                        .where(AtlasTeamRow.team_id == current_id)
+                        .with_for_update()
+                    )
+                    if lock_rows
+                    else session.get(AtlasTeamRow, current_id)
+                )
+                if team is None or team.status != "active":
+                    valid_path = False
+                    break
+                path_team_ids.add(current_id)
+                if not team.inherit_parent_documents:
+                    break
+                current_id = team.parent_team_id
+                distance += 1
+            if not valid_path:
+                invalid_hierarchy = True
+                continue
+            team_ids.update(path_team_ids)
+        return team_ids, invalid_hierarchy
+
+
+    def current_project_notes_membership(
+        self,
+        *,
+        actor_type: str,
+        actor_id: str,
+        project_id: str,
+    ) -> CurrentProjectNotesMembershipSnapshot:
+        if actor_type != "user":
+            return CurrentProjectNotesMembershipSnapshot(
+                actor_id=actor_id,
+                project_id=project_id,
+                member=False,
+                system_admin=False,
+                reason="actor_not_human",
+            )
+        with self.session_factory() as session:
+            decision = ActionAwareAclAuthority.resolve_in_session(
+                session,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                project_id=project_id,
+                action="notes_membership",
+            )
+            _tiers, invalid_hierarchy = (
+                ActionAwareAclAuthority._actor_team_tiers_with_validity(
+                    session,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                )
+            )
+        reason = decision.reason
+        if decision.allowed:
+            reason = "system_admin" if decision.reason == "system_admin" else "member"
+        elif reason == "missing_permission" and invalid_hierarchy:
+            reason = "invalid_hierarchy"
+        elif reason not in {
+            "actor_inactive_or_missing",
+            "project_missing",
+            "missing_permission",
+            "deny_grant",
+        }:
+            reason = "missing_permission"
+        return CurrentProjectNotesMembershipSnapshot(
+            actor_id=actor_id,
+            project_id=project_id,
+            member=decision.allowed,
+            system_admin=decision.reason == "system_admin",
+            reason=reason,
+        )
+
+    def current_team_notes_membership(
+        self,
+        *,
+        actor_type: str,
+        actor_id: str,
+        team_id: str,
+    ) -> CurrentTeamNotesMembershipSnapshot:
+        if actor_type != "user":
+            return CurrentTeamNotesMembershipSnapshot(
+                actor_id=actor_id,
+                team_id=team_id,
+                member=False,
+                system_admin=False,
+                reason="actor_not_human",
+            )
+        with self.session_factory() as session:
+            actor = session.get(AtlasUserRow, actor_id)
+            if actor is None or actor.actor_type != "user" or not actor.active:
+                return CurrentTeamNotesMembershipSnapshot(
+                    actor_id=actor_id,
+                    team_id=team_id,
+                    member=False,
+                    system_admin=False,
+                    reason="actor_inactive_or_missing",
+                )
+            team = session.get(AtlasTeamRow, team_id)
+            if team is None or team.status != "active":
+                return CurrentTeamNotesMembershipSnapshot(
+                    actor_id=actor_id,
+                    team_id=team_id,
+                    member=False,
+                    system_admin=False,
+                    reason="team_missing_or_retired",
+                )
+            if actor.system_role == "admin":
+                return CurrentTeamNotesMembershipSnapshot(
+                    actor_id=actor_id,
+                    team_id=team_id,
+                    member=True,
+                    system_admin=True,
+                    reason="system_admin",
+                )
+            team_ids, invalid_hierarchy = (
+                self._actor_team_notes_memberships_with_validity(
+                    session,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                )
+            )
+            if team_id in team_ids:
+                return CurrentTeamNotesMembershipSnapshot(
+                    actor_id=actor_id,
+                    team_id=team_id,
+                    member=True,
+                    system_admin=False,
+                    reason="member",
+                )
+            return CurrentTeamNotesMembershipSnapshot(
+                actor_id=actor_id,
+                team_id=team_id,
+                member=False,
+                system_admin=False,
+                reason=(
+                    "invalid_hierarchy"
+                    if invalid_hierarchy
+                    else "missing_membership"
+                ),
+            )
+
 
 class ProjectAuthorizationConflict(RuntimeError):
     pass
@@ -701,6 +943,7 @@ class ProjectCurrentnessConflict(RuntimeError):
 
 __all__ = [
     "ActionAwareAclAuthority",
+    "PostgresNotesMembershipAuthority",
     "ProjectAclChangeSet",
     "ProjectAclRepository",
     "ProjectAuthorizationConflict",

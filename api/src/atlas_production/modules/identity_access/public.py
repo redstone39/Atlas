@@ -103,6 +103,10 @@ from .conversation_access_ports import (
     ConversationAccessRuntime,
 )
 from .conversation_access_service import ConversationAccessService
+from .notes_membership import (
+    CurrentTeamNotesMembershipReader,
+    CurrentTeamNotesMembershipSnapshot,
+)
 from .ports import IdentityAccessRepository, InviteScopeGrantPort
 from .service import IdentityAccessService
 from .team_contracts import TeamAccessError, TeamActionOutcome, TeamAuditCommand
@@ -197,6 +201,8 @@ __all__ = [
     "ConversationAccessService",
     "ConversationScopeDecision",
     "conversation_access_context",
+    "CurrentTeamNotesMembershipReader",
+    "CurrentTeamNotesMembershipSnapshot",
     "IdentityAccessError",
     "IdentityAccessRepository",
     "IdentityAccessService",

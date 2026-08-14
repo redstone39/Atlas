@@ -126,6 +126,14 @@ from atlas_production.infrastructure.postgres_owner.turn_runtime import Postgres
 from atlas_production.infrastructure.postgres_owner.answer_behavior import (
     PostgresAnswerBehaviorOwner,
 )
+from atlas_production.infrastructure.notes_collaboration_client import (
+    HttpNotesCollaborationClient,
+)
+from atlas_production.infrastructure.postgres_owner.notes import PostgresNotesOwner
+from atlas_production.infrastructure.postgres_notes_attachments import (
+    PostgresNotesAttachmentProvider,
+)
+from atlas_production.infrastructure.bounded_artifact_writer import BoundedArtifactWriter
 from atlas_production.infrastructure.postgres_team_adapter import build_postgres_team_access
 from atlas_production.infrastructure.processing_plugin_artifact_adapter import LocalProcessingPluginArtifactStore
 from atlas_production.infrastructure.processing_runner_adapter import default_processing_runner
@@ -173,6 +181,7 @@ from atlas_production.modules.processing_pipeline.public import (
     ProcessingRegistryService,
 )
 from atlas_production.modules.project_governance.service import ProjectGovernanceService
+from atlas_production.modules.notes.service import NotesApplicationService
 from atlas_production.modules.workspace_turn.public import WorkspaceTurnApplication
 from atlas_production.modules.answer_behavior.public import AnswerBehaviorService
 from atlas_production.providers import default_provider_adapter_factory
@@ -204,6 +213,7 @@ class ApiComposition:
     processing_jobs: ProcessingJobsApplication
     model_routing: ModelRoutingService
     answer_behavior: AnswerBehaviorService
+    notes: NotesApplicationService
     ops_readiness: OpsReadinessService
     conversation_audit: ConversationAuditService
     workspace_turn: WorkspaceTurnApplication
@@ -378,6 +388,17 @@ def build_api_composition(
         directory_identity,
         identity_repository,
     )
+    notes_notifier = HttpNotesCollaborationClient.from_environment()
+    notes_artifact_writer = BoundedArtifactWriter(selected.engine)
+    notes_owner = PostgresNotesOwner(session_factory, notes_artifact_writer)
+    notes = NotesApplicationService(
+        notes_owner,
+        notes_notifier,
+        PostgresNotesAttachmentProvider(
+            notes_owner,
+            notes_artifact_writer,
+        ),
+    )
     audit_reader, audit_writer = build_postgres_audit_adapter(session_factory)
     agent_runtime = AgentRuntimeApplication(agent_query_authority, audit_writer)
 
@@ -550,6 +571,7 @@ def build_api_composition(
             )
         ),
         _ArtifactReadinessProbe(selected),
+        notes_notifier,
     )
 
     return ApiComposition(
@@ -566,6 +588,7 @@ def build_api_composition(
         processing_jobs=processing_jobs,
         model_routing=model_routing,
         answer_behavior=answer_behavior,
+        notes=notes,
         ops_readiness=ops_readiness,
         conversation_audit=conversation_audit,
         workspace_turn=workspace_turn,

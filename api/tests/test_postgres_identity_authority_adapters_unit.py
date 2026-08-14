@@ -32,6 +32,7 @@ from atlas_production.infrastructure.postgres_owner.project import (
     ProjectAclChangeSet,
     ProjectAclRepository,
     ProjectAuthorizationConflict,
+    PostgresNotesMembershipAuthority,
 )
 from atlas_production.infrastructure.postgres_owner.team import (
     TeamAuthorizationConflict,
@@ -914,10 +915,16 @@ def _membership(
     )
 
 
-def _team(team_id: str, parent: str | None, *, inherit: bool = True) -> AtlasTeamRow:
+def _team(
+    team_id: str,
+    parent: str | None,
+    *,
+    inherit: bool = True,
+    status: str = "active",
+) -> AtlasTeamRow:
     return AtlasTeamRow(
         team_id=team_id, name=team_id, parent_team_id=parent,
-        status="active", created_at=NOW, inherit_parent_documents=inherit,
+        status=status, created_at=NOW, inherit_parent_documents=inherit,
     )
 
 
@@ -976,6 +983,140 @@ def test_nearest_team_tier_beats_parent_deny() -> None:
     )
     assert decision.allowed is True
     assert decision.source_id == "grant-child"
+
+
+def test_project_acl_keeps_active_child_tier_when_ancestor_is_retired() -> None:
+    decision = ActionAwareAclAuthority(lambda: _AclSession(
+        actor=_actor(),
+        teams=[
+            _team("team-child", "team-parent"),
+            _team("team-parent", None, status="retired"),
+        ],
+        memberships=[_membership("team-child")],
+        grants=[
+            _grant(
+                "grant-child",
+                subject_type="team",
+                subject_id="team-child",
+                role="viewer",
+                effect="allow",
+            ),
+        ],
+    )).resolve(
+        actor_type="user",
+        actor_id="user-unit",
+        project_id="project-unit",
+        action="workspace_query",
+        persist=False,
+    )
+
+    assert decision.allowed is True
+    assert decision.source_id == "grant-child"
+
+@pytest.mark.parametrize("role", ["viewer", "contributor", "admin"])
+def test_project_notes_membership_projects_every_project_role_equally(role: str) -> None:
+    authority = PostgresNotesMembershipAuthority(
+        lambda: _AclSession(actor=_actor(), role=role)
+    )
+
+    snapshot = authority.current_project_notes_membership(
+        actor_type="user",
+        actor_id="user-unit",
+        project_id="project-unit",
+    )
+
+    assert snapshot.member is True
+    assert snapshot.system_admin is False
+    assert snapshot.reason == "member"
+
+
+def test_project_notes_membership_preserves_same_tier_deny_and_human_boundary() -> None:
+    deny_session = _AclSession(
+        actor=_actor(),
+        grants=[
+            _grant("grant-allow", subject_type="team", subject_id="team-unit", role="viewer", effect="allow"),
+            _grant("grant-deny", subject_type="team", subject_id="team-unit", role="admin", effect="deny"),
+        ],
+    )
+    authority = PostgresNotesMembershipAuthority(lambda: deny_session)
+
+    assert authority.current_project_notes_membership(
+        actor_type="user", actor_id="user-unit", project_id="project-unit"
+    ).reason == "deny_grant"
+    assert authority.current_project_notes_membership(
+        actor_type="service_account", actor_id="user-unit", project_id="project-unit"
+    ).reason == "actor_not_human"
+
+
+@pytest.mark.parametrize("role", ["member", "uploader", "admin"])
+@pytest.mark.parametrize(
+    ("inherit_parent_documents", "parent_member"),
+    [(True, True), (False, False)],
+)
+def test_team_notes_membership_obeys_inheritance_flag_for_every_role(
+    role: str,
+    inherit_parent_documents: bool,
+    parent_member: bool,
+) -> None:
+    child = _team(
+        "team-child",
+        "team-parent",
+        inherit=inherit_parent_documents,
+    )
+    parent = _team("team-parent", None)
+    session = _AclSession(
+        actor=_actor(),
+        teams=[child, parent],
+        memberships=[_membership("team-child", role=role)],
+        grants=[],
+    )
+    authority = PostgresNotesMembershipAuthority(lambda: session)
+
+    parent_snapshot = authority.current_team_notes_membership(
+        actor_type="user",
+        actor_id="user-unit",
+        team_id="team-parent",
+    )
+    child_snapshot = authority.current_team_notes_membership(
+        actor_type="user",
+        actor_id="user-unit",
+        team_id="team-child",
+    )
+
+    assert parent_snapshot.member is parent_member
+    assert parent_snapshot.reason == (
+        "member" if parent_member else "missing_membership"
+    )
+    assert child_snapshot.member is True
+    assert child_snapshot.reason == "member"
+
+
+def test_notes_membership_admin_bypass_and_invalid_team_hierarchy_fail_closed() -> None:
+    admin_session = _AclSession(
+        actor=_actor(system_role="admin"),
+        teams=[_team("team-parent", None)],
+        memberships=[],
+        grants=[],
+    )
+    assert PostgresNotesMembershipAuthority(
+        lambda: admin_session
+    ).current_team_notes_membership(
+        actor_type="user", actor_id="user-unit", team_id="team-parent"
+    ).system_admin is True
+
+    cycle_session = _AclSession(
+        actor=_actor(),
+        teams=[_team("team-child", "team-parent"), _team("team-parent", "team-child")],
+        memberships=[_membership("team-child")],
+        grants=[],
+    )
+    cycle = PostgresNotesMembershipAuthority(
+        lambda: cycle_session
+    ).current_team_notes_membership(
+        actor_type="user", actor_id="user-unit", team_id="team-parent"
+    )
+    assert cycle.member is False
+    assert cycle.reason == "invalid_hierarchy"
 
 
 def test_team_document_inheritance_off_excludes_parent_scope() -> None:

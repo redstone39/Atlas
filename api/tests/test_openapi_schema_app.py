@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "653c4d8ace414c3aff0ad9140fa44ebd5ce7d23d9fd9928c2c4117b69b9e75bc"
+    "018d07107700fdf5a036d612ba0f63f7541cada034d9283dc3ce3365df964bbe"
 )
 
 
@@ -40,6 +40,38 @@ def test_directory_transport_schema_exposes_only_supported_literals() -> None:
         "tls_mode"
     ]
     assert update_transport["anyOf"][0]["enum"] == ["ldaps", "start_tls", "plain"]
+def test_scoped_directory_import_openapi_is_nested_and_closed() -> None:
+    schema = create_openapi_app().openapi()
+    paths = schema["paths"]
+    for scope, scope_id in (("teams", "team_id"), ("projects", "project_id")):
+        prefix = f"/api/v1/admin/{scope}/{{{scope_id}}}/directory-connections"
+        assert set(paths[prefix]) == {"get"}
+        assert set(paths[f"{prefix}/{{connection_id}}/users/search"]) == {"post"}
+        assert set(paths[f"{prefix}/{{connection_id}}/users/import"]) == {"post"}
+
+    schemas = schema["components"]["schemas"]
+    assert schemas["ScopedDirectoryConnectionSummary"]["additionalProperties"] is False
+    assert set(schemas["ScopedDirectoryConnectionSummary"]["properties"]) == {
+        "connection_id",
+        "display_name",
+    }
+    assert schemas["ScopedDirectoryUserCandidate"]["additionalProperties"] is False
+    assert set(schemas["ScopedDirectoryUserCandidate"]["properties"]) == {
+        "external_subject",
+        "username",
+        "display_name",
+        "email",
+    }
+    assert schemas["ScopedDirectoryUserSearchRequest"]["additionalProperties"] is False
+    assert schemas["TeamDirectoryMemberImportRequest"]["additionalProperties"] is False
+    assert schemas["ProjectDirectoryMemberImportRequest"]["additionalProperties"] is False
+    assert set(schemas["ProjectDirectoryMemberImportRequest"]["properties"]) == {
+        "external_subjects",
+        "role",
+        "idempotency_key",
+    }
+
+
 
 
 def test_agent_query_openapi_declares_only_fail_closed_outcomes() -> None:

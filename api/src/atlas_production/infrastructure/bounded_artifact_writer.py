@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 from time import sleep
+from threading import Event, Thread
 from typing import Callable, Iterable
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from atlas_production.infrastructure.persistence.artifact_storage import (
     AtlasArtifactStorageControlRow,
     AtlasArtifactStorageTargetRow,
     AtlasArtifactWriteAttemptRow,
+    AtlasStorageRequestLeaseRow,
     AtlasStorageBlobRow,
 )
 from atlas_production.infrastructure.persistence.document_intake import AtlasDocumentRow
@@ -35,6 +37,7 @@ from atlas_production.infrastructure.persistence.async_processing import (
     AtlasProcessingGenerationRow,
     AtlasProcessingJobRow,
 )
+from atlas_production.infrastructure.postgres_locks import acquire_mixed_owner_locks
 from atlas_production.modules.artifact_storage.records import ArtifactRecord
 from atlas_production.modules.artifact_storage.public import MAX_ARTIFACT_BYTES
 from atlas_production.shared.public import utc_now_iso
@@ -102,10 +105,16 @@ class BoundedArtifactWriter:
         *,
         target_config_directory: str | None = None,
         allowlisted_parents: tuple[str, ...] | None = None,
+        read_heartbeat_seconds: float = 30.0,
+        read_lease_seconds: float = 90.0,
     ) -> None:
         self.engine = engine
         self.target_config_directory = target_config_directory
         self.allowlisted_parents = allowlisted_parents
+        if read_heartbeat_seconds <= 0 or read_lease_seconds <= read_heartbeat_seconds:
+            raise ValueError("artifact_read_lease_timing_invalid")
+        self.read_heartbeat_seconds = read_heartbeat_seconds
+        self.read_lease_seconds = read_lease_seconds
 
     def _target_config(self) -> RootOnlyStorageTargetConfig:
         directory = self.target_config_directory or os.environ["ATLAS_ARTIFACT_TARGET_CONFIG"]
@@ -118,6 +127,90 @@ class BoundedArtifactWriter:
             value for value in os.getenv("ATLAS_ARTIFACT_ALLOWED_PARENTS", "").split(":")
             if value
         )
+
+    def stage_active_read(
+        self,
+        session: Session,
+        *,
+        artifact_id: str,
+        expected_artifact_class: str,
+        expected_parent_resource_id: str,
+        expected_owner_scope_type: str,
+        expected_owner_scope_id: str,
+        expected_content_type: str,
+        expected_byte_size: int,
+        expected_sha256: str,
+        lease_owner: str,
+    ) -> str:
+        """Validate an authorized immutable artifact and stage its read lease."""
+        graph = session.execute(
+            select(
+                AtlasArtifactRow,
+                AtlasStorageBlobRow,
+                AtlasArtifactStorageControlRow,
+                AtlasArtifactStorageTargetRow,
+            )
+            .join(AtlasStorageBlobRow, AtlasStorageBlobRow.blob_id == AtlasArtifactRow.blob_id)
+            .join(
+                AtlasArtifactStorageControlRow,
+                AtlasArtifactStorageControlRow.control_id == "global",
+            )
+            .join(
+                AtlasArtifactStorageTargetRow,
+                (AtlasArtifactStorageTargetRow.target_id == AtlasStorageBlobRow.target_id)
+                & (
+                    AtlasArtifactStorageTargetRow.target_revision
+                    == AtlasStorageBlobRow.target_revision
+                ),
+            )
+            .where(AtlasArtifactRow.artifact_id == artifact_id)
+        ).one_or_none()
+        if graph is None:
+            raise ValueError("artifact_unavailable")
+        artifact, blob, control, target = graph
+        if (
+            artifact.lifecycle_status != "active"
+            or artifact.artifact_class != expected_artifact_class
+            or artifact.parent_resource_id != expected_parent_resource_id
+            or artifact.owner_scope_type != expected_owner_scope_type
+            or artifact.owner_scope_id != expected_owner_scope_id
+            or artifact.content_type != expected_content_type
+            or artifact.byte_size != expected_byte_size
+            or artifact.checksum_value != expected_sha256
+            or blob.status != "committed"
+            or blob.content_type != expected_content_type
+            or blob.byte_size != expected_byte_size
+            or blob.checksum_value != expected_sha256
+            or control.mode != "active"
+            or blob.target_id != control.active_target_id
+            or blob.target_revision != control.active_target_revision
+            or blob.root_identity_digest != control.root_identity_digest
+            or blob.storage_epoch != control.storage_epoch
+            or target.status != "active"
+            or target.root_identity_digest != blob.root_identity_digest
+        ):
+            raise ValueError("artifact_read_contract_mismatch")
+        now = datetime.now(timezone.utc)
+        lease_id = f"lease-artifact-read-{uuid4().hex}"
+        session.add(
+            AtlasStorageRequestLeaseRow(
+                lease_id=lease_id,
+                request_kind="artifact_read",
+                owner=lease_owner,
+                target_id=blob.target_id,
+                target_revision=blob.target_revision,
+                root_identity_digest=blob.root_identity_digest,
+                storage_epoch=blob.storage_epoch,
+                acquired_at=now.isoformat(),
+                expires_at=(now + timedelta(seconds=self.read_lease_seconds)).isoformat(),
+                last_heartbeat_at=now.isoformat(),
+                attempt_generation=1,
+                parent_resource_id=expected_parent_resource_id,
+                parent_lifecycle_epoch=artifact.parent_lifecycle_epoch,
+            )
+        )
+        session.flush()
+        return lease_id
 
     @staticmethod
     def _require_processing_fence(
@@ -309,6 +402,180 @@ class BoundedArtifactWriter:
         ):
             raise ValueError("processing_artifact_fence_rejected")
         return content
+
+    def read_active_artifact(
+        self,
+        artifact_id: str,
+        *,
+        read_lease_id: str,
+        expected_artifact_class: str,
+        expected_parent_resource_id: str,
+        expected_content_type: str,
+        expected_byte_size: int,
+        expected_sha256: str,
+        max_bytes: int,
+    ) -> bytes:
+        """Read an immutable non-document artifact through the active storage fence."""
+
+        def current_row(session: Session):
+            row = session.execute(
+                select(
+                    AtlasArtifactRow,
+                    AtlasStorageBlobRow,
+                    AtlasArtifactStorageControlRow,
+                    AtlasArtifactStorageTargetRow,
+                )
+                .join(
+                    AtlasStorageBlobRow,
+                    AtlasStorageBlobRow.blob_id == AtlasArtifactRow.blob_id,
+                )
+                .join(
+                    AtlasArtifactStorageControlRow,
+                    AtlasArtifactStorageControlRow.control_id == "global",
+                )
+                .join(
+                    AtlasArtifactStorageTargetRow,
+                    (AtlasArtifactStorageTargetRow.target_id == AtlasStorageBlobRow.target_id)
+                    & (
+                        AtlasArtifactStorageTargetRow.target_revision
+                        == AtlasStorageBlobRow.target_revision
+                    ),
+                )
+                .where(AtlasArtifactRow.artifact_id == artifact_id)
+            ).one_or_none()
+            if row is None:
+                raise ValueError("artifact_unavailable")
+            artifact, blob, control, target = row
+            lease = session.get(AtlasStorageRequestLeaseRow, read_lease_id)
+            if (
+                expected_byte_size < 1
+                or expected_byte_size > max_bytes
+                or artifact.lifecycle_status != "active"
+                or blob.status != "committed"
+                or artifact.artifact_class != expected_artifact_class
+                or artifact.parent_resource_id != expected_parent_resource_id
+                or artifact.content_type != expected_content_type
+                or blob.content_type != expected_content_type
+                or artifact.byte_size != expected_byte_size
+                or blob.byte_size != expected_byte_size
+                or artifact.checksum_value != expected_sha256
+                or blob.checksum_value != expected_sha256
+                or control.mode != "active"
+                or blob.target_id != control.active_target_id
+                or blob.target_revision != control.active_target_revision
+                or blob.root_identity_digest != control.root_identity_digest
+                or blob.storage_epoch != control.storage_epoch
+                or target.status != "active"
+                or target.root_identity_digest != blob.root_identity_digest
+                or lease is None
+                or lease.request_kind != "artifact_read"
+                or lease.parent_resource_id != expected_parent_resource_id
+                or lease.parent_lifecycle_epoch != artifact.parent_lifecycle_epoch
+                or lease.target_id != blob.target_id
+                or lease.target_revision != blob.target_revision
+                or lease.root_identity_digest != blob.root_identity_digest
+                or lease.storage_epoch != blob.storage_epoch
+                or datetime.fromisoformat(lease.expires_at) <= datetime.now(timezone.utc)
+            ):
+                raise ValueError("artifact_read_contract_mismatch")
+            return artifact, blob, target
+
+        with Session(self.engine) as session:
+            artifact, blob, target = current_row(session)
+        configured = self._target_config().load().get(blob.target_id)
+        if (
+            configured is None
+            or configured["revision"] != target.target_revision
+            or configured["config_key"] != target.config_key
+        ):
+            raise RuntimeError("artifact_storage_target_unavailable")
+        adapter = LocalArtifactFilesystemAdapter(
+            configured["raw_path"],
+            allowlisted_parents=self._allowed_parents(),
+            create_layout=False,
+        )
+        stop_heartbeat = Event()
+        heartbeat_errors: list[BaseException] = []
+
+        def maintain_lease() -> None:
+            while not stop_heartbeat.wait(self.read_heartbeat_seconds):
+                try:
+                    self.heartbeat_read_lease(read_lease_id)
+                except BaseException as exc:
+                    heartbeat_errors.append(exc)
+                    return
+
+        heartbeat = Thread(
+            target=maintain_lease,
+            name=f"artifact-read-heartbeat:{read_lease_id}",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            adapter.verify_full(
+                blob.opaque_ref,
+                expected_size=expected_byte_size,
+                expected_sha256=expected_sha256,
+            )
+            chunks: list[bytes] = []
+            total = 0
+            with adapter.open_read(blob.opaque_ref, expected_size=expected_byte_size) as stream:
+                while chunk := stream.read(min(64 * 1024, max_bytes + 1 - total)):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > max_bytes:
+                        break
+            content = b"".join(chunks)
+            if heartbeat_errors:
+                raise RuntimeError("artifact_read_heartbeat_failed") from heartbeat_errors[0]
+        finally:
+            stop_heartbeat.set()
+            heartbeat.join()
+        if (
+            len(content) != expected_byte_size
+            or len(content) > max_bytes
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            raise ValueError("artifact_integrity_failed")
+        with Session(self.engine) as session:
+            final_artifact, final_blob, _ = current_row(session)
+        if (
+            final_artifact.checksum_value != artifact.checksum_value
+            or final_blob.checksum_value != blob.checksum_value
+        ):
+            raise ValueError("artifact_read_contract_mismatch")
+        return content
+
+    def heartbeat_read_lease(self, read_lease_id: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            acquire_mixed_owner_locks(
+                session,
+                shared_domain_keys=("artifact:control",),
+                exclusive_identity_keys=(f"artifact:lease:{read_lease_id}",),
+            )
+            lease = session.get(
+                AtlasStorageRequestLeaseRow, read_lease_id, with_for_update=True
+            )
+            if lease is None or lease.request_kind != "artifact_read":
+                raise ValueError("artifact_read_lease_unavailable")
+            now = datetime.now(timezone.utc)
+            if datetime.fromisoformat(lease.expires_at) <= now:
+                raise ValueError("artifact_read_lease_expired")
+            lease.last_heartbeat_at = now.isoformat()
+            lease.expires_at = (now + timedelta(seconds=self.read_lease_seconds)).isoformat()
+
+    def complete_read_lease(self, read_lease_id: str) -> None:
+        with Session(self.engine) as session, session.begin():
+            acquire_mixed_owner_locks(
+                session,
+                shared_domain_keys=("artifact:control",),
+                exclusive_identity_keys=(f"artifact:lease:{read_lease_id}",),
+            )
+            lease = session.get(
+                AtlasStorageRequestLeaseRow, read_lease_id, with_for_update=True
+            )
+            if lease is not None:
+                session.delete(lease)
 
     def read(
         self,

@@ -384,7 +384,7 @@ class AtlasArtifactRow(OrmBase):
             name="ck_atlas_artifact_metadata_allowlist_size",
         ),
         CheckConstraint(
-            "artifact_class IN ('original_document','original_inline_source','document_page_pdf','page_image','processing_native_image','preview','conversation_turn_input','conversation_turn_answer','conversation_summary','protected_model_payload','evidence_pack')",
+            "artifact_class IN ('original_document','original_inline_source','document_page_pdf','page_image','processing_native_image','preview','conversation_turn_input','conversation_turn_answer','conversation_summary','protected_model_payload','evidence_pack','note_image')",
             name="ck_atlas_artifact_class",
         ),
         CheckConstraint(
