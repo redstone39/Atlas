@@ -227,6 +227,15 @@ select {
   text-decoration: underline;
   text-underline-offset: 0.2em;
 }
+.notes-editor .note-search-match {
+  background: hsl(var(--accent));
+}
+
+.notes-editor .note-search-match-active {
+  background: hsl(var(--primary) / 0.28);
+  outline: 1px solid hsl(var(--primary));
+}
+
 
 .notes-editor .tableWrapper {
   max-width: 100%;

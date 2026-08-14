@@ -21,6 +21,8 @@ const editorFocus = vi.hoisted(() => vi.fn());
 const editorToggleBold = vi.hoisted(() => vi.fn());
 const editorCommand = vi.hoisted(() => vi.fn());
 const editorRun = vi.hoisted(() => vi.fn());
+const editorOn = vi.hoisted(() => vi.fn());
+const editorOff = vi.hoisted(() => vi.fn());
 const emptyTransaction = {
   steps: [],
   setMeta: vi.fn().mockReturnThis(),
@@ -32,7 +34,7 @@ const editorState = {
     child: vi.fn(),
     content: { size: 0 },
   },
-  selection: { $from: { index: vi.fn(() => 0) } },
+  selection: { from: 0, to: 0, $from: { index: vi.fn(() => 0) } },
 };
 
 const editorChain = {
@@ -60,6 +62,8 @@ vi.mock("@tiptap/react", () => ({
     editorConfigurations(configuration);
     return ({
     setEditable: editorSetEditable,
+    on: editorOn,
+    off: editorOff,
     state: editorState,
     view: { dispatch: vi.fn() },
     isDestroyed: false,
@@ -117,6 +121,8 @@ describe("CollaborativeNoteEditor toolbar", () => {
     editorToggleBold.mockClear();
     editorCommand.mockClear();
     editorRun.mockClear();
+    editorOn.mockClear();
+    editorOff.mockClear();
     editorFocus.mockReturnValue(editorChain);
     editorToggleBold.mockReturnValue(editorChain);
     editorCommand.mockReturnValue(editorChain);
@@ -159,7 +165,12 @@ describe("CollaborativeNoteEditor toolbar", () => {
     expect(screen.getByRole("button", { name: "Insert" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Heading 1" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add row" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Link" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Find and replace" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Block actions" })).toBeEnabled();
+    expect(screen.getByLabelText("Insert image")).toHaveAttribute("accept", "image/png,image/jpeg,image/webp");
   });
+
 
   it("mounts the mutating UniqueID extension only after the first provider sync", async () => {
     render(<CollaborativeNoteEditor note={note} />);

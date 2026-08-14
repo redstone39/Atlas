@@ -27,10 +27,12 @@ vi.mock("@tiptap/react", () => ({
   EditorContent: () => <div aria-label="Collaborative note editor" />,
   useEditor: () => ({
     setEditable: editorSetEditable,
+    on: vi.fn(),
+    off: vi.fn(),
     state: {
       tr: emptyTransaction,
       doc: { descendants: vi.fn(), child: vi.fn(), content: { size: 0 } },
-      selection: { $from: { index: vi.fn(() => 0) } },
+      selection: { from: 0, to: 0, $from: { index: vi.fn(() => 0) } },
     },
     view: { dispatch: vi.fn() },
     isDestroyed: false,

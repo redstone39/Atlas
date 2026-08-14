@@ -11,6 +11,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 
 import { isAllowedNoteLink } from "./link-policy";
+import { NoteSearch } from "./note-search";
 
 export const NOTE_BLOCK_TYPES = [
   "paragraph",
@@ -171,6 +172,7 @@ export function noteExtensions(options: {
     TableKit.configure({ table: { resizable: options.live, renderWrapper: true } }),
     NoteImage.configure({ noteId: options.noteId }),
   ];
+  if (options.live) extensions.push(NoteSearch);
   extensions.push(options.live
     ? UniqueID.configure({
         attributeName: "block_id",
