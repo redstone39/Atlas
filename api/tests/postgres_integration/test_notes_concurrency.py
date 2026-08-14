@@ -274,7 +274,7 @@ def test_body_restore_and_content_update_on_same_head_have_one_winner(
         request_fingerprint="1" * 64,
         raw_yjs_update=b"restore",
         encoded_yjs_state=b"state",
-        canonical_body=_body("restored", "restored"),
+        canonical_body={"type": "doc", "content": []},
         document_schema=NOTE_DOCUMENT_SCHEMA_V2,
         change_set=NoteChangeSetV1(),
         idempotency_key="restore-content-race",

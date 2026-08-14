@@ -4,6 +4,7 @@ import httpx
 from atlas_production.modules.notes.public import NotesSettingsUpdateRequestV1
 from atlas_production.infrastructure.notes_collaboration_client import HttpNotesCollaborationClient
 from atlas_production.modules.ops.service import OpsReadinessService
+from atlas_production.shared.user_messages import validate_message_reference
 
 def test_notes_002_settings_accept_positive_integer_without_product_cap():
     value=NotesSettingsUpdateRequestV1(checkpoint_interval_seconds=2**40,expected_settings_revision=1,idempotency_key="key")
@@ -26,6 +27,8 @@ class Unavailable:
 def test_notes_002_readiness_names_collaboration_blocker():
     state=OpsReadinessService(Repository(),Available(),Unavailable()).readiness()
     assert "ops.notes_collaboration_is_unavailable" in state.setup_blockers
+    for blocker in state.setup_blockers:
+        assert validate_message_reference(blocker, {}) == {}
 
 
 @pytest.mark.parametrize(

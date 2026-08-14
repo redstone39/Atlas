@@ -923,6 +923,7 @@
     "ops.grant_active_project_permission": { "params": {} },
     "ops.prepare_searchable_evidence": { "params": {} },
     "ops.processing_runner_is_unavailable": { "params": {} },
+    "ops.notes_collaboration_is_unavailable": { "params": {} },
     "ops.configure_and_test_model_route": { "params": {} },
     "document.searchable_content_update_is_queued": { "params": {} },
     "document.restore_is_queued_for_evidence_rebuild": { "params": {} },

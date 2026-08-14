@@ -869,8 +869,9 @@ class PostgresNotesOwner:
             if note.collaboration_epoch != command.expected_collaboration_epoch:
                 raise _error("stale_collaboration_epoch", "Collaboration epoch is stale", 409)
             self._validate_attachment_refs(session, command.note_id, attachment_refs)
+            digest = _digest(command.canonical_body)
             source = session.scalar(
-                select(AtlasNoteSavepointRow.savepoint_id).where(
+                select(AtlasNoteSavepointRow).where(
                     AtlasNoteSavepointRow.note_id == command.note_id,
                     AtlasNoteSavepointRow.savepoint_id
                     == command.restore_source_savepoint_id,
@@ -878,6 +879,15 @@ class PostgresNotesOwner:
             )
             if source is None:
                 raise _error("note_not_found", "Restore source was not found", 404)
+            if (
+                source.body_digest != digest
+                or source.document_schema != command.document_schema
+            ):
+                raise _error(
+                    "restore_source_mismatch",
+                    "Restore body does not match the selected savepoint",
+                    409,
+                )
             previous = session.scalar(
                 select(AtlasNoteRevisionRow).where(
                     AtlasNoteRevisionRow.note_id == command.note_id,
@@ -889,7 +899,6 @@ class PostgresNotesOwner:
             at = _now()
             revision_sequence = note.accepted_update_head + 1
             savepoint_sequence = note.savepoint_head + 1
-            digest = _digest(command.canonical_body)
             revision = AtlasNoteRevisionRow(
                 revision_id=f"nrev-{uuid4().hex}",
                 note_id=command.note_id,

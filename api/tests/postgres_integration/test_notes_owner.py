@@ -564,6 +564,28 @@ def test_notes_owner_commits_body_restore_revision_and_savepoint_atomically(
         change_set=NoteChangeSetV1(),
         idempotency_key="atomic-restore",
     )
+    with postgres_runtime.session_factory() as session:
+        audit_count = session.query(AtlasAuditEventRow).count()
+    with pytest.raises(NotesError) as mismatch:
+        owner.commit_body_restore(
+            actor_id="user-notes-owner", command=command
+        )
+    assert mismatch.value.code == "restore_source_mismatch"
+    with postgres_runtime.session_factory() as session:
+        unchanged = session.get(AtlasNoteRow, note.note_id)
+        assert unchanged is not None
+        assert unchanged.accepted_update_head == 1
+        assert unchanged.savepoint_head == 1
+        assert session.query(AtlasNoteRevisionRow).filter_by(
+            note_id=note.note_id
+        ).count() == 1
+        assert session.query(AtlasNoteSavepointRow).filter_by(
+            note_id=note.note_id
+        ).count() == 1
+        assert session.query(AtlasAuditEventRow).count() == audit_count
+    command = command.model_copy(
+        update={"canonical_body": {"type": "doc", "content": []}}
+    )
     result = owner.commit_body_restore(
         actor_id="user-notes-owner", command=command
     )
@@ -636,7 +658,7 @@ def test_notes_owner_rolls_back_atomic_restore_when_second_audit_fails(
                 request_fingerprint="2" * 64,
                 raw_yjs_update=b"restore",
                 encoded_yjs_state=b"state",
-                canonical_body=_body("restore-audit-rollback"),
+                canonical_body={"type": "doc", "content": []},
                 document_schema=NOTE_DOCUMENT_SCHEMA_V2,
                 change_set=NoteChangeSetV1(),
                 idempotency_key="restore-audit-rollback",
