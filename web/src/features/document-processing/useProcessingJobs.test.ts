@@ -73,6 +73,23 @@ describe("useProcessingJobs", () => {
     expect(processingJobApi.list).toHaveBeenCalledTimes(2);
   });
 
+  it("notifies the consumer when active processing settles", async () => {
+    const onProcessingSettled = vi.fn();
+    vi.mocked(processingJobApi.list)
+      .mockResolvedValueOnce({ jobs: [activeJob] })
+      .mockResolvedValueOnce({ jobs: [{ ...activeJob, status: "ready", cancel_available: false }] });
+
+    renderHook(() => useProcessingJobs(onProcessingSettled));
+    await act(async () => undefined);
+    expect(onProcessingSettled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(onProcessingSettled).toHaveBeenCalledOnce();
+  });
+
   it("does not poll a hidden tab and refreshes when it becomes visible", async () => {
     vi.mocked(processingJobApi.list).mockResolvedValue({ jobs: [activeJob] });
     renderHook(() => useProcessingJobs());

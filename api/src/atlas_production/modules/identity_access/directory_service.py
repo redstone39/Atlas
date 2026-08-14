@@ -17,6 +17,11 @@ from .api_models import (
     DirectoryUserImportResult,
     DirectoryUserSearchRequest,
     DirectoryUserSearchResult,
+    ScopedDirectoryConnectionListResult,
+    ScopedDirectoryConnectionSummary,
+    ScopedDirectoryUserCandidate,
+    ScopedDirectoryUserSearchRequest,
+    ScopedDirectoryUserSearchResult,
 )
 from .contracts import IdentityAccessError, IdentityAuditCommand, LoginOutcome
 from .directory_ports import (
@@ -24,6 +29,7 @@ from .directory_ports import (
     DirectoryFilterValidator,
     DirectoryGateway,
     DirectoryRepository,
+    ScopedDirectoryImportPreparation,
 )
 from .directory_records import (
     DirectoryConnectionRecord,
@@ -31,6 +37,8 @@ from .directory_records import (
     DirectoryPrincipal,
     DirectorySecretRecord,
     ExternalIdentityRecord,
+    directory_record_revision,
+    validate_directory_transport,
 )
 from .records import UserRecord
 from atlas_production.shared.public import utc_now_iso
@@ -136,6 +144,10 @@ class DirectoryIdentityService:
             exclude_none=True,
         )
         candidate = replace(current, **changes, updated_at=utc_now_iso())
+        try:
+            validate_directory_transport(candidate.provider_type, candidate.tls_mode)
+        except ValueError:
+            self._reject("directory.entry_is_invalid", 422)
         self._validate_directory_filter(candidate.user_object_filter)
         current_bind = self.repository.get_directory_secret(connection_id, "bind_password")
         if candidate.enabled and payload.clear_bind_password:
@@ -219,14 +231,154 @@ class DirectoryIdentityService:
             principals = self.gateway.search_users(
                 connection,
                 bind_password,
-                payload.query.strip(),
-                payload.limit,
+                query=payload.query.strip(),
+                department=None,
+                limit=payload.limit,
             )
         except DirectoryGatewayError as exc:
             self._raise_gateway(exc)
         return DirectoryUserSearchResult(
             users=[self._candidate(principal) for principal in principals]
         )
+    def list_scoped_connections(self) -> ScopedDirectoryConnectionListResult:
+        return ScopedDirectoryConnectionListResult(
+            connections=[
+                ScopedDirectoryConnectionSummary(
+                    connection_id=connection.connection_id,
+                    display_name=connection.display_name,
+                )
+                for connection in self.repository.list_directory_connections()
+                if connection.enabled
+            ]
+        )
+
+    def search_scoped_users(
+        self,
+        connection_id: str,
+        payload: ScopedDirectoryUserSearchRequest,
+    ) -> ScopedDirectoryUserSearchResult:
+        connection = self._require_scoped_enabled_connection(connection_id)
+        bind_password, _secret = self._bind_secret(connection_id)
+        try:
+            principals = self.gateway.search_users(
+                connection,
+                bind_password,
+                query=payload.query if payload.search_mode == "member" else None,
+                department=(
+                    payload.query if payload.search_mode == "department" else None
+                ),
+                limit=payload.limit + 1,
+            )
+        except DirectoryGatewayError as exc:
+            self._raise_gateway(exc)
+        eligible = [
+            principal
+            for principal in principals
+            if principal.directory_enabled is not False
+        ]
+        return ScopedDirectoryUserSearchResult(
+            users=[
+                self._scoped_candidate(principal)
+                for principal in eligible[: payload.limit]
+            ],
+            limit_reached=len(eligible) > payload.limit,
+        )
+
+    def prepare_scoped_import(
+        self,
+        connection_id: str,
+        external_subjects: list[str],
+    ) -> ScopedDirectoryImportPreparation:
+        if not 1 <= len(external_subjects) <= 100:
+            self._reject("directory.entry_is_invalid", 422)
+        if len(external_subjects) != len(set(external_subjects)):
+            self._reject("directory.import_conflict", 409)
+        connection = self._require_scoped_enabled_connection(connection_id)
+        bind_password, bind_secret = self._bind_secret(connection_id)
+        principals: list[DirectoryPrincipal] = []
+        try:
+            for external_subject in external_subjects:
+                principal = self.gateway.fetch_user(
+                    connection,
+                    bind_password,
+                    external_subject,
+                )
+                if principal is None or principal.directory_enabled is False:
+                    self._reject("directory.import_entry_unavailable", 409)
+                principals.append(principal)
+        except DirectoryGatewayError as exc:
+            self._raise_gateway(exc)
+
+        durable_identities = self.repository.list_external_identities()
+        identities_by_subject: dict[str, list[ExternalIdentityRecord]] = {}
+        for identity in durable_identities:
+            if identity.connection_id == connection_id:
+                identities_by_subject.setdefault(identity.external_subject, []).append(
+                    identity
+                )
+
+        now = utc_now_iso()
+        users: list[UserRecord] = []
+        new_users: list[UserRecord] = []
+        expected_users: list[tuple[str, UserRecord | None]] = []
+        new_identities: list[ExternalIdentityRecord] = []
+        expected_identities: list[
+            tuple[str, ExternalIdentityRecord | None]
+        ] = []
+        expected_subjects: list[
+            tuple[str, ExternalIdentityRecord | None]
+        ] = []
+        selected_bindings: dict[str, ExternalIdentityRecord | None] = {}
+        for principal in principals:
+            bindings = identities_by_subject.get(principal.external_subject, [])
+            if len(bindings) > 1:
+                self._reject("directory.import_conflict", 409)
+            existing_identity = bindings[0] if bindings else None
+            if existing_identity is not None:
+                user = self.repository.get_user(existing_identity.actor_id)
+                if user is None or not user.active or user.actor_type != "user":
+                    self._reject("directory.import_conflict", 409)
+                users.append(user)
+                expected_users.append((user.actor_id, user))
+                expected_identities.append((user.actor_id, existing_identity))
+            else:
+                actor_id = f"user-{uuid4().hex}"
+                user = UserRecord(
+                    actor_id=actor_id,
+                    display_name=principal.display_name,
+                    email=principal.email,
+                    system_role="user",
+                    password_digest=None,
+                    actor_type="user",
+                    created_at=now,
+                )
+                identity = self._identity(actor_id, connection_id, principal, now)
+                users.append(user)
+                new_users.append(user)
+                expected_users.append((actor_id, None))
+                new_identities.append(identity)
+                expected_identities.append((actor_id, None))
+            expected_subjects.append((principal.external_subject, existing_identity))
+            selected_bindings[principal.external_subject] = existing_identity
+
+        self._validate_scoped_import_aliases(
+            connection_id,
+            principals,
+            selected_bindings,
+            durable_identities,
+        )
+        return ScopedDirectoryImportPreparation(
+            connection_id=connection.connection_id,
+            source_revision=directory_record_revision(connection),
+            credential_revision=directory_record_revision(bind_secret),
+            users=tuple(users),
+            new_users=tuple(new_users),
+            expected_users=tuple(expected_users),
+            new_external_identities=tuple(new_identities),
+            expected_external_identities=tuple(expected_identities),
+            expected_subject_bindings=tuple(expected_subjects),
+        )
+
 
     def import_users(
         self,
@@ -500,6 +652,61 @@ class DirectoryIdentityService:
             last_refreshed_at=identity.last_refreshed_at,
         )
 
+    @staticmethod
+    def _scoped_candidate(
+        principal: DirectoryPrincipal,
+    ) -> ScopedDirectoryUserCandidate:
+        return ScopedDirectoryUserCandidate(
+            external_subject=principal.external_subject,
+            username=principal.username,
+            display_name=principal.display_name,
+            email=principal.email,
+        )
+
+    def _validate_scoped_import_aliases(
+        self,
+        connection_id: str,
+        principals: list[DirectoryPrincipal],
+        selected_bindings: dict[str, ExternalIdentityRecord | None],
+        durable_identities: list[ExternalIdentityRecord],
+    ) -> None:
+        seen_aliases: set[str] = set()
+        source_identities = [
+            identity
+            for identity in durable_identities
+            if identity.connection_id == connection_id
+        ]
+        local_emails: set[str] = set()
+        for user in self.repository.list_users():
+            if (
+                user.email
+                and self.repository.get_external_identity(user.actor_id) is None
+            ):
+                local_emails.add(canonical_identifier(user.email))
+
+        for principal in principals:
+            existing = selected_bindings[principal.external_subject]
+            aliases = [canonical_identifier(principal.username)]
+            if principal.email:
+                aliases.append(canonical_identifier(principal.email))
+            for alias in aliases:
+                if alias in seen_aliases:
+                    self._reject("directory.import_conflict", 409)
+                seen_aliases.add(alias)
+                for durable_identity in source_identities:
+                    if (
+                        existing is not None
+                        and durable_identity.actor_id == existing.actor_id
+                    ):
+                        continue
+                    if alias in {
+                        durable_identity.normalized_username,
+                        durable_identity.normalized_email,
+                    }:
+                        self._reject("directory.import_conflict", 409)
+            if any(alias in local_emails for alias in aliases):
+                self._reject("directory.import_conflict", 409)
+
     def _connection_status(
         self, connection: DirectoryConnectionRecord
     ) -> DirectoryConnectionStatus:
@@ -586,7 +793,11 @@ class DirectoryIdentityService:
                 if alias in aliases:
                     self._reject("directory.import_conflict", 409)
                 aliases.add(alias)
-            if email is not None and email in existing_local_emails:
+            if any(
+                alias in existing_local_emails
+                for alias in (username, email)
+                if alias is not None
+            ):
                 self._reject("directory.import_conflict", 409)
             if self.repository.get_external_identity_by_subject(
                 connection_id, principal.external_subject
@@ -650,6 +861,15 @@ class DirectoryIdentityService:
         connection = self._require_connection(connection_id)
         if not connection.enabled:
             self._reject("directory.connection_disabled", 409)
+        return connection
+
+    def _require_scoped_enabled_connection(
+        self,
+        connection_id: str,
+    ) -> DirectoryConnectionRecord:
+        connection = self.repository.get_directory_connection(connection_id)
+        if connection is None or not connection.enabled:
+            self._reject("directory.import_entry_unavailable", 409)
         return connection
 
     def _require_admin(self, actor: UserRecord | None) -> UserRecord:

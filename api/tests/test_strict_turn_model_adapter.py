@@ -72,12 +72,17 @@ class CapturingRouting:
             max_tool_result_tokens_per_execution
         )
         self.max_total_tokens_per_conversation = max_total_tokens_per_conversation
+        self.open_route_ids = []
+        self.invoke_route_ids = []
 
     def open_tested_attempt(self, route_id=None):
+        selected_route_id = route_id or "r1"
+        self.open_route_ids.append(selected_route_id)
         return SimpleNamespace(
             route=SimpleNamespace(
-                route_id="r1",
+                route_id=selected_route_id,
                 revision=1,
+                supports_vision=(selected_route_id == "test-vision-route"),
                 runtime_policy=SimpleNamespace(
                     revision=1,
                     tokenizer_profile="cl100k_base",
@@ -96,6 +101,7 @@ class CapturingRouting:
         )
 
     def invoke(self, session, request, response_schema):
+        self.invoke_route_ids.append(session.route.route_id)
         self.requests.append(request)
         self.schemas.append(response_schema)
         return self.outcomes.pop(0)
@@ -1503,6 +1509,8 @@ def test_visual_tool_result_appends_exact_image_to_same_provider_session() -> No
         observations=[search_observation, observation],
     )
     session.next_action(next_input, finalize_only=True)
+    assert routing.open_route_ids == ["test-route", "test-vision-route"]
+    assert routing.invoke_route_ids == ["test-route", "test-vision-route"]
 
     image_messages = [
         message

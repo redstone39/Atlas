@@ -1,61 +1,77 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
-import json
 import logging
-from typing import Callable, Literal, Protocol, Sequence, cast
+from typing import Callable, Literal, Protocol, Sequence
 
 from pydantic import ValidationError
 
 from atlas_production.infrastructure.strict_posthoc_claim_evaluator import (
     ClaimAssessmentUnavailable,
 )
+from atlas_production.infrastructure.turn_execution_foundation import (
+    _contract_repair_remaining,
+    _digest,
+    _has_legal_tool,
+    _schema_retry_origin,
+    _validate_model_input,
+)
+from atlas_production.infrastructure.turn_execution_reasoning import (
+    _ReasoningTerminationReason as ReasoningTerminationReason,
+    _completed_correction,
+    _gate_correction_feedback,
+    _limit_finalization_pending,
+    _merged_correction_kind,
+    _next_reasoning_trace,
+    _pending_correction,
+    _provisional_evidence_check,
+    _provisional_gate_audit_step,
+)
+from atlas_production.infrastructure.turn_execution_tool_payloads import (
+    _complete_tool_command,
+    _retrieval_error_status,
+    _tool_audit_step,
+    _tool_reservation_projection,
+)
+from atlas_production.infrastructure.turn_execution_terminal_payloads import (
+    _assessment_audit_step,
+    _audit_command,
+    _citation_command,
+    _commit_terminal_command,
+    _declared_lineage,
+    _finalized_answer,
+    _governance_command,
+    _invalid_governance_command,
+    _prepare_terminal_command,
+    _terminal_materialization_steps,
+    _terminal_retrieval_status,
+)
 
 from atlas_production.modules.audit.public import (
-    MaterializeTurnAuditDraftV2,
     TurnAuditDraftOwnerV2,
     TurnAuditStepV1,
 )
 from atlas_production.modules.citation_preview.public import (
     CitationBindingDraftOwnerV2,
-    MaterializeCitationBindingDraftV2,
 )
 from atlas_production.modules.result_governance.public import (
     AssessmentReasonCodeV2,
-    ExecutionEvidenceLineageV1,
     FinalizedAnswerV1,
-    MaterializeGovernedAnswerDraftV2,
     PostHocAnswerEvaluatorV2,
     ProvisionalEvidenceAssessmentV1,
     ResultGovernanceDraftOwnerV2,
     RetrievalStatusV1,
 )
 from atlas_production.modules.retrieval.public import (
-    DocumentNavigationResultV1,
-    DiscoverRelevantDocumentsV1,
-    ExpandKnowledgeV1,
-    FindKnowledgeDocumentsV1,
-    InspectKnowledgeV1,
-    InspectVisualV1,
-    KnowledgeExpansionResultV1,
-    KnowledgeInspectionResultV1,
-    KnowledgeSearchResultV1,
-    KnowledgeToolActionV1,
     KnowledgeToolObservationV1,
-    ListKnowledgeDocumentsV1,
-    NavigateDocumentV1,
     RetrievalEvidenceLineageV1,
     RetrievalOwner,
-    SearchKnowledgeV1,
     VisualImagePayloadV1,
-    VisualInspectionResultV1,
 )
 from atlas_production.modules.turn_execution.public import (
     DeepReasoningContractError,
     DeepReasoningModel,
     FinalizeAnswerV1,
-    GateCorrectionFeedbackV1,
     ModelContractViolationV1,
     StrictTurnModel,
     TurnExecutionOrchestrator,
@@ -63,14 +79,10 @@ from atlas_production.modules.turn_execution.public import (
 )
 from atlas_production.modules.turn_runtime.public import (
     BeginResultGovernanceV1,
-    BeginToolInvocationV1,
-    CommitTerminalV1,
-    CompleteToolInvocationV1,
     ClaimSchemaRetryV1,
     ExecutionSnapshotV1,
     ExecutionState,
     FailCarrierExecutionV1,
-    PrepareTerminalV1,
     ReasoningEvaluationV1,
     ReasoningPhase,
     ReasoningCorrectionV2,
@@ -86,34 +98,7 @@ from atlas_production.modules.turn_runtime.public import (
     TurnRuntimeOwner,
     TurnRuntimeBudgetExceeded,
 )
-
-
-def _contract_repair_remaining(snapshot: ExecutionSnapshotV1) -> int:
-    return snapshot.policy.max_retrieval_repairs - snapshot.budget.retrieval_repairs
-
-
 logger = logging.getLogger(__name__)
-_DISCOVERY_PAGE_SIZE = 10
-_SCHEMA_RETRY_ORIGIN_CODES = frozenset(
-    {
-        "provider_output_decode_error",
-        "provider_output_schema_error",
-        "deep_reasoning_plan_invalid",
-        "deep_reasoning_replan_invalid",
-        "deep_reasoning_evaluation_semantic_shape_invalid",
-    }
-)
-ReasoningTerminationReason = Literal[
-    "completed",
-    "planner_failed",
-    "evaluator_unavailable",
-    "provisional_evidence_unavailable",
-    "replanner_failed",
-    "correction_limit_reached",
-    "budget_exhausted",
-    "deadline_exceeded",
-    "execution_failed",
-]
 
 
 class TurnModelInputSource(Protocol):
@@ -124,197 +109,6 @@ class TurnModelInputSource(Protocol):
         observations: Sequence[KnowledgeToolObservationV1],
         contract_repair_remaining: int,
     ) -> TurnModelInputV3: ...
-
-
-def _canonical(value: object) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
-    ).encode("utf-8")
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical(value)).hexdigest()
-
-
-def _gate_correction_feedback(
-    assessment: ProvisionalEvidenceAssessmentV1,
-) -> GateCorrectionFeedbackV1 | None:
-    if assessment.consistency not in {"conflict", "insufficient"}:
-        return None
-    return GateCorrectionFeedbackV1(
-        consistency=assessment.consistency,
-        failing_segment_ids=[
-            result.id for result in assessment.results if result.status == "failure"
-        ],
-    )
-
-
-def _merged_correction_kind(
-    *,
-    evaluation: ReasoningEvaluationV1,
-    gate_feedback: GateCorrectionFeedbackV1 | None,
-) -> Literal["revise_only", "research_then_revise"] | None:
-    if evaluation.verdict == "research_then_revise":
-        return "research_then_revise"
-    if evaluation.verdict == "revise_only" or gate_feedback is not None:
-        return "revise_only"
-    return None
-
-
-def _ref(kind: str, execution_id: str) -> str:
-    return f"{kind}:{hashlib.sha256(f'{kind}:{execution_id}'.encode()).hexdigest()}"
-
-
-def _schema_retry_origin(error: Exception) -> SchemaRetryOriginCode | None:
-    safe_code = getattr(error, "safe_code", "")
-    if safe_code not in _SCHEMA_RETRY_ORIGIN_CODES:
-        return None
-    return cast(SchemaRetryOriginCode, safe_code)
-
-
-def _next_reasoning_trace(
-    previous: ReasoningTraceV3 | None,
-    *,
-    status: Literal["planning", "running", "completed", "degraded", "failed"],
-    plans: list[ReasoningPlanV2],
-    evaluations: list[ReasoningEvaluationV1],
-    corrections: list[ReasoningCorrectionV2],
-    provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] | None = None,
-    limit_finalization: ReasoningLimitFinalizationV2 | None = None,
-    termination_reason: ReasoningTerminationReason | None = None,
-) -> ReasoningTraceV3:
-    payload = {
-        "trace_revision": 1 if previous is None else previous.trace_revision + 1,
-        "trace_digest": "0" * 64,
-        "parent_trace_digest": None if previous is None else previous.trace_digest,
-        "status": status,
-        "plans": plans,
-        "evaluations": evaluations,
-        "corrections": corrections,
-        "provisional_evidence_checks": (
-            provisional_evidence_checks
-            if provisional_evidence_checks is not None
-            else ([] if previous is None else previous.provisional_evidence_checks)
-        ),
-        "limit_finalization": limit_finalization,
-        "termination_reason": termination_reason,
-    }
-    provisional = ReasoningTraceV3.model_validate(payload)
-    digest_payload = provisional.model_dump(mode="json")
-    digest_payload.pop("trace_digest")
-    return provisional.model_copy(update={"trace_digest": _digest(digest_payload)})
-
-
-def _action_reservation(
-    action: KnowledgeToolActionV1,
-    snapshot: ExecutionSnapshotV1,
-) -> tuple[int, int, int, int, int]:
-    admitted_tool_max = snapshot.policy.tool_token_budget
-    if isinstance(action, ListKnowledgeDocumentsV1):
-        return (1, action.page_size, 0, 0, action.max_output_tokens)
-    if isinstance(action, FindKnowledgeDocumentsV1):
-        return (
-            1,
-            _DISCOVERY_PAGE_SIZE,
-            0,
-            0,
-            admitted_tool_max,
-        )
-    if isinstance(action, DiscoverRelevantDocumentsV1):
-        return (
-            1,
-            action.limit,
-            0,
-            0,
-            admitted_tool_max,
-        )
-    if isinstance(action, SearchKnowledgeV1):
-        # Search is restricted to already disclosed documents, so it cannot
-        # add a new document-candidate identity. Each result can add one
-        # evidence handle and one page handle to the model-visible total.
-        return (0, 0, 1, action.limit * 2, action.max_output_tokens)
-    if isinstance(action, InspectKnowledgeV1):
-        # Inspected evidence and its documents were already obtained and counted.
-        return (0, 0, 0, 0, action.max_output_tokens)
-    if isinstance(action, InspectVisualV1):
-        return (0, 0, 0, 1, admitted_tool_max)
-    if isinstance(action, NavigateDocumentV1):
-        return (
-            0,
-            0,
-            1 if action.mode == "search" else 0,
-            action.limit * 2,
-            action.max_output_tokens,
-        )
-    assert isinstance(action, ExpandKnowledgeV1)
-    # Expansion may surface another authorized binding for related evidence,
-    # so preserve the existing candidate reservation.
-    return (0, action.limit, 0, action.limit * 2, action.max_output_tokens)
-
-
-def _model_visible_item_identities(
-    observation: KnowledgeToolObservationV1,
-) -> tuple[str, ...]:
-    """Return model-selectable handles in deterministic result order."""
-
-    identities: list[str] = []
-    if isinstance(observation, (KnowledgeSearchResultV1, KnowledgeExpansionResultV1)):
-        for item in observation.evidence:
-            identities.append(item.evidence_handle)
-            if item.page_handle is not None:
-                identities.append(item.page_handle)
-    elif isinstance(observation, KnowledgeInspectionResultV1):
-        identities.extend(item.evidence_handle for item in observation.items)
-    elif isinstance(observation, VisualInspectionResultV1):
-        # inspect_visual can only target an existing page/visual capability, so
-        # the returned page handle is already admitted. A new crop/full render
-        # can add at most the result visual handle; exact replay adds none.
-        identities.extend((observation.page_handle, observation.visual_handle))
-    elif isinstance(observation, DocumentNavigationResultV1):
-        for item in observation.targets:
-            identities.append(item.navigation_handle)
-            if item.page_handle is not None:
-                identities.append(item.page_handle)
-    return tuple(dict.fromkeys(identities))
-
-
-def _has_legal_tool(
-    snapshot: ExecutionSnapshotV1, *, has_documents: bool, has_evidence: bool
-) -> bool:
-    budget = snapshot.budget
-    policy = snapshot.policy
-    if (
-        budget.tool_invocations >= policy.max_tool_invocations
-        or budget.tool_tokens >= policy.tool_token_budget
-        or policy.tool_token_budget < 256
-    ):
-        return False
-    can_catalog = (
-        budget.catalog_pages < policy.max_catalog_pages
-    )
-    can_search_or_expand = (
-        budget.search_rounds < policy.max_search_rounds
-        and budget.model_visible_items < policy.max_model_visible_items_per_turn
-    )
-    return (
-        can_catalog
-        or (can_search_or_expand and (has_documents or has_evidence))
-        or has_documents
-        or has_evidence
-    )
-
-
-def _validate_model_input(snapshot: ExecutionSnapshotV1, model_input: TurnModelInputV3) -> None:
-    if (
-        model_input.execution_id != snapshot.execution_id
-        or model_input.context_pack_ref != snapshot.context_pack_ref
-        or model_input.knowledge_catalog_ref != snapshot.catalog_ref
-        or model_input.budget != snapshot.budget
-        or model_input.policy != snapshot.policy
-        or model_input.capabilities.execution_id != snapshot.execution_id
-        or model_input.capabilities.catalog_ref != snapshot.catalog_ref
-    ):
-        raise ValueError("model input does not match the authoritative runtime snapshot")
 
 
 def _context_token_reservation(
@@ -371,6 +165,12 @@ def _context_token_reservation(
             return estimate
         estimate = required
     return estimate + 32
+
+
+
+
+
+
 
 
 class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
@@ -897,57 +697,18 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         )
                         is_limit_final = pending_limit_finalization is not None
                         provisional_evidence_checks.append(
-                            ProvisionalEvidenceCheckV1(
+                            _provisional_evidence_check(
                                 ordinal=assessment_ordinal,
-                                candidate_kind=(
-                                    "limit_final" if is_limit_final else "normal"
-                                ),
-                                linked_evaluation_cycle=(
-                                    None
-                                    if is_limit_final
-                                    else len(reasoning_evaluations) + 1
-                                ),
-                                consistency=terminal_provisional_assessment.consistency,
-                                reason_code=terminal_provisional_assessment.reason_code,
-                                candidate_disposition=(
-                                    "limit_finalized" if is_limit_final else "pending"
-                                ),
-                                answer_digest=terminal_provisional_assessment.answer_digest,
-                                declared_subset_digest=(
-                                    terminal_provisional_assessment.declared_subset_digest
-                                ),
-                                assessment_input_digest=(
-                                    terminal_provisional_assessment.assessment_input_digest
-                                ),
-                                assessment_output_digest=(
-                                    terminal_provisional_assessment.assessment_output_digest
-                                ),
-                                visual_image_digests=(
-                                    terminal_provisional_assessment.visual_image_digests
-                                ),
+                                assessment=terminal_provisional_assessment,
+                                is_limit_final=is_limit_final,
+                                evaluation_count=len(reasoning_evaluations),
                             )
                         )
                         step_ordinal += 1
                         audit_steps.append(
-                            TurnAuditStepV1(
+                            _provisional_gate_audit_step(
                                 ordinal=step_ordinal,
-                                step_kind="governance",
-                                operation="provisional_declared_evidence_gate",
-                                status=(
-                                    "skipped"
-                                    if terminal_provisional_assessment.state
-                                    == "not_attempted"
-                                    else "completed"
-                                    if terminal_provisional_assessment.state == "completed"
-                                    else "failed"
-                                ),
-                                safe_input_digest=_digest(
-                                    [
-                                        terminal_provisional_assessment.answer_digest,
-                                        terminal_provisional_assessment.declared_subset_digest,
-                                        terminal_provisional_assessment.visual_image_digests,
-                                    ]
-                                ),
+                                assessment=terminal_provisional_assessment,
                                 evidence_count=len(action.claimed_evidence_handles),
                             )
                         )
@@ -1134,36 +895,14 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 )
                             )
                             if pending_correction is not None:
-                                (
-                                    completed_correction_kind,
-                                    triggering_evaluation,
-                                    addressed_codes,
-                                    correction_summary,
-                                    correction_plan_generation,
-                                    tool_start,
-                                ) = pending_correction
-                                tool_end = snapshot.budget.tool_invocations
                                 reasoning_corrections.append(
-                                    ReasoningCorrectionV2(
+                                    _completed_correction(
                                         cycle=len(reasoning_corrections) + 1,
-                                        kind=completed_correction_kind,
-                                        triggering_evaluation=triggering_evaluation,
-                                        plan_generation=correction_plan_generation,
-                                        tool_invocation_start=(
-                                            tool_start
-                                            if completed_correction_kind
-                                            == "research_then_revise"
-                                            else None
-                                        ),
+                                        pending=pending_correction,
                                         tool_invocation_end=(
-                                            tool_end
-                                            if completed_correction_kind
-                                            == "research_then_revise"
-                                            else None
+                                            snapshot.budget.tool_invocations
                                         ),
                                         result_evaluation=evaluation_cycle,
-                                        addressed_finding_codes=addressed_codes,
-                                        summary=correction_summary,
                                     )
                                 )
                                 pending_correction = None
@@ -1348,20 +1087,17 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     gate_feedback=gate_feedback,
                                     plan=replacement_plan,
                                 )
-                                correction_summary = (
-                                    evaluation.summary
-                                    if evaluation.verdict
-                                    in {"revise_only", "research_then_revise"}
-                                    and evaluation.summary
-                                    else "Correction requested by declared evidence Gate."
-                                )
-                                pending_correction = (
-                                    correction_kind,
-                                    evaluation_cycle,
-                                    evaluation.finding_codes,
-                                    correction_summary,
-                                    None if replacement_plan is None else replacement_plan.generation,
-                                    snapshot.budget.tool_invocations + 1,
+                                pending_correction = _pending_correction(
+                                    correction_kind=correction_kind,
+                                    evaluation=evaluation,
+                                    plan_generation=(
+                                        None
+                                        if replacement_plan is None
+                                        else replacement_plan.generation
+                                    ),
+                                    next_tool_invocation=(
+                                        snapshot.budget.tool_invocations + 1
+                                    ),
                                 )
                                 reasoning_trace = _next_reasoning_trace(
                                     reasoning_trace,
@@ -1391,12 +1127,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     gate_feedback=gate_feedback,
                                 )
                                 pending_limit_finalization = (
-                                    evaluation_cycle,
-                                    evaluation.summary
-                                    if evaluation.verdict
-                                    in {"revise_only", "research_then_revise"}
-                                    and evaluation.summary
-                                    else "Correction limit reached with an unresolved declared evidence Gate finding.",
+                                    _limit_finalization_pending(evaluation)
                                 )
                                 reasoning_trace = _next_reasoning_trace(
                                     reasoning_trace,
@@ -1467,52 +1198,19 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     return
 
                 used_retrieval = True
-                arguments = action.model_dump(mode="json")
-                if isinstance(
-                    action,
-                    (FindKnowledgeDocumentsV1, DiscoverRelevantDocumentsV1),
-                ):
-                    arguments["runtime_max_output_tokens"] = (
-                        snapshot.policy.tool_token_budget
-                    )
-                    arguments["tokenizer_profile"] = snapshot.route.tokenizer_profile
-                action_digest = _digest(arguments)
-                pages, candidates, searches, model_visible_items, tokens = _action_reservation(
-                    action,
-                    snapshot,
+                projection = _tool_reservation_projection(
+                    execution_id=execution_id,
+                    snapshot=snapshot,
+                    action=action,
+                    completed_action_digests=completed_actions,
                 )
-                # An exact repeat is guaranteed to replay the immutable
-                # retrieval result.  Its candidate/evidence identities are
-                # already present in the runtime ledgers, so reserving them
-                # again would incorrectly reject a legal replay at the unique
-                # identity limit.  Search/page/tool-token budgets still count
-                # the repeated model-visible observation.
-                if action_digest in completed_actions:
-                    candidates = 0
-                    model_visible_items = 0
-                invocation_ordinal = snapshot.budget.tool_invocations + 1
-                invocation_id = _ref(
-                    "tool-invocation",
-                    f"{execution_id}:{invocation_ordinal}:{action_digest}",
-                )
+                arguments = projection.arguments
+                action_digest = projection.action_digest
+                invocation_ordinal = projection.invocation_ordinal
+                invocation_id = projection.invocation_id
+                tokens = projection.max_output_tokens
                 failure_code = "budget_exhausted"
-                snapshot = self._runtime.begin_tool(
-                    BeginToolInvocationV1(
-                        execution_id=execution_id,
-                        expected_version=snapshot.version,
-                        fencing_token=snapshot.lease.fencing_token,
-                        tool_invocation_id=invocation_id,
-                        invocation_ordinal=invocation_ordinal,
-                        tool_name=action.action,
-                        schema_version=f"{action.action.replace('_', '-')}-v1",
-                        arguments_digest=action_digest,
-                        reserve_catalog_pages=pages,
-                        reserve_document_candidates=candidates,
-                        reserve_search_rounds=searches,
-                        reserve_model_visible_items=model_visible_items,
-                        reserve_tool_tokens=tokens,
-                    )
-                )
+                snapshot = self._runtime.begin_tool(projection.command)
                 failure_code = "tool_failed"
                 tool_started_at = self._clock()
                 if tool_started_at >= snapshot.deadline_at:
@@ -1551,49 +1249,25 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     evidence_by_handle[item.evidence_handle] = item
                 failure_code = "budget_exhausted"
                 snapshot = self._runtime.complete_tool(
-                    CompleteToolInvocationV1(
+                    _complete_tool_command(
                         execution_id=execution_id,
-                        expected_version=snapshot.version,
-                        fencing_token=snapshot.lease.fencing_token,
-                        tool_invocation_id=invocation_id,
+                        snapshot=snapshot,
+                        action=action,
+                        invocation_id=invocation_id,
                         invocation_ordinal=invocation_ordinal,
-                        result_ref=envelope.result_ref,
-                        result_digest=envelope.result_digest,
-                        document_candidate_handles=envelope.document_candidate_handles,
-                        model_visible_item_identities=list(
-                            _model_visible_item_identities(envelope.observation)
-                        ),
-                        catalog_pages=(
-                            1
-                            if isinstance(action, DiscoverRelevantDocumentsV1)
-                            else envelope.catalog_pages
-                        ),
-                        search_rounds=envelope.search_rounds,
-                        tool_tokens=envelope.tool_tokens,
+                        envelope=envelope,
                     )
                 )
                 completed_actions.add(action_digest)
                 if envelope.observation.result_type == "knowledge_tool_error":
-                    retrieval_error_status = {
-                        "access_denied": "access_denied",
-                        "budget_exhausted": "budget_exhausted",
-                        "tool_failed": "tool_failed",
-                        "invalid_handle": "tool_failed",
-                        "catalog_stale": "tool_failed",
-                        "navigation_unavailable": None,
-                    }[envelope.observation.error_code]
+                    retrieval_error_status = _retrieval_error_status(envelope)
                 step_ordinal += 1
                 audit_steps.append(
-                    TurnAuditStepV1(
+                    _tool_audit_step(
                         ordinal=step_ordinal,
-                        step_kind="tool",
-                        operation=action.action,
-                        status="replayed" if envelope.replayed else "completed",
-                        safe_input_digest=_digest(arguments),
-                        result_ref=envelope.result_ref,
-                        result_digest=envelope.result_digest,
-                        output_tokens=envelope.tool_tokens,
-                        evidence_count=len(envelope.evidence_lineage),
+                        action=action,
+                        arguments=arguments,
+                        envelope=envelope,
                     )
                 )
                 observations.append(envelope.observation)
@@ -1701,35 +1375,20 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             evidence_handles=list(evidence_by_handle),
             idempotency_key=f"{execution_id}:terminal-evidence",
         )
-        if evidence_pack.items:
-            retrieval_status: RetrievalStatusV1 = "evidence_found"
-        elif retrieval_error_status is not None:
-            retrieval_status = retrieval_error_status
-        elif finalize_only and used_retrieval:
-            retrieval_status = "budget_exhausted"
-        elif used_retrieval:
-            retrieval_status = "no_evidence"
-        else:
-            retrieval_status = "not_used"
-        finalized_answer = FinalizedAnswerV1(
-            segments=[segment.model_dump(mode="json") for segment in proposal.segments]
+        retrieval_status = _terminal_retrieval_status(
+            evidence_pack=evidence_pack,
+            retrieval_error_status=retrieval_error_status,
+            finalize_only=finalize_only,
+            used_retrieval=used_retrieval,
         )
+        finalized_answer = _finalized_answer(proposal)
         declared_subset = self._retrieval.read_declared_evidence_subset(
             execution_id=execution_id,
             catalog_ref=snapshot.catalog_ref,
             handles=proposal.claimed_evidence_handles,
             visual_images=list(visual_images_by_handle.values()),
         )
-        declared_lineage = [
-            ExecutionEvidenceLineageV1(
-                evidence_handle=item.evidence_handle,
-                evidence_ref=item.evidence_ref,
-                evidence_digest=item.evidence_digest,
-                result_ref=item.source_result_ref,
-                invocation_ordinal=item.source_invocation_ordinal,
-            )
-            for item in declared_subset.items
-        ]
+        declared_lineage = _declared_lineage(declared_subset)
         assessment_state: Literal["completed", "unavailable", "not_attempted"]
         assessment_reason_code: AssessmentReasonCodeV2
         assessment_input_digest: str | None = None
@@ -1799,138 +1458,80 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 assessment_state = "unavailable"
                 assessment_reason_code = error.reason_code
                 assessment_consistency = "unavailable"
-        assessment_step = TurnAuditStepV1(
+        assessment_step = _assessment_audit_step(
             ordinal=len(audit_steps) + 1,
-            step_kind="governance",
-            operation="assess_declared_evidence",
-            status=(
-                "skipped"
-                if assessment_state == "not_attempted"
-                else ("completed" if assessment_state == "completed" else "failed")
-            ),
-            safe_input_digest=_digest(
-                [declared_subset.digest, finalized_answer.model_dump(mode="json")]
-            ),
-            evidence_count=len(declared_subset.items),
+            assessment_state=assessment_state,
+            declared_subset=declared_subset,
+            finalized_answer=finalized_answer,
         )
         try:
-            governance_command = MaterializeGovernedAnswerDraftV2(
-                draft_ref=_ref("governed-answer-draft", execution_id),
+            governance_command = _governance_command(
                 execution_id=execution_id,
                 finalized_answer=finalized_answer,
                 retrieval_status=retrieval_status,
-                declared_evidence_mappings=declared_subset.mappings,
-                evidence_lineage=declared_lineage,
+                declared_subset=declared_subset,
+                declared_lineage=declared_lineage,
                 assessment_state=assessment_state,
                 assessment_reason_code=assessment_reason_code,
-                assessment_version="provisional-declared-evidence-v1",
                 assessment_consistency=assessment_consistency,
-                assessment_answer_digest=answer_digest,
-                assessment_declared_subset_digest=declared_subset.digest,
-                assessment_visual_image_digests=visual_image_digests,
+                answer_digest=answer_digest,
+                visual_image_digests=visual_image_digests,
                 assessment_input_digest=assessment_input_digest,
                 assessment_output_digest=assessment_output_digest,
                 assessment_results=assessment_results,
                 delivery_constraint=delivery_constraint,
-                idempotency_key=f"{execution_id}:governed-answer",
             )
         except ValidationError:
             # Provider/schema-semantic mistakes never make answer text unavailable.
             assessment_step = assessment_step.model_copy(
                 update={"status": "failed"}
             )
-            governance_command = MaterializeGovernedAnswerDraftV2(
-                draft_ref=_ref("governed-answer-draft", execution_id),
+            governance_command = _invalid_governance_command(
                 execution_id=execution_id,
                 finalized_answer=finalized_answer,
                 retrieval_status=retrieval_status,
-                declared_evidence_mappings=declared_subset.mappings,
-                evidence_lineage=declared_lineage,
-                assessment_state="unavailable",
-                assessment_reason_code="invalid_output",
-                assessment_version="provisional-declared-evidence-v1",
-                assessment_consistency="unavailable",
-                assessment_answer_digest=answer_digest,
-                assessment_declared_subset_digest=declared_subset.digest,
-                assessment_visual_image_digests=visual_image_digests,
+                declared_subset=declared_subset,
+                declared_lineage=declared_lineage,
+                answer_digest=answer_digest,
+                visual_image_digests=visual_image_digests,
                 assessment_input_digest=assessment_input_digest,
-                assessment_results=[],
                 delivery_constraint=delivery_constraint,
-                idempotency_key=f"{execution_id}:governed-answer",
             )
         governed = self._result_governance.materialize_v2(governance_command)
         citation = self._citation.materialize_v2(
-            MaterializeCitationBindingDraftV2(
-                draft_ref=_ref("citation-binding-draft", execution_id),
-                execution_id=execution_id,
-                governed_answer=governed,
-                idempotency_key=f"{execution_id}:citation-binding",
-            )
+            _citation_command(execution_id, governed)
         )
         audit_steps.extend(
-            [
-                assessment_step,
-                TurnAuditStepV1(
-                    ordinal=len(audit_steps) + 2,
-                    step_kind="governance",
-                    operation="materialize_governed_answer",
-                    status="completed",
-                    safe_input_digest=_digest([evidence_pack.digest, proposal.model_dump(mode="json")]),
-                    result_ref=governed.draft_ref,
-                    result_digest=governed.digest,
-                    evidence_count=len(declared_lineage),
-                ),
-                TurnAuditStepV1(
-                    ordinal=len(audit_steps) + 3,
-                    step_kind="citation",
-                    operation="materialize_citation_binding",
-                    status="completed",
-                    safe_input_digest=_digest(governed.digest),
-                    result_ref=citation.draft_ref,
-                    result_digest=citation.digest,
-                    evidence_count=len(citation.bindings),
-                ),
-            ]
+            _terminal_materialization_steps(
+                start_ordinal=len(audit_steps) + 1,
+                assessment_step=assessment_step,
+                evidence_pack=evidence_pack,
+                proposal=proposal,
+                governed=governed,
+                citation=citation,
+                evidence_count=len(declared_lineage),
+            )
         )
         audit = self._audit.materialize_v2(
-            MaterializeTurnAuditDraftV2(
-                draft_ref=_ref("turn-audit-draft", execution_id),
+            _audit_command(
                 execution_id=execution_id,
-                claimed_evidence_handles=proposal.claimed_evidence_handles,
-                evidence_pack_ref=evidence_pack.evidence_pack_ref,
-                evidence_pack_digest=evidence_pack.digest,
-                governed_answer_draft_ref=governed.draft_ref,
-                governed_answer_digest=governed.digest,
-                citation_binding_draft_ref=citation.draft_ref,
-                citation_binding_digest=citation.digest,
-                retrieval_status=governed.retrieval_status,
-                evidence_review_status=governed.evidence_review_status,
-                terminal_status="terminal_completed",
+                proposal=proposal,
+                evidence_pack=evidence_pack,
+                governed=governed,
+                citation=citation,
                 steps=audit_steps,
-                idempotency_key=f"{execution_id}:turn-audit",
             )
         )
         snapshot = self._runtime.prepare_terminal(
-            PrepareTerminalV1(
-                execution_id=execution_id,
-                expected_version=snapshot.version,
-                fencing_token=snapshot.lease.fencing_token,
+            _prepare_terminal_command(
+                snapshot=snapshot,
                 evidence_pack_ref=evidence_pack.evidence_pack_ref,
                 governed_answer_draft_ref=governed.draft_ref,
                 citation_binding_draft_ref=citation.draft_ref,
                 audit_draft_ref=audit.draft_ref,
             )
         )
-        if snapshot.terminal_commit_intent_ref is None:
-            raise ValueError("runtime did not bind a terminal commit intent")
-        self._runtime.commit_terminal(
-            CommitTerminalV1(
-                execution_id=execution_id,
-                expected_version=snapshot.version,
-                fencing_token=snapshot.lease.fencing_token,
-                terminal_commit_intent_ref=snapshot.terminal_commit_intent_ref,
-            )
-        )
+        self._runtime.commit_terminal(_commit_terminal_command(snapshot))
 
     def _fail_active(self, snapshot: ExecutionSnapshotV1, failure_code: str) -> None:
         try:

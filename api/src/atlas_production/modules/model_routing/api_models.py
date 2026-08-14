@@ -118,12 +118,14 @@ class ModelRouteStatus(StrictMessageReferenceModel):
     revision: int
     runtime_policy: ModelRouteRuntimePolicy
     audit_event_ref: str
-    is_default: bool = False
+    is_text_default: bool = False
+    is_vision_default: bool = False
 
 
 class ModelRouteListResult(StrictModel):
     routes: list[ModelRouteStatus]
-    default_route_id: str | None = None
+    text_default_route_id: str | None = None
+    vision_default_route_id: str | None = None
 
 
 class ModelRouteDefaultRequest(StrictModel):

@@ -5975,6 +5975,155 @@ describe("Atlas production web", () => {
     ).toBeInTheDocument();
   });
 
+  it("Document Library uploads selected files sequentially and retries only remaining drafts", async () => {
+    window.history.pushState({}, "", "/admin/document-library");
+    mockApi(adminWithProjectSession, readyReadiness);
+    const normalFetch = global.fetch;
+    const uploadCalls: RequestInit[] = [];
+    let resolveFirstUpload!: (response: Response) => void;
+    let resolveSecondUpload!: (response: Response) => void;
+    const firstUpload = new Promise<Response>((resolve) => {
+      resolveFirstUpload = resolve;
+    });
+    const secondUpload = new Promise<Response>((resolve) => {
+      resolveSecondUpload = resolve;
+    });
+    global.fetch = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), "http://localhost");
+        if (
+          url.pathname === "/api/v1/admin/document-library" &&
+          init?.method === "POST"
+        ) {
+          uploadCalls.push(init);
+          if (uploadCalls.length === 1) return firstUpload;
+          if (uploadCalls.length === 2) return secondUpload;
+          return jsonResponse({
+            message_code: "document.document_upload_was_accepted",
+            message_params: {},
+          });
+        }
+        return normalFetch(input, init);
+      },
+    );
+    render(<App />);
+
+    fireEvent.click(await screen.findByLabelText("Target"));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: "Team: Signal Integrity",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Upload document" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText(
+        "Choose one or more documents and add them to the current scope.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Add other Teams or Projects (optional)",
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Project: Admin Live Project",
+      }),
+    );
+    const firstFile = new File(["%PDF-1.4"], "first.pdf", {
+      type: "application/pdf",
+    });
+    const secondFile = new File(["word"], "second.docx", {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    const fileInput = within(dialog).getByLabelText("Document files");
+    expect(fileInput).toHaveAttribute("multiple");
+    fireEvent.change(fileInput, {
+      target: { files: [firstFile, secondFile] },
+    });
+    expect(within(dialog).getByText(/first\.pdf/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/second\.docx/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("Document description"), {
+      target: { value: "Shared batch metadata" },
+    });
+    fireEvent.click(within(dialog).getByText("Allow member download"));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Upload selected files" }),
+    );
+
+    expect(await screen.findByText("Uploading 1 of 2…")).toBeInTheDocument();
+    expect(uploadCalls).toHaveLength(1);
+    expect(within(dialog).getByLabelText("Document files")).toBeDisabled();
+    expect(within(dialog).getByLabelText("Document description")).toBeDisabled();
+    expect(
+      within(dialog).getByRole("checkbox", { name: "Allow member download" }),
+    ).toBeDisabled();
+
+    resolveFirstUpload(
+      await jsonResponse({
+        message_code: "document.document_upload_was_accepted",
+        message_params: {},
+      }),
+    );
+    expect(await screen.findByText("Uploading 2 of 2…")).toBeInTheDocument();
+    await waitFor(() => expect(uploadCalls).toHaveLength(2));
+
+    const firstForm = uploadCalls[0]!.body as FormData;
+    const secondForm = uploadCalls[1]!.body as FormData;
+    const firstDocumentId = String(firstForm.get("document_id"));
+    const secondDocumentId = String(secondForm.get("document_id"));
+    expect(firstForm.get("file")).toBe(firstFile);
+    expect(secondForm.get("file")).toBe(secondFile);
+    expect(firstDocumentId).not.toBe(secondDocumentId);
+    expect(firstForm.get("idempotency_key")).toBe(`doclib-${firstDocumentId}`);
+    expect(secondForm.get("idempotency_key")).toBe(`doclib-${secondDocumentId}`);
+    for (const form of [firstForm, secondForm]) {
+      expect(form.get("scope_type")).toBe("team");
+      expect(form.get("scope_id")).toBe("team-si");
+      expect(JSON.parse(String(form.get("tag_refs")))).toEqual([
+        { tag_type: "team", tag_id: "team-si" },
+        { tag_type: "project", tag_id: "proj-admin-live" },
+      ]);
+      expect(form.get("description")).toBe("Shared batch metadata");
+      expect(form.get("allow_member_download")).toBe("true");
+    }
+
+    resolveSecondUpload(
+      await jsonResponse(
+        {
+          message_code: "artifact.storage_is_temporarily_unavailable",
+          message_params: {},
+        },
+        503,
+      ),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent(
+        "Storage is temporarily unavailable. Try again later.",
+      ),
+    );
+    const retryDialog = screen.getByRole("dialog");
+    expect(within(retryDialog).queryByText(/first\.pdf/)).not.toBeInTheDocument();
+    expect(within(retryDialog).getByText(/second\.docx/)).toBeInTheDocument();
+    expect(within(retryDialog).getByLabelText("Document files")).toHaveProperty(
+      "files.length",
+      0,
+    );
+
+    fireEvent.click(
+      within(retryDialog).getByRole("button", { name: "Upload selected files" }),
+    );
+    await waitFor(() => expect(uploadCalls).toHaveLength(3));
+    const retryForm = uploadCalls[2]!.body as FormData;
+    expect(retryForm.get("file")).toBe(secondFile);
+    expect(retryForm.get("document_id")).toBe(secondDocumentId);
+    expect(retryForm.get("idempotency_key")).toBe(`doclib-${secondDocumentId}`);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+  });
+
   it("Document Library upload preserves draft on failure", async () => {
     window.history.pushState({}, "", "/admin/document-library");
     mockApi(adminWithProjectSession, readyReadiness);
@@ -6012,7 +6161,7 @@ describe("Atlas production web", () => {
     const dialog = await screen.findByRole("dialog");
     expect(
       within(dialog).getByText(
-        "Supports PDF, Word, PowerPoint, Excel, TXT, and CSV; one file per upload, up to 250 MiB.",
+        "Supports PDF, Word, PowerPoint, Excel, TXT, and CSV; select one or more files, each up to 250 MiB.",
       ),
     ).toBeInTheDocument();
     fireEvent.click(
@@ -6028,7 +6177,7 @@ describe("Atlas production web", () => {
     const uploadFile = new File(["%PDF-1.4"], "retry-upload.pdf", {
       type: "application/pdf",
     });
-    fireEvent.change(within(dialog).getByLabelText("Document file"), {
+    fireEvent.change(within(dialog).getByLabelText("Document files"), {
       target: { files: [uploadFile] },
     });
     fireEvent.change(within(dialog).getByLabelText("Document description"), {
@@ -6036,9 +6185,9 @@ describe("Atlas production web", () => {
     });
     fireEvent.click(within(dialog).getByText("Allow member download"));
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Upload document" }),
+      within(dialog).getByRole("button", { name: "Upload selected files" }),
     );
-    const uploadingLabel = await screen.findByText("Uploading…");
+    const uploadingLabel = await screen.findByText("Uploading 1 of 1…");
     expect(uploadingLabel.closest("button")).toBeDisabled();
     const pendingDialog = uploadingLabel.closest('[role="dialog"]') as HTMLElement;
     expect(
@@ -6072,7 +6221,7 @@ describe("Atlas production web", () => {
       ),
     );
     const retryDialog = screen.getByRole("dialog");
-    expect(within(retryDialog).getByLabelText("Document file")).toHaveProperty(
+    expect(within(retryDialog).getByLabelText("Document files")).toHaveProperty(
       "files.0",
       uploadFile,
     );
@@ -6091,7 +6240,7 @@ describe("Atlas production web", () => {
     ).toBeChecked();
 
     fireEvent.click(
-      within(retryDialog).getByRole("button", { name: "Upload document" }),
+      within(retryDialog).getByRole("button", { name: "Upload selected files" }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
@@ -6143,11 +6292,11 @@ describe("Atlas production web", () => {
     const uploadFile = new File(["%PDF-1.4"], "accepted-upload.pdf", {
       type: "application/pdf",
     });
-    fireEvent.change(within(dialog).getByLabelText("Document file"), {
+    fireEvent.change(within(dialog).getByLabelText("Document files"), {
       target: { files: [uploadFile] },
     });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Upload document" }),
+      within(dialog).getByRole("button", { name: "Upload selected files" }),
     );
 
     await waitFor(() =>
@@ -6490,7 +6639,7 @@ describe("Atlas production web", () => {
     const uploadFile = new File(["%PDF-1.4"], "feature-upload.pdf", {
       type: "application/pdf",
     });
-    fireEvent.change(within(dialog).getByLabelText("Document file"), {
+    fireEvent.change(within(dialog).getByLabelText("Document files"), {
       target: { files: [uploadFile] },
     });
     fireEvent.change(within(dialog).getByLabelText("Document description"), {
@@ -6507,7 +6656,7 @@ describe("Atlas production web", () => {
       }),
     );
     fireEvent.click(within(dialog).getByText("Allow member download"));
-    fireEvent.click(within(dialog).getByRole("button", { name: "Upload document" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Upload selected files" }));
     await waitFor(() =>
       expect(global.fetch).toHaveBeenCalledWith(
         "/api/v1/admin/document-library",

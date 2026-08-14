@@ -39,6 +39,12 @@ def safe_validation_errors(errors: list[dict]) -> list[dict]:
     sanitized = []
     for error_item in errors:
         item = sanitize(error_item)
+        if (
+            error_item.get("type") == "value_error"
+            and isinstance(error_item.get("input"), dict)
+            and "input" in item
+        ):
+            item["input"] = "[redacted]"
         location = [str(part).casefold() for part in error_item.get("loc", [])]
         if any(
             marker in part

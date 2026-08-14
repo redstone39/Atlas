@@ -2148,7 +2148,7 @@ class Routing:
     def open_tested_attempt(self, route_id=None):
         return SimpleNamespace(
             route=SimpleNamespace(
-                route_id="r1",
+                route_id=route_id or "test-route",
                 revision=1,
                 runtime_policy=SimpleNamespace(
                     revision=1,

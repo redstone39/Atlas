@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 import hashlib
 import json
 
+from typing import Literal
 from pydantic import BaseModel, SecretStr
 
 from atlas_production.modules.identity_access.records import UserRecord
@@ -305,7 +306,9 @@ class ModelRoutingService:
             current = self._connection(connection_id)
             self._check_revision(current.revision, payload.expected_revision)
             linked = self.repository.linked_routes(connection_id)
-            if payload.enabled is False and any(route.is_default for route in linked):
+            if payload.enabled is False and any(
+                route.is_text_default or route.is_vision_default for route in linked
+            ):
                 self._invalid(
                     "provider.choose_another_default_before_disabling_connection"
                 )
@@ -625,12 +628,13 @@ class ModelRoutingService:
     def list_routes(self, actor: UserRecord | None) -> ModelRouteListResult:
         self._require_admin(actor)
         with self.repository.mutation_scope([]):
-            default = self.repository.default_route()
+            text_default = self.repository.default_route("text")
+            vision_default = self.repository.default_route("vision")
             return ModelRouteListResult(
                 routes=[
                     self._route_status(
                         route,
-                    "model.route_is_available",
+                        "model.route_is_available",
                         "audit-model-route-listed",
                     )
                     for route in sorted(
@@ -638,7 +642,12 @@ class ModelRoutingService:
                         key=lambda item: item.display_name.casefold(),
                     )
                 ],
-                default_route_id=default.route_id if default else None,
+                text_default_route_id=(
+                    text_default.route_id if text_default else None
+                ),
+                vision_default_route_id=(
+                    vision_default.route_id if vision_default else None
+                ),
             )
 
     def configure(
@@ -765,7 +774,9 @@ class ModelRoutingService:
                 return ModelRouteOutcome(replayed[0], replayed[1])
             current = self._route(route_id)
             self._check_revision(current.revision, payload.expected_revision)
-            if payload.enabled is False and current.is_default:
+            if payload.enabled is False and (
+                current.is_text_default or current.is_vision_default
+            ):
                 self._invalid(
                     "model.choose_another_default_before_disabling_route"
                 )
@@ -780,6 +791,13 @@ class ModelRoutingService:
                 candidate.enabled = payload.enabled
             if payload.supports_vision is not None:
                 candidate.supports_vision = payload.supports_vision
+            if (
+                payload.supports_vision is False
+                and current.is_vision_default
+            ):
+                self._invalid(
+                    "model.choose_another_default_before_disabling_vision"
+                )
             candidate.runtime_policy = ModelRouteRuntimePolicy(
                 **asdict(payload.runtime_policy),
                 revision=current.runtime_policy.revision + 1,
@@ -910,12 +928,15 @@ class ModelRoutingService:
         self,
         actor: UserRecord | None,
         route_id: str,
+        purpose: Literal["text", "vision"],
         payload: ModelRouteDefaultRequest,
     ) -> ModelRouteOutcome:
         actor = self._require_admin(actor)
-        operation = "model_route_default"
+        operation = f"model_route_default_{purpose}"
         target_ref = f"model-route:{route_id}"
-        with self.repository.default_route_scope(payload.idempotency_key, route_id):
+        with self.repository.default_route_scope(
+            payload.idempotency_key, route_id, purpose
+        ):
             replayed = self._replayed(
                 idempotency_key=payload.idempotency_key,
                 operation=operation,
@@ -937,27 +958,33 @@ class ModelRoutingService:
                 or connection.status != "verified"
             ):
                 self._invalid("model.test_this_route_before_making_it_default")
+            if purpose == "vision" and not route.supports_vision:
+                self._invalid("model.vision_default_requires_vision_capability")
             self.repository.decrypt_secret(connection, secret)
-            previous = self.repository.default_route()
+            previous = self.repository.default_route(purpose)
+            message_code = (
+                "model.default_text_model_route_is_updated"
+                if purpose == "text"
+                else "model.default_vision_model_route_is_updated"
+            )
             audit = ModelRouteAuditCommand(
                 event_type="model_route_default_set",
                 actor_id=actor.actor_id,
                 target_ref=target_ref,
-                message_code='model.default_model_route_is_updated',
+                message_code=message_code,
                 metadata={
                     "previous_default_route_id": previous.route_id if previous else None,
                     "new_default_route_id": route.route_id,
+                    "model_route_purpose": purpose,
                     "request_id": payload.idempotency_key,
                     "route_status": route.status,
                 },
             )
             selected = route
-            selected.is_default = True
-            selected.revision += 1
+            setattr(selected, f"is_{purpose}_default", True)
             routes = [selected]
             if previous is not None and previous.route_id != selected.route_id:
-                previous.is_default = False
-                previous.revision += 1
+                setattr(previous, f"is_{purpose}_default", False)
                 routes.insert(0, previous)
             result = self._commit_with_replay(
                 idempotency_key=payload.idempotency_key,
@@ -966,7 +993,7 @@ class ModelRoutingService:
                 status_code=200,
                 result_builder=lambda audit_ref: self._route_status(
                     selected,
-                    'model.default_model_route_is_updated',
+                    message_code,
                     audit_ref,
                 ),
                 connections=[],
@@ -975,10 +1002,7 @@ class ModelRoutingService:
                 audits=[audit],
                 payload=payload,
             )
-            return ModelRouteOutcome(
-                result,
-                200,
-            )
+            return ModelRouteOutcome(result, 200)
 
     def test_route(
         self,
@@ -1059,6 +1083,8 @@ class ModelRoutingService:
 
     def tested_route(self) -> ModelRouteRecord | None:
         return self.repository.tested_route()
+    def tested_vision_default_route(self) -> ModelRouteRecord | None:
+        return self.repository.tested_vision_default_route()
 
     def tested_vision_route(self, route_id: str) -> ModelRouteRecord | None:
         route = self.repository.get_route(route_id)
@@ -1424,7 +1450,8 @@ class ModelRoutingService:
             revision=route.revision,
             runtime_policy=route.runtime_policy,
             audit_event_ref=audit_event_ref,
-            is_default=route.is_default,
+            is_text_default=route.is_text_default,
+            is_vision_default=route.is_vision_default,
         )
 
     @staticmethod

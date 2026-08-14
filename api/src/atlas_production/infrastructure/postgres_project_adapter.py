@@ -19,6 +19,10 @@ from atlas_production.infrastructure.postgres_owner.project import (
     ProjectCurrentnessConflict,
 )
 from atlas_production.infrastructure.postgres_owner.team import TeamRepository
+from atlas_production.modules.identity_access.directory_ports import (
+    ScopedDirectoryIdentityCapability,
+    ScopedDirectoryImportCommitPort,
+)
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     PermissionGrantRecord,
@@ -300,10 +304,14 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
 
 def build_postgres_project_governance(
     session_factory: SessionFactory,
+    directory_identity: ScopedDirectoryIdentityCapability,
+    directory_import_commit: ScopedDirectoryImportCommitPort,
     acl_authority: ActionAwareAclAuthority | None = None,
 ) -> ProjectGovernanceService:
     return ProjectGovernanceService(
-        PostgresProjectGovernanceRepository(session_factory, acl_authority)
+        PostgresProjectGovernanceRepository(session_factory, acl_authority),
+        directory_identity,
+        directory_import_commit,
     )
 
 

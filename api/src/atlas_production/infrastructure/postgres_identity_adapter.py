@@ -42,7 +42,13 @@ from atlas_production.modules.identity_access.ports import (
     IdentityAccessRepository,
     InviteScopeGrantPort,
 )
-from atlas_production.modules.identity_access.directory_ports import DirectoryRepository
+from atlas_production.modules.identity_access.directory_ports import (
+    DirectoryRepository,
+    ScopedDirectoryImportAuthorizationConflict,
+    ScopedDirectoryImportChangeSet,
+    ScopedDirectoryImportCommitPort,
+    ScopedDirectoryImportCurrentnessConflict,
+)
 from atlas_production.modules.identity_access.directory_records import (
     DirectoryConnectionRecord,
     DirectorySecretRecord,
@@ -108,8 +114,10 @@ class _IdentityMutationBuffer:
     committed: bool = False
 
 
-class PostgresIdentityAccessRepository(DirectoryRepository):
-    """Exact route-facing Identity port backed by named PostgreSQL owners."""
+class PostgresIdentityAccessRepository(
+    DirectoryRepository,
+    ScopedDirectoryImportCommitPort,
+):
 
     def __init__(
         self,
@@ -387,6 +395,30 @@ class PostgresIdentityAccessRepository(DirectoryRepository):
             identity.actor_id,
             replace(identity),
         )
+
+    def commit_scoped_directory_import(
+        self,
+        change_set: ScopedDirectoryImportChangeSet,
+    ) -> None:
+        try:
+            self.owner.scoped_directory_import(change_set)
+        except IdentityAuthorizationConflict as exc:
+            message_code = (
+                "team.member_management_requires_team_admin_access"
+                if change_set.authorization_scope_type == "team"
+                else "project.management_requires_project_admin_access"
+            )
+            rejection = persist_rejection_audit(
+                self.session_factory,
+                candidate=change_set.audit_events[-1],
+                message_code=message_code,
+                reason="commit_time_scope_authority_changed",
+            )
+            raise ScopedDirectoryImportAuthorizationConflict(
+                rejection.event_id
+            ) from exc
+        except IdentityCurrentnessConflict as exc:
+            raise ScopedDirectoryImportCurrentnessConflict() from exc
 
     def stage_session(self, actor_id: str) -> str:
         buffer = self._require_buffer()

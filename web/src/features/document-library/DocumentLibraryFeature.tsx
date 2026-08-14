@@ -88,6 +88,11 @@ import {
 type ScopeKey = "all" | `team:${string}` | `project:${string}`;
 type TagKey = Exclude<ScopeKey, "all">;
 
+type UploadItem = {
+  documentId: string;
+  file: File;
+};
+
 export function DocumentLibraryFeature({
   session,
   initialScope,
@@ -113,13 +118,17 @@ export function DocumentLibraryFeature({
   const [detailEvents, setDetailEvents] = useState<AuditEvent[]>([]);
   const [descriptionDraft, setDescriptionDraft] = useState("");
   const [showUploadDialog, setShowUploadDialog] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploadDescription, setUploadDescription] = useState("");
   const [uploadAllowMemberDownload, setUploadAllowMemberDownload] = useState(false);
   const [uploadOwnerTagKey, setUploadOwnerTagKey] = useState<TagKey | null>(null);
   const [uploadAdditionalTagKeys, setUploadAdditionalTagKeys] = useState<TagKey[]>([]);
   const [showAdditionalTargets, setShowAdditionalTargets] = useState(false);
   const [uploadFileInputKey, setUploadFileInputKey] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -132,7 +141,9 @@ export function DocumentLibraryFeature({
     jobs: processingJobs,
     error: processingJobsError,
     refresh: refreshProcessingJobs,
-  } = useProcessingJobs();
+  } = useProcessingJobs(() => {
+    void refreshDocuments();
+  });
   const initialLoading = scopeLoading || !documentsReady;
   const pageLoadError = scopeLoadError || loadError;
 
@@ -156,7 +167,7 @@ export function DocumentLibraryFeature({
     (option) => option.value !== uploadOwnerTagKey,
   );
   const uploadPending = pendingAction === "upload";
-  const canUpload = Boolean(uploadFile && uploadOwnerTagKey);
+  const canUpload = Boolean(uploadItems.length > 0 && uploadOwnerTagKey);
   const actorId = session.actor?.actor_id ?? "";
   const selectedProcessingIsActive = Boolean(
     selectedDocument &&
@@ -300,13 +311,14 @@ export function DocumentLibraryFeature({
   }
 
   function resetUploadDraft(ownerTagKey: TagKey | null = null) {
-    setUploadFile(null);
+    setUploadItems([]);
     setUploadDescription("");
     setUploadAllowMemberDownload(false);
     setUploadOwnerTagKey(ownerTagKey);
     setUploadAdditionalTagKeys([]);
     setShowAdditionalTargets(false);
     setUploadFileInputKey((value) => value + 1);
+    setUploadProgress(null);
   }
 
   function openUploadDialog() {
@@ -334,31 +346,68 @@ export function DocumentLibraryFeature({
     }
   }
 
-  async function uploadDocument() {
+  async function uploadDocuments() {
     const ownerRef = uploadOwnerTagKey
       ? scopeRefFromKey(uploadOwnerTagKey)
       : null;
-    if (!ownerRef || !uploadFile) return;
+    if (!ownerRef || uploadItems.length === 0) return;
     const additionalRefs = uploadTagOptions
       .filter((option) => uploadAdditionalTagKeys.includes(option.value))
       .map((option) => scopeRefFromKey(option.value))
       .filter((tag): tag is DocumentTagRef => tag !== null);
     const tagRefs = [ownerRef, ...additionalRefs];
-    const documentId = generatedId("doc", titleFromFilename(uploadFile.name));
-    await runAction(
-      "upload",
-      () =>
-        documentLibraryApi.uploadDocumentLibraryFile({
-          documentId,
-          scopeType: ownerRef.tag_type,
-          scopeId: ownerRef.tag_id,
-          tagRefs,
-          file: uploadFile,
-          description: uploadDescription,
-          allowMemberDownload: uploadAllowMemberDownload,
-        }),
-      closeUploadDialog,
-    );
+    const items = uploadItems;
+    const description = uploadDescription;
+    const allowMemberDownload = uploadAllowMemberDownload;
+    let acceptedCount = 0;
+    let lastMessageCode = "";
+
+    setPendingAction("upload");
+    setActionError("");
+    try {
+      try {
+        for (const [index, item] of items.entries()) {
+          setUploadProgress({ current: index + 1, total: items.length });
+          const result = await documentLibraryApi.uploadDocumentLibraryFile({
+            documentId: item.documentId,
+            scopeType: ownerRef.tag_type,
+            scopeId: ownerRef.tag_id,
+            tagRefs,
+            file: item.file,
+            description,
+            allowMemberDownload,
+          });
+          lastMessageCode = result.message_code;
+          acceptedCount += 1;
+          setUploadItems((current) =>
+            current.filter((candidate) => candidate.documentId !== item.documentId),
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("admin.actionFailed");
+        setActionError(message);
+        toast.error(serverMessage(message, t));
+        if (acceptedCount > 0) {
+          setUploadFileInputKey((value) => value + 1);
+        }
+        return;
+      }
+
+      onNotice(lastMessageCode);
+      toast.success(t("documentLibrary.uploadAccepted", { count: acceptedCount }));
+      closeUploadDialog();
+      try {
+        await refreshDocuments();
+        await refreshProcessingJobs();
+        await onRefresh();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t("admin.actionFailed");
+        toast.error(serverMessage(message, t));
+      }
+    } finally {
+      setPendingAction("");
+      setUploadProgress(null);
+    }
   }
 
   async function downloadDocument(item: DocumentLibrarySummary) {
@@ -619,7 +668,7 @@ export function DocumentLibraryFeature({
             <DialogTitle>{t("documentLibrary.upload")}</DialogTitle>
             <DialogDescription>{t("documentLibrary.uploadDescription")}</DialogDescription>
           </DialogHeader>
-          <FieldSet>
+          <FieldSet disabled={uploadPending}>
             <FieldGroup>
               {uploadOwnerOption && (
                 <TargetSummary
@@ -628,24 +677,36 @@ export function DocumentLibraryFeature({
                 />
               )}
               <Field>
-                <FieldLabel htmlFor="document-library-file">{t("ingestion.pdfFile")}</FieldLabel>
+                <FieldLabel htmlFor="document-library-file">
+                  {t("documentLibrary.files")}
+                </FieldLabel>
                 <Input
                   key={uploadFileInputKey}
                   id="document-library-file"
                   type="file"
+                  multiple
                   accept=".pdf,.docx,.pptx,.xlsx,.txt,.csv,.doc,.ppt,.xls"
-                  onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) =>
+                    setUploadItems(
+                      Array.from(event.currentTarget.files ?? []).map((file) => ({
+                        documentId: generatedId("doc", titleFromFilename(file.name)),
+                        file,
+                      })),
+                    )
+                  }
                 />
                 <FieldDescription>
                   {t("documentLibrary.fileRequirements")}
                 </FieldDescription>
-                <FieldDescription>
-                  {uploadFile
-                    ? `${t("ingestion.fileTitle", {
-                        title: titleFromFilename(uploadFile.name),
-                      })} · ${formatFileSize(uploadFile.size)}`
-                    : t("ingestion.fileTitlePending")}
-                </FieldDescription>
+                {uploadItems.length > 0 && (
+                  <div className="max-h-40 space-y-1 overflow-y-auto">
+                    {uploadItems.map((item) => (
+                      <FieldDescription key={item.documentId}>
+                        {item.file.name} · {formatFileSize(item.file.size)}
+                      </FieldDescription>
+                    ))}
+                  </div>
+                )}
               </Field>
               <Field>
                 <FieldLabel htmlFor="document-library-description">
@@ -723,18 +784,21 @@ export function DocumentLibraryFeature({
               {t("admin.cancel")}
             </Button>
             <Button
-              onClick={() => void uploadDocument()}
+              onClick={() => void uploadDocuments()}
               disabled={!canUpload || uploadPending}
             >
               {uploadPending ? (
                 <>
                   <Spinner data-icon="inline-start" />
-                  {t("documentLibrary.uploading")}
+                  {t(
+                    "documentLibrary.uploadingFiles",
+                    uploadProgress ?? { current: 1, total: uploadItems.length },
+                  )}
                 </>
               ) : (
                 <>
                   <FileUp data-icon="inline-start" />
-                  {t("documentLibrary.upload")}
+                  {t("documentLibrary.uploadSelected")}
                 </>
               )}
             </Button>

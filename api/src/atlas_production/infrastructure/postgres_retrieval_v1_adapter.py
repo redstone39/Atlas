@@ -1,41 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fractions import Fraction
 import hashlib
-import json
-import unicodedata
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Sequence
 
 from pydantic import TypeAdapter
 import tiktoken
-from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
-
-from atlas_production.infrastructure.persistence.async_processing import (
-    AtlasIndexGenerationRow,
-    AtlasProcessingGenerationRetentionEntryRow,
-    AtlasProcessingGenerationRetentionRow,
-    AtlasSearchChunkRow,
-)
-from atlas_production.infrastructure.persistence.document_intake import (
-    AtlasDocumentRow,
-    AtlasDocumentVersionRow,
-)
-from atlas_production.infrastructure.persistence.processing_pipeline import (
-    AtlasEvidencePageArtifactRow,
-    AtlasEvidenceRow,
-    AtlasProcessingRevisionRow,
-)
-from atlas_production.infrastructure.persistence.retrieval import (
-    AtlasTurnCatalogDocumentRow,
-)
 
 from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
-    AUTHORIZATION_RESOURCE_REF_DESCRIPTOR_KEY,
-    PROCESSING_REVISION_REF_DESCRIPTOR_KEY,
     CatalogDocumentInput,
     CatalogRecord,
     CreateCatalogInput,
@@ -48,12 +22,36 @@ from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
     ResultHandleInput,
     RetrievalStoreConflict,
 )
-from atlas_production.modules.authorization.public import (
-    GrantDocumentResourceOwner,
+from atlas_production.infrastructure.postgres_retrieval_v1_actions import (
+    _canonical,
+    _compose_bbox,
+    _digest,
+    _normalize_identity,
+    _opaque,
+    _page_resource,
+    _parse_visual_resource,
+    _visual_resource,
+    backend_documents,
+    catalog_document_matches,
+    catalog_page,
+    cursor,
+    cursor_offset,
+    evidence_digest,
+    evidence_result,
+    public_document_descriptor,
+    validate_backend_evidence,
 )
-from atlas_production.modules.processing_pipeline.public import (
-    DocumentNavigationMapV1,
+from atlas_production.infrastructure.postgres_retrieval_v1_contracts import (
+    BackendCatalogDocument,
+    BackendDiscoveryHit,
+    BackendEvidence,
+    BackendVisualImage,
+    KnowledgeRetrievalBackend,
 )
+from atlas_production.infrastructure.postgres_retrieval_v1_lineage import (
+    PostgresCanonicalRetrievalLineage,
+)
+from atlas_production.modules.authorization.public import GrantDocumentResourceOwner
 from atlas_production.modules.retrieval.public import (
     ClaimedEvidenceLineageV1,
     DeclaredEvidenceItemV1,
@@ -64,7 +62,6 @@ from atlas_production.modules.retrieval.public import (
     DiscoveryChannelTraceV1,
     DiscoverRelevantDocumentsV1,
     DocumentNavigationResultV1,
-    EvidenceDescriptorV1,
     EvidencePackLineageItemV1,
     EvidencePackRefV1,
     GovernanceEvidenceItemV1,
@@ -73,7 +70,6 @@ from atlas_production.modules.retrieval.public import (
     FindKnowledgeDocumentsV1,
     InspectKnowledgeV1,
     InspectVisualV1,
-    KnowledgeCatalogPageV1,
     KnowledgeDocumentDescriptorV1,
     KnowledgeExpansionResultV1,
     KnowledgeInspectionItemV1,
@@ -98,413 +94,6 @@ from atlas_production.modules.retrieval.public import (
 
 
 _OBSERVATION_ADAPTER = TypeAdapter(KnowledgeToolObservationV1)
-SessionFactory = Callable[[], Session]
-
-
-def _canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical(value)).hexdigest()
-
-
-def _opaque(kind: str, *parts: str) -> str:
-    digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()
-    return f"kh_{kind}_{digest[:32]}"
-
-
-def _normalize_identity(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return " ".join(
-        "".join(
-            character if character.isalnum() else " "
-            for character in normalized
-        ).split()
-    )
-
-
-def _page_resource(document_handle: str, page_number: int) -> str:
-    return f"page|{document_handle}|{page_number}"
-
-
-def _visual_resource(
-    document_handle: str,
-    page_number: int,
-    bbox: tuple[int, int, int, int],
-    image_digest: str,
-) -> str:
-    return (
-        f"visual|{document_handle}|{page_number}|"
-        f"{','.join(str(value) for value in bbox)}|{image_digest}"
-    )
-
-
-def _parse_visual_resource(
-    kind: str, resource_ref: str
-) -> tuple[str, int, tuple[int, int, int, int]]:
-    parts = resource_ref.split("|")
-    if kind == "page" and len(parts) == 3 and parts[0] == "page":
-        document_handle, raw_page = parts[1:]
-        raw_bbox = "0,0,10000,10000"
-    elif kind == "visual" and len(parts) == 5 and parts[0] == "visual":
-        document_handle, raw_page, raw_bbox = parts[1:4]
-    else:
-        raise RetrievalStoreConflict("visual handle lineage is invalid")
-    try:
-        page_number = int(raw_page)
-        bbox = tuple(int(value) for value in raw_bbox.split(","))
-    except ValueError:
-        raise RetrievalStoreConflict("visual handle lineage is invalid") from None
-    if (
-        page_number < 1
-        or len(bbox) != 4
-        or any(value < 0 or value > 10_000 for value in bbox)
-        or bbox[0] >= bbox[2]
-        or bbox[1] >= bbox[3]
-    ):
-        raise RetrievalStoreConflict("visual handle lineage is invalid")
-    return document_handle, page_number, bbox  # type: ignore[return-value]
-
-
-def _compose_bbox(
-    parent: tuple[int, int, int, int],
-    child: tuple[int, int, int, int],
-) -> tuple[int, int, int, int]:
-    left, top, right, bottom = parent
-    width = right - left
-    height = bottom - top
-    return (
-        left + width * child[0] // 10_000,
-        top + height * child[1] // 10_000,
-        left + width * child[2] // 10_000,
-        top + height * child[3] // 10_000,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class BackendCatalogDocument:
-    document_handle: str
-    lifecycle_epoch: int
-    document_version_ref: str
-    processing_generation_ref: str
-    processing_revision_ref: str
-    index_generation_ref: str
-    manifest_digest: str
-    descriptor: Mapping[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class BackendEvidence:
-    evidence_ref: str
-    evidence_identity: str
-    document_handle: str
-    locator_label: str
-    snippet: str
-    content: str
-    modalities: tuple[str, ...]
-    page_number: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BackendDiscoveryHit:
-    match_ref: str
-    document_handle: str
-    preview: str
-    locator_label: str
-    page_number: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class BackendVisualImage:
-    content: bytes
-    digest: str
-    width: int
-    height: int
-
-
-class KnowledgeRetrievalBackend(Protocol):
-    def discover_lexical(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        query_text: str,
-        limit: int,
-        deadline_at: datetime | None = None,
-    ) -> Sequence[BackendDiscoveryHit]: ...
-
-    def discover_vector(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        query_text: str,
-        limit: int,
-        deadline_at: datetime | None = None,
-    ) -> Sequence[BackendDiscoveryHit]: ...
-
-    def search(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        query_text: str,
-        required_modalities: tuple[str, ...],
-        facet_hints: Mapping[str, object],
-        limit: int,
-        deadline_at: datetime | None = None,
-    ) -> Sequence[BackendEvidence]: ...
-
-    def inspect(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        evidence_refs: tuple[str, ...],
-        deadline_at: datetime | None = None,
-    ) -> Sequence[BackendEvidence]: ...
-
-    def expand(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        anchor_evidence_refs: tuple[str, ...],
-        direction: str,
-        limit: int,
-        deadline_at: datetime | None = None,
-    ) -> Sequence[BackendEvidence]: ...
-
-    def read_exact(
-        self,
-        *,
-        documents: tuple[BackendCatalogDocument, ...],
-        evidence_requests: tuple[tuple[str, str], ...],
-    ) -> Sequence[BackendEvidence]: ...
-
-    def render_visual(
-        self,
-        *,
-        document: BackendCatalogDocument,
-        page_number: int,
-        normalized_bbox: tuple[int, int, int, int],
-        deadline_at: datetime | None = None,
-    ) -> BackendVisualImage: ...
-
-    def navigation_map(
-        self, *, document: BackendCatalogDocument, deadline_at: datetime | None = None
-    ) -> DocumentNavigationMapV1 | None: ...
-
-
-def _opaque_evidence_ref(evidence_id: str) -> str:
-    return f"evidence-resource-{_digest(['evidence-resource-v1', evidence_id])}"
-
-
-def _canonical_document_resource_ref(document_id: str) -> str:
-    return f"document-resource-{_digest(['document-resource-v1', document_id])}"
-
-
-def _visual_page_number(evidence_ref: str) -> int | None:
-    parts = evidence_ref.split("|")
-    if len(parts) != 5 or parts[0] != "visual":
-        return None
-    try:
-        value = int(parts[2])
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-class PostgresCanonicalRetrievalLineage:
-    """Resolve cross-owner canonical lineage before Retrieval-owned writes."""
-
-    def __init__(self, session_factory: SessionFactory) -> None:
-        self._session_factory = session_factory
-
-    def canonicalize_catalog(self, command: CreateCatalogInput) -> CreateCatalogInput:
-        exact_documents: list[CatalogDocumentInput] = []
-        with self._session_factory() as session:
-            for document in command.documents:
-                index = session.get(
-                    AtlasIndexGenerationRow, document.index_generation_ref
-                )
-                revision = (
-                    session.get(AtlasProcessingRevisionRow, index.processing_revision_id)
-                    if index is not None and index.processing_revision_id is not None
-                    else None
-                )
-                retained = session.scalar(
-                    select(AtlasProcessingGenerationRetentionEntryRow.retention_ref)
-                    .join(
-                        AtlasProcessingGenerationRetentionRow,
-                        AtlasProcessingGenerationRetentionRow.retention_ref
-                        == AtlasProcessingGenerationRetentionEntryRow.retention_ref,
-                    )
-                    .where(
-                        AtlasProcessingGenerationRetentionEntryRow.retention_ref
-                        == command.generation_retention_ref,
-                        AtlasProcessingGenerationRetentionEntryRow.index_generation_id
-                        == document.index_generation_ref,
-                        AtlasProcessingGenerationRetentionRow.status == "active",
-                    )
-                    .limit(1)
-                )
-                binding_version = session.get(
-                    AtlasDocumentVersionRow, document.document_version_ref
-                )
-                binding = (
-                    session.get(AtlasDocumentRow, binding_version.document_id)
-                    if binding_version is not None
-                    else None
-                )
-                if (
-                    index is None
-                    or revision is None
-                    or revision.state != "ready"
-                    or retained is None
-                    or binding is None
-                    or document.resource_ref
-                    != _canonical_document_resource_ref(binding.document_id)
-                    or document.lifecycle_epoch
-                    != binding.resource_lifecycle_epoch + 1
-                    or binding.processing_identity_id
-                    != revision.processing_identity_id
-                    or index.processing_revision_id
-                    != revision.processing_revision_id
-                    or index.manifest_digest != document.manifest_digest
-                    or revision.manifest_digest != document.manifest_digest
-                    or document.processing_generation_ref
-                    != f"processing-generation-{index.source_processing_generation}"
-                    or (
-                        document.processing_revision_ref is not None
-                        and document.processing_revision_ref
-                        != revision.processing_revision_id
-                    )
-                ):
-                    raise RetrievalStoreConflict(
-                        "catalog document revision pin is unavailable"
-                    )
-                exact_documents.append(
-                    replace(
-                        document,
-                        processing_revision_ref=revision.processing_revision_id,
-                    )
-                )
-        return replace(command, documents=tuple(exact_documents))
-
-    def canonicalize_evidence_pack(
-        self,
-        command: MaterializeEvidencePackInput,
-        resolved: tuple[ResultHandleInput, ...],
-    ) -> MaterializeEvidencePackInput:
-        exact_items: list[EvidencePackLineageInput] = []
-        with self._session_factory() as session:
-            catalog_documents = {
-                row.document_handle: row
-                for row in session.scalars(
-                    select(AtlasTurnCatalogDocumentRow).where(
-                        AtlasTurnCatalogDocumentRow.catalog_ref == command.catalog_ref
-                    )
-                ).all()
-            }
-            for proposed, actual in zip(command.items, resolved, strict=True):
-                catalog_document = catalog_documents.get(
-                    actual.document_handle or ""
-                )
-                revision_ref = (
-                    catalog_document.descriptor.get(
-                        PROCESSING_REVISION_REF_DESCRIPTOR_KEY
-                    )
-                    if catalog_document is not None
-                    else None
-                )
-                binding_version = session.get(
-                    AtlasDocumentVersionRow, proposed.document_version_ref
-                )
-                binding = (
-                    session.get(AtlasDocumentRow, binding_version.document_id)
-                    if binding_version is not None
-                    else None
-                )
-                revision = session.get(
-                    AtlasProcessingRevisionRow, proposed.processing_revision_ref
-                )
-                index = session.get(
-                    AtlasIndexGenerationRow, proposed.index_generation_ref
-                )
-                if (
-                    catalog_document is None
-                    or catalog_document.descriptor.get(
-                        AUTHORIZATION_RESOURCE_REF_DESCRIPTOR_KEY
-                    )
-                    != proposed.resource_ref
-                    or revision_ref != proposed.processing_revision_ref
-                    or catalog_document.document_version_ref
-                    != proposed.document_version_ref
-                    or catalog_document.index_generation_ref
-                    != proposed.index_generation_ref
-                    or binding is None
-                    or revision is None
-                    or binding.processing_identity_id
-                    != revision.processing_identity_id
-                    or revision.state != "ready"
-                    or index is None
-                    or index.processing_revision_id
-                    != proposed.processing_revision_ref
-                ):
-                    raise RetrievalStoreConflict(
-                        "evidence pack document revision lineage changed"
-                    )
-
-                page_number = _visual_page_number(proposed.evidence_ref)
-                if page_number is None:
-                    evidence_rows = session.execute(
-                        select(AtlasEvidenceRow, AtlasSearchChunkRow)
-                        .join(
-                            AtlasSearchChunkRow,
-                            AtlasSearchChunkRow.evidence_id
-                            == AtlasEvidenceRow.evidence_id,
-                        )
-                        .where(
-                            AtlasEvidenceRow.processing_revision_id
-                            == proposed.processing_revision_ref,
-                            AtlasSearchChunkRow.processing_revision_id
-                            == proposed.processing_revision_ref,
-                            AtlasSearchChunkRow.index_generation_id
-                            == proposed.index_generation_ref,
-                        )
-                    ).all()
-                    evidence = next(
-                        (
-                            row
-                            for row, _chunk in evidence_rows
-                            if _opaque_evidence_ref(row.evidence_id)
-                            == proposed.evidence_ref
-                        ),
-                        None,
-                    )
-                    if evidence is None:
-                        raise RetrievalStoreConflict(
-                            "evidence pack evidence revision lineage changed"
-                        )
-                    raw_page = evidence.locator_payload.get("page_number")
-                    page_number = raw_page if isinstance(raw_page, int) else None
-
-                page_artifact_ref = None
-                if page_number is not None:
-                    page = session.scalar(
-                        select(AtlasEvidencePageArtifactRow).where(
-                            AtlasEvidencePageArtifactRow.processing_revision_id
-                            == proposed.processing_revision_ref,
-                            AtlasEvidencePageArtifactRow.source_page_index
-                            == page_number - 1,
-                        )
-                    )
-                    if page is None:
-                        raise RetrievalStoreConflict(
-                            "evidence pack page artifact lineage changed"
-                        )
-                    page_artifact_ref = page.id
-                exact_items.append(
-                    replace(proposed, page_artifact_ref=page_artifact_ref)
-                )
-        return replace(command, items=tuple(exact_items))
 
 
 class KnowledgeToolService:
@@ -2213,141 +1802,30 @@ class KnowledgeToolService:
         return observation, handles, None
 
     def _catalog_page(self, catalog: CatalogRecord, action):
-        documents = list(catalog.documents)
-        if isinstance(action, FindKnowledgeDocumentsV1):
-            normalized_keyword = _normalize_identity(action.keyword)
-            documents = [
-                item
-                for item in documents
-                if self._matches(item, normalized_keyword)
-            ]
-            page_size = 10
-            cursor_scope = f"find:{normalized_keyword}"
-        else:
-            page_size = action.page_size
-            cursor_scope = "list"
-        offset = self._cursor_offset(
-            catalog.catalog_ref,
-            cursor_scope,
-            action.cursor,
-        )
-        page = documents[offset : offset + page_size]
-        next_cursor = (
-            self._cursor(catalog.catalog_ref, cursor_scope, offset + page_size)
-            if offset + page_size < len(documents) else None
-        )
-        return KnowledgeCatalogPageV1(
-            result_type="knowledge_catalog_page",
-            documents=[self._public_descriptor(item) for item in page],
-            next_cursor=next_cursor,
-        )
+        return catalog_page(catalog, action)
 
     @staticmethod
     def _matches(
         document: CatalogDocumentInput,
         normalized_keyword: str,
     ) -> bool:
-        value = document.descriptor
-        identity_values = [
-            str(value.get("display_name", "")),
-            str(value.get("version_label") or ""),
-            *(str(tag) for tag in value.get("tags", [])),
-        ]
-        return any(
-            normalized_keyword in _normalize_identity(identity_value)
-            for identity_value in identity_values
-        )
+        return catalog_document_matches(document, normalized_keyword)
 
     @staticmethod
     def _public_descriptor(document: CatalogDocumentInput) -> KnowledgeDocumentDescriptorV1:
-        value = document.descriptor
-        return KnowledgeDocumentDescriptorV1(
-            document_handle=document.document_handle,
-            display_name=str(value["display_name"]),
-            media_type=str(value["media_type"]),
-            modalities=list(value["modalities"]),
-            tags=list(value.get("tags", [])),
-            version_label=value.get("version_label"),
-        )
+        return public_document_descriptor(document)
 
     @staticmethod
     def _backend_documents(catalog: CatalogRecord) -> tuple[BackendCatalogDocument, ...]:
-        return tuple(
-            BackendCatalogDocument(
-                document_handle=document.document_handle,
-                lifecycle_epoch=document.lifecycle_epoch,
-                document_version_ref=document.document_version_ref,
-                processing_generation_ref=document.processing_generation_ref,
-                processing_revision_ref=document.processing_revision_ref or "",
-                index_generation_ref=document.index_generation_ref,
-                manifest_digest=document.manifest_digest,
-                descriptor={
-                    key: value
-                    for key, value in document.descriptor.items()
-                    if key != AUTHORIZATION_RESOURCE_REF_DESCRIPTOR_KEY
-                },
-            )
-            for document in catalog.documents
-        )
+        return backend_documents(catalog)
 
     def _evidence_result(self, catalog, evidence, *, expansion_direction, limit):
-        documents = self._backend_documents(catalog)
-        documents_by_handle = {item.document_handle: item for item in documents}
-        self._validate_backend_evidence(documents, evidence)
-        descriptors = []
-        handles = []
-        for item in evidence[:limit]:
-            handle = _opaque("evidence", catalog.execution_id, catalog.catalog_ref, item.evidence_identity)
-            page_handle = (
-                _opaque(
-                    "page",
-                    catalog.execution_id,
-                    catalog.catalog_ref,
-                    item.document_handle,
-                    str(item.page_number),
-                )
-                if item.page_number is not None
-                else None
-            )
-            descriptors.append(EvidenceDescriptorV1(
-                evidence_handle=handle,
-                document_handle=item.document_handle,
-                document_display_name=str(
-                    documents_by_handle[item.document_handle].descriptor["display_name"]
-                ),
-                locator_label=item.locator_label,
-                snippet=item.snippet,
-                modalities=list(item.modalities),
-                page_handle=page_handle,
-                page_number=item.page_number,
-            ))
-            handles.append(ResultHandleInput(
-                handle=handle,
-                handle_kind="evidence",
-                resource_ref=item.evidence_ref,
-                evidence_identity=item.evidence_identity,
-                document_handle=item.document_handle,
-            ))
-            if page_handle is not None and item.page_number is not None:
-                handles.append(ResultHandleInput(
-                    handle=page_handle,
-                    handle_kind="page",
-                    resource_ref=_page_resource(
-                        item.document_handle, item.page_number
-                    ),
-                    document_handle=item.document_handle,
-                ))
-        if expansion_direction is None:
-            observation = KnowledgeSearchResultV1(
-                result_type="knowledge_search_result", evidence=descriptors, next_cursor=None
-            )
-        else:
-            observation = KnowledgeExpansionResultV1(
-                result_type="knowledge_expansion_result",
-                direction=expansion_direction,
-                evidence=descriptors,
-            )
-        return observation, tuple({item.handle: item for item in handles}.values())
+        return evidence_result(
+            catalog,
+            evidence,
+            expansion_direction=expansion_direction,
+            limit=limit,
+        )
 
     def _navigate_document(
         self,
@@ -2645,18 +2123,11 @@ class KnowledgeToolService:
 
     @staticmethod
     def _validate_backend_evidence(documents, evidence, expected_refs=None) -> None:
-        allowed = {document.document_handle for document in documents}
-        seen: set[str] = set()
-        for item in evidence:
-            if item.document_handle not in allowed or item.evidence_identity in seen:
-                raise RetrievalStoreConflict("backend returned catalog-external or duplicate evidence")
-            if expected_refs is not None and item.evidence_ref not in expected_refs:
-                raise RetrievalStoreConflict("backend inspection returned unrequested evidence")
-            seen.add(item.evidence_identity)
+        validate_backend_evidence(documents, evidence, expected_refs)
 
     @staticmethod
     def _cursor(catalog_ref: str, scope: str, offset: int) -> str:
-        return f"kc_{offset}_{_digest([catalog_ref, scope, offset])[:16]}"
+        return cursor(catalog_ref, scope, offset)
 
     @classmethod
     def _cursor_offset(
@@ -2665,30 +2136,11 @@ class KnowledgeToolService:
         scope: str,
         cursor: str | None,
     ) -> int:
-        if cursor is None:
-            return 0
-        try:
-            prefix, raw_offset, proof = cursor.split("_", 2)
-            offset = int(raw_offset)
-        except (ValueError, TypeError):
-            raise RetrievalStoreConflict("catalog cursor is invalid") from None
-        if (
-            prefix != "kc"
-            or offset < 0
-            or proof != _digest([catalog_ref, scope, offset])[:16]
-        ):
-            raise RetrievalStoreConflict("catalog cursor is invalid")
-        return offset
+        return cursor_offset(catalog_ref, scope, cursor)
 
     @staticmethod
     def _evidence_digest(item: ResultHandleInput) -> str:
-        return _digest(
-            {
-                "evidence_ref": item.resource_ref,
-                "evidence_identity": item.evidence_identity,
-                "document_handle": item.document_handle,
-            }
-        )
+        return evidence_digest(item)
 
     def _envelope(
         self,

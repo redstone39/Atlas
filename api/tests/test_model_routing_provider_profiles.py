@@ -62,7 +62,9 @@ class ConnectionRepository:
         self.mutation_scopes.append(connection_ids)
         return nullcontext()
 
-    def default_route_scope(self, _idempotency_key: str, _route_id: str):
+    def default_route_scope(
+        self, _idempotency_key: str, _route_id: str, _purpose: str
+    ):
         return nullcontext()
 
     def is_system_admin(self, _actor: UserRecord) -> bool:
@@ -99,9 +101,13 @@ class ConnectionRepository:
             if route.connection_id == connection_id
         ]
 
-    def default_route(self):
+    def default_route(self, purpose: str):
         route = next(
-            (route for route in self.routes.values() if route.is_default),
+            (
+                route
+                for route in self.routes.values()
+                if getattr(route, f"is_{purpose}_default")
+            ),
             None,
         )
         return deepcopy(route) if route is not None else None
@@ -430,7 +436,9 @@ def _ready_route(
     route_id: str,
     connection: ProviderConnectionRecord,
     *,
-    is_default: bool,
+    is_text_default: bool,
+    is_vision_default: bool = False,
+    supports_vision: bool = False,
 ) -> ModelRouteRecord:
     return ModelRouteRecord(
         route_id=route_id,
@@ -444,8 +452,10 @@ def _ready_route(
         ),
         status="test_passed",
         enabled=True,
+        supports_vision=supports_vision,
         revision=1,
-        is_default=is_default,
+        is_text_default=is_text_default,
+        is_vision_default=is_vision_default,
         readiness_schema_name=ROUTE_READINESS_SCHEMA.name,
         readiness_schema_digest=ROUTE_READINESS_SCHEMA.digest,
     )
@@ -477,12 +487,13 @@ def test_failed_default_does_not_select_or_rewrite_another_ready_route(
     default_route = _ready_route(
         "route-default",
         default_connection,
-        is_default=True,
+        is_text_default=True,
     )
     fallback_route = _ready_route(
         "route-fallback",
         fallback_connection,
-        is_default=False,
+        is_text_default=False,
+        supports_vision=True,
     )
     repository.routes = {
         default_route.route_id: default_route,
@@ -501,8 +512,8 @@ def test_failed_default_does_not_select_or_rewrite_another_ready_route(
     )
 
     assert failed.result.status == "test_failed"
-    assert repository.routes[default_route.route_id].is_default is True
-    assert repository.routes[fallback_route.route_id].is_default is False
+    assert repository.routes[default_route.route_id].is_text_default is True
+    assert repository.routes[fallback_route.route_id].is_text_default is False
     assert repository.mutation_scopes[-1] == [
         default_connection.connection_id,
         "idempotency:test-default-route",
@@ -511,12 +522,141 @@ def test_failed_default_does_not_select_or_rewrite_another_ready_route(
     selected = service.set_default(
         ADMIN,
         fallback_route.route_id,
+        "text",
         ModelRouteDefaultRequest(
             expected_revision=1,
             idempotency_key="select-fallback-route",
         ),
     )
 
-    assert selected.result.is_default is True
-    assert repository.routes[default_route.route_id].is_default is False
-    assert repository.routes[fallback_route.route_id].is_default is True
+    assert selected.result.is_text_default is True
+    assert repository.routes[default_route.route_id].is_text_default is False
+    assert repository.routes[fallback_route.route_id].is_text_default is True
+
+
+
+def test_text_and_vision_defaults_are_independent_and_may_share_a_route() -> None:
+    connection = _verified_connection("connection-shared", "openai_compatible")
+    repository = ConnectionRepository(connection)
+    route_a = _ready_route(
+        "route-a",
+        connection,
+        is_text_default=True,
+        supports_vision=True,
+    )
+    route_b = _ready_route(
+        "route-b",
+        connection,
+        is_text_default=False,
+        supports_vision=True,
+    )
+    repository.routes = {route.route_id: route for route in (route_a, route_b)}
+    service = ModelRoutingService(repository)
+
+    service.set_default(
+        ADMIN,
+        route_b.route_id,
+        "text",
+        ModelRouteDefaultRequest(
+            expected_revision=1,
+            idempotency_key="select-text-b",
+        ),
+    )
+    service.set_default(
+        ADMIN,
+        route_a.route_id,
+        "vision",
+        ModelRouteDefaultRequest(
+            expected_revision=1,
+            idempotency_key="select-vision-a",
+        ),
+    )
+    listed = service.list_routes(ADMIN)
+    assert listed.text_default_route_id == route_b.route_id
+    assert listed.vision_default_route_id == route_a.route_id
+
+    service.set_default(
+        ADMIN,
+        route_b.route_id,
+        "vision",
+        ModelRouteDefaultRequest(
+            expected_revision=1,
+            idempotency_key="select-vision-b",
+        ),
+    )
+    assert repository.routes[route_b.route_id].is_text_default is True
+    assert repository.routes[route_b.route_id].is_vision_default is True
+    assert repository.routes[route_a.route_id].is_text_default is False
+    assert repository.routes[route_a.route_id].is_vision_default is False
+    assert repository.routes[route_a.route_id].revision == 1
+    assert repository.routes[route_b.route_id].revision == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "readiness_schema_name", "readiness_schema_digest", "error_code"),
+    [
+        (
+            "test_passed",
+            ROUTE_READINESS_SCHEMA.name,
+            ROUTE_READINESS_SCHEMA.digest,
+            "invalid_request",
+        ),
+        ("configured", None, None, "invalid_request"),
+        (
+            "test_passed",
+            ROUTE_READINESS_SCHEMA.name,
+            "stale-digest",
+            "invalid_request",
+        ),
+    ],
+)
+def test_invalid_vision_default_selection_is_typed_and_atomic(
+    status: str,
+    readiness_schema_name: str | None,
+    readiness_schema_digest: str | None,
+    error_code: str,
+) -> None:
+    connection = _verified_connection("connection-vision", "openai_compatible")
+    repository = ConnectionRepository(connection)
+    text_route = _ready_route(
+        "route-text",
+        connection,
+        is_text_default=True,
+    )
+    vision_route = _ready_route(
+        "route-vision",
+        connection,
+        is_text_default=False,
+        is_vision_default=True,
+        supports_vision=True,
+    )
+    candidate = _ready_route(
+        "route-candidate",
+        connection,
+        is_text_default=False,
+        supports_vision=status != "test_passed" or readiness_schema_digest == "stale-digest",
+    )
+    candidate.status = status
+    candidate.readiness_schema_name = readiness_schema_name
+    candidate.readiness_schema_digest = readiness_schema_digest
+    repository.routes = {
+        route.route_id: route for route in (text_route, vision_route, candidate)
+    }
+    service = ModelRoutingService(repository)
+
+    with pytest.raises(ModelRoutingError) as raised:
+        service.set_default(
+            ADMIN,
+            candidate.route_id,
+            "vision",
+            ModelRouteDefaultRequest(
+                expected_revision=1,
+                idempotency_key=f"reject-{status}-{readiness_schema_digest}",
+            ),
+        )
+
+    assert raised.value.error_code == error_code
+    assert raised.value.status_code == 422
+    assert repository.routes[text_route.route_id].is_text_default is True
+    assert repository.routes[vision_route.route_id].is_vision_default is True
+    assert repository.routes[candidate.route_id].revision == 1

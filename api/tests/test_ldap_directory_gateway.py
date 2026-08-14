@@ -136,8 +136,9 @@ def test_escaped_query_cannot_rewrite_admin_search_filter() -> None:
     result = gateway.search_users(
         connection_record(),
         "bind-secret",
-        "Ada*)(|(objectClass=*))",
-        50,
+        query="Ada*)(|(objectClass=*))",
+        department=None,
+        limit=50,
     )
     assert result == ()
     assert filters == [
@@ -146,6 +147,20 @@ def test_escaped_query_cannot_rewrite_admin_search_filter() -> None:
         "(displayName=*Ada\\2a\\29\\28|\\28objectClass=\\2a\\29\\29*)"
         "(mail=*Ada\\2a\\29\\28|\\28objectClass=\\2a\\29\\29*)))"
     ]
+    filters.clear()
+    department_result = gateway.search_users(
+        connection_record(),
+        "bind-secret",
+        query=None,
+        department="R&D*)(|(objectClass=*))",
+        limit=101,
+    )
+    assert department_result == ()
+    assert filters == [
+        "(&(&(objectCategory=person)(objectClass=user))"
+        "(department=R&D\\2a\\29\\28|\\28objectClass=\\2a\\29\\29))"
+    ]
+
 
 def test_ad_guid_fields_groups_and_disabled_state_are_normalized() -> None:
     factory = MockDirectoryFactory()
@@ -211,30 +226,41 @@ def test_user_password_is_sent_once_only_to_selected_entry_bind() -> None:
 
 
 def test_start_tls_and_certificate_failures_are_safe_and_fail_closed() -> None:
+    events: list[str] = []
+    servers = []
+
     class StartTlsFailure:
         result = {"result": 0}
         receive_timeout = 2
 
         def open(self):
+            events.append("open")
             return True
 
         def start_tls(self):
+            events.append("start_tls")
             return False
 
         def bind(self):
-            raise AssertionError("bind must not run before StartTLS succeeds")
+            events.append("bind")
+            return True
 
         def unbind(self):
             return True
 
-    gateway = LdapDirectoryGateway(
-        connection_factory=lambda *_args, **_kwargs: StartTlsFailure()
-    )
+    def start_tls_factory(server, **_kwargs):
+        servers.append(server)
+        return StartTlsFailure()
+
+    gateway = LdapDirectoryGateway(connection_factory=start_tls_factory)
     with pytest.raises(DirectoryGatewayError, match="directory_unavailable"):
         gateway.test_connection(
             replace(connection_record(), tls_mode="start_tls", port=389),
             "bind-secret",
         )
+    assert len(servers) == 1
+    assert servers[0].ssl is False
+    assert events == ["open", "start_tls"]
 
     def certificate_failure(*_args, **_kwargs):
         raise ssl.SSLError("certificate diagnostic with CN=private")
@@ -246,3 +272,75 @@ def test_start_tls_and_certificate_failures_are_safe_and_fail_closed() -> None:
         certificate_gateway.test_connection(connection_record(), "bind-secret")
     assert "private" not in repr(error.value)
     assert "bind-secret" not in repr(error.value)
+
+
+def test_plain_ldap_opens_then_binds_without_tls_or_custom_ca() -> None:
+    events: list[str] = []
+    servers = []
+
+    class CaptureClient:
+        result = {"result": 0}
+        response: list[dict] = []
+        receive_timeout = 2
+        closed = False
+
+        def open(self):
+            events.append("open")
+            return True
+
+        def bind(self):
+            events.append("bind")
+            return True
+
+        def start_tls(self):
+            raise AssertionError("plain LDAP must not invoke StartTLS")
+
+        def search(self, **_kwargs):
+            events.append("search")
+            return True
+
+        def unbind(self):
+            events.append("unbind")
+            return True
+
+    def capture_factory(server, **_kwargs):
+        servers.append(server)
+        return CaptureClient()
+
+    def reject_ca_resolution(_connection_id):
+        raise AssertionError("plain LDAP must not resolve custom CA")
+
+    gateway = LdapDirectoryGateway(
+        custom_ca_resolver=reject_ca_resolution,
+        connection_factory=capture_factory,
+    )
+    gateway.test_connection(
+        connection_record(
+            provider_type="ldap",
+            tls_mode="plain",
+            port=389,
+            user_object_filter="(objectClass=person)",
+            login_attribute="uid",
+            stable_id_attribute="entryUUID",
+        ),
+        "bind-secret",
+    )
+
+    assert len(servers) == 1
+    assert servers[0].port == 389
+    assert servers[0].ssl is False
+    assert events == ["open", "bind", "search", "unbind"]
+
+
+def test_plain_active_directory_preserves_object_guid_lookup() -> None:
+    factory = MockDirectoryFactory()
+    gateway = LdapDirectoryGateway(connection_factory=factory)
+    principal = gateway.fetch_user(
+        replace(connection_record(), tls_mode="plain", port=389),
+        "bind-secret",
+        str(_GUID),
+    )
+    assert principal is not None
+    assert principal.external_subject == str(_GUID)
+    assert principal.username == "ada@example.test"
+    assert factory.passwords == ["bind-secret"]

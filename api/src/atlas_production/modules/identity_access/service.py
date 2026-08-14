@@ -129,7 +129,7 @@ class IdentityAccessService:
         actor: UserRecord | None,
         payload: UserInviteCreateRequest,
     ) -> UserInviteCreateResult:
-        normalized_email = payload.email.strip().lower()
+        normalized_email = canonical_identifier(payload.email)
         email_owner = sha256(normalized_email.encode("utf-8")).hexdigest()
         return self._run_identity_mutation(
             self._identity_mutation_context(

@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "26d362b5da7f38c866b19073c6a7b1b2e821da7eb289a9193b0a1b0a046c6d00"
+    "653c4d8ace414c3aff0ad9140fa44ebd5ce7d23d9fd9928c2c4117b69b9e75bc"
 )
 
 
@@ -29,6 +29,17 @@ def test_schema_only_app_matches_fixed_openapi_without_runtime_services() -> Non
     assert vars(app.state) == {"_state": {}}
     assert app.openapi() == json.loads(FIXTURE.read_text())
     assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == EXPECTED_FIXTURE_SHA256
+
+
+def test_directory_transport_schema_exposes_only_supported_literals() -> None:
+    schemas = create_openapi_app().openapi()["components"]["schemas"]
+    assert schemas["DirectoryConnectionCreateRequest"]["properties"]["tls_mode"][
+        "enum"
+    ] == ["ldaps", "start_tls", "plain"]
+    update_transport = schemas["DirectoryConnectionUpdateRequest"]["properties"][
+        "tls_mode"
+    ]
+    assert update_transport["anyOf"][0]["enum"] == ["ldaps", "start_tls", "plain"]
 
 
 def test_agent_query_openapi_declares_only_fail_closed_outcomes() -> None:

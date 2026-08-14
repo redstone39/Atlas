@@ -1,6 +1,7 @@
 from __future__ import annotations
-
+from dataclasses import replace
 from typing import NoReturn
+from uuid import uuid4
 
 from atlas_production.shared.public import (
     AdminActionResult,
@@ -13,16 +14,30 @@ from .api_models import (
     ProjectAdminListResult,
     ProjectAdminSummary,
     ProjectCreateRequest,
+    ProjectDirectoryMemberImportRequest,
     ProjectMemberCandidate,
     ProjectMemberCandidatesResult,
     ProjectUpdateRequest,
 )
 from .records import ProjectRecord
+from atlas_production.modules.identity_access.public import (
+    IdentityAccessError,
+    ScopedDirectoryConnectionListResult,
+    ScopedDirectoryIdentityCapability,
+    ScopedDirectoryImportAuthorizationConflict,
+    ScopedDirectoryImportChangeSet,
+    ScopedDirectoryImportCommitPort,
+    ScopedDirectoryImportCurrentnessConflict,
+    ScopedDirectoryMemberImportResult,
+    ScopedDirectoryUserSearchRequest,
+    ScopedDirectoryUserSearchResult,
+)
 from atlas_production.modules.identity_access.records import (
     PermissionGrantRecord,
     UserRecord,
 )
 from atlas_production.shared.public import (
+    AuditEventRecord,
     utc_now_iso,
 )
 from .contracts import (
@@ -41,8 +56,15 @@ PROJECT_ACCESS_STATUSES = frozenset({"active", "revoked"})
 
 
 class ProjectGovernanceService:
-    def __init__(self, repository: ProjectGovernanceRepository) -> None:
+    def __init__(
+        self,
+        repository: ProjectGovernanceRepository,
+        directory_identity: ScopedDirectoryIdentityCapability,
+        directory_import_commit: ScopedDirectoryImportCommitPort,
+    ) -> None:
         self.repository = repository
+        self.directory_identity = directory_identity
+        self.directory_import_commit = directory_import_commit
 
     def list_projects(
         self,
@@ -162,6 +184,155 @@ class ProjectGovernanceService:
                 not in active_subjects
             ],
         )
+    def list_directory_connections(
+        self,
+        actor: UserRecord | None,
+        project_id: str,
+    ) -> ScopedDirectoryConnectionListResult:
+        self._require_project_manage(actor, project_id)
+        try:
+            return self.directory_identity.list_scoped_connections()
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+
+    def search_directory_users(
+        self,
+        actor: UserRecord | None,
+        project_id: str,
+        connection_id: str,
+        payload: ScopedDirectoryUserSearchRequest,
+    ) -> ScopedDirectoryUserSearchResult:
+        self._require_project_manage(actor, project_id)
+        try:
+            return self.directory_identity.search_scoped_users(
+                connection_id,
+                payload,
+            )
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+
+    def import_directory_members(
+        self,
+        actor: UserRecord | None,
+        project_id: str,
+        connection_id: str,
+        payload: ProjectDirectoryMemberImportRequest,
+    ) -> ScopedDirectoryMemberImportResult:
+        actor = self._require_project_manage(actor, project_id)
+        try:
+            preparation = self.directory_identity.prepare_scoped_import(
+                connection_id,
+                payload.external_subjects,
+            )
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+        now = utc_now_iso()
+        grants: list[PermissionGrantRecord] = []
+        expected_grants: list[
+            tuple[str, PermissionGrantRecord | None]
+        ] = []
+        for user in preparation.users:
+            grant_id = self.project_access_grant_id(
+                project_id,
+                "user",
+                user.actor_id,
+            )
+            existing = self.repository.get_grant(grant_id)
+            expected_grants.append((grant_id, replace(existing) if existing else None))
+            if existing and existing.status == "active" and existing.effect == "deny":
+                raise ProjectGovernanceError(
+                    "project_directory_import_conflict",
+                    "directory.import_conflict",
+                    409,
+                )
+            if existing and existing.status == "active":
+                grant = replace(existing)
+            elif existing:
+                grant = replace(
+                    existing,
+                    role=payload.role,
+                    effect="allow",
+                    status="active",
+                    revoked_at=None,
+                )
+            else:
+                grant = PermissionGrantRecord(
+                    grant_id=grant_id,
+                    project_id=project_id,
+                    subject_type="user",
+                    subject_id=user.actor_id,
+                    role=payload.role,
+                    effect="allow",
+                    status="active",
+                    created_at=now,
+                )
+            grants.append(grant)
+
+        actor_ids = list(preparation.actor_ids)
+        count = len(actor_ids)
+        audits = (
+            self._directory_import_audit(
+                event_type="directory_users_scoped_imported",
+                actor_id=actor.actor_id,
+                target_ref=f"directory-connection:{connection_id}",
+                project_id=project_id,
+                message_code="directory.users_scoped_imported",
+                metadata={
+                    "connection_id": connection_id,
+                    "actor_ids": actor_ids,
+                    "count": count,
+                    "status": "imported",
+                },
+                count=count,
+            ),
+            self._directory_import_audit(
+                event_type="project_directory_members_imported",
+                actor_id=actor.actor_id,
+                target_ref=f"project:{project_id}",
+                project_id=project_id,
+                message_code="project.directory_members_imported",
+                metadata={
+                    "connection_id": connection_id,
+                    "role": payload.role,
+                    "actor_ids": actor_ids,
+                    "count": count,
+                    "status": "imported",
+                },
+                count=count,
+            ),
+        )
+        try:
+            self.directory_import_commit.commit_scoped_directory_import(
+                ScopedDirectoryImportChangeSet(
+                    authorization_actor_id=actor.actor_id,
+                    authorization_scope_type="project",
+                    authorization_scope_id=project_id,
+                    preparation=preparation,
+                    project_grants=tuple(grants),
+                    expected_project_grants=tuple(expected_grants),
+                    audit_events=audits,
+                )
+            )
+        except ScopedDirectoryImportAuthorizationConflict as exc:
+            raise ProjectGovernanceError(
+                "access_denied",
+                "project.management_requires_project_admin_access",
+                403,
+                exc.audit_event_ref,
+            ) from exc
+        except ScopedDirectoryImportCurrentnessConflict as exc:
+            raise ProjectGovernanceError(
+                "project_directory_import_conflict",
+                "directory.concurrent_change",
+                409,
+            ) from exc
+        return ScopedDirectoryMemberImportResult(
+            actor_ids=actor_ids,
+            applied_count=count,
+            message_code="project.directory_members_imported",
+            message_params={"count": count},
+        )
+
 
     def create_access_grant(
         self,
@@ -547,6 +718,41 @@ class ProjectGovernanceService:
             display_name=actor.display_name,
             display_detail=actor.email,
         )
+
+    @staticmethod
+    def _directory_import_audit(
+        *,
+        event_type: str,
+        actor_id: str,
+        target_ref: str,
+        project_id: str,
+        message_code: str,
+        metadata: dict[str, object],
+        count: int,
+    ) -> AuditEventRecord:
+        return AuditEventRecord(
+            event_id=f"audit-{uuid4().hex}",
+            event_type=event_type,
+            actor_id=actor_id,
+            target_ref=target_ref,
+            project_id=project_id,
+            message_code=message_code,
+            message_params={"count": count},
+            metadata=metadata,
+            created_at=utc_now_iso(),
+            scope_type="project",
+            scope_id=project_id,
+        )
+
+    @staticmethod
+    def _raise_directory_error(error: IdentityAccessError) -> NoReturn:
+        raise ProjectGovernanceError(
+            error.error_code,
+            error.message_code,
+            error.status_code,
+            error.audit_event_ref,
+        ) from error
+
 
     @staticmethod
     def _require_project_actor(actor: UserRecord | None) -> UserRecord:

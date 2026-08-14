@@ -19,6 +19,7 @@ from atlas_production.infrastructure.postgres_owner.audit import (
     AuditRepository,
 )
 from atlas_production.infrastructure.postgres_owner.identity import (
+    IdentityAuthorizationConflict,
     IdentityCurrentnessConflict,
     IdentityInvariantViolation,
     IdentityRepository,
@@ -48,13 +49,27 @@ from atlas_production.infrastructure.persistence import schema
 from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow
 from atlas_production.infrastructure.persistence.identity_access import (
     AtlasAccessDecisionRow,
+    AtlasDirectoryConnectionRow,
+    AtlasDirectoryConnectionSecretRow,
     AtlasPermissionGrantRow,
     AtlasTeamMembershipRow,
     AtlasTeamRow,
     AtlasUserInviteRow,
     AtlasUserRow,
+    directory_connection_row,
+    directory_secret_row,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
+from atlas_production.modules.identity_access.directory_ports import (
+    ScopedDirectoryImportChangeSet,
+    ScopedDirectoryImportPreparation,
+)
+from atlas_production.modules.identity_access.directory_records import (
+    DirectoryConnectionRecord,
+    DirectorySecretRecord,
+    ExternalIdentityRecord,
+    directory_record_revision,
+)
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     PermissionGrantRecord,
@@ -121,6 +136,7 @@ class RecordingSession:
         fail_on_audit: bool = False,
         scalar_results: tuple[Any, ...] = (),
         scalars_results: tuple[tuple[Any, ...], ...] = (),
+        get_results: tuple[Any, ...] = (),
     ) -> None:
         self.fail_on_audit = fail_on_audit
         self.executed: list[tuple[str, dict[str, Any] | None]] = []
@@ -130,6 +146,7 @@ class RecordingSession:
         self.rollbacks = 0
         self.scalar_results = list(scalar_results)
         self.scalars_results = list(scalars_results)
+        self.get_results = list(get_results)
         self.scalar_statements: list[str] = []
 
     def __enter__(self):
@@ -154,6 +171,9 @@ class RecordingSession:
         self.scalar_statements.append(str(statement))
         rows = self.scalars_results.pop(0) if self.scalars_results else ()
         return ScalarRows(rows)
+
+    def get(self, _owner, _key):
+        return self.get_results.pop(0) if self.get_results else None
 
     def add(self, row) -> None:
         if self.fail_on_audit and isinstance(row, AtlasAuditEventRow):
@@ -297,6 +317,129 @@ def _grant() -> PermissionGrantRecord:
         status="active",
         created_at="2026-07-17T00:00:00+00:00",
     )
+def _scoped_directory_source(
+) -> tuple[DirectoryConnectionRecord, DirectorySecretRecord]:
+    connection = DirectoryConnectionRecord(
+        connection_id="directory-1",
+        display_name="Directory",
+        priority=1,
+        provider_type="ldap",
+        host="ldap.example.test",
+        port=636,
+        tls_mode="ldaps",
+        connect_timeout_seconds=3,
+        operation_timeout_seconds=5,
+        bind_dn="cn=bind,dc=example,dc=test",
+        user_base_dn="ou=people,dc=example,dc=test",
+        user_object_filter="(objectClass=person)",
+        login_attribute="uid",
+        stable_id_attribute="entryUUID",
+        display_name_attribute="cn",
+        email_attribute="mail",
+        groups_attribute="memberOf",
+        department_attribute="department",
+        title_attribute="title",
+        employee_id_attribute="employeeNumber",
+        enabled=True,
+        created_at="2026-07-17T00:00:00+00:00",
+        updated_at="2026-07-17T00:00:00+00:00",
+    )
+    secret = DirectorySecretRecord(
+        connection_id=connection.connection_id,
+        secret_kind="bind_password",
+        ciphertext="ciphertext",
+        nonce="nonce",
+        key_id="key",
+        version=1,
+        algorithm="AES-256-GCM",
+        storage_backend="database",
+        updated_at=connection.updated_at,
+    )
+    return connection, secret
+
+
+def _scoped_directory_preparation() -> ScopedDirectoryImportPreparation:
+    connection, secret = _scoped_directory_source()
+    user = UserRecord(
+        actor_id="user-directory-target",
+        display_name="Directory Target",
+        email="target@example.test",
+        system_role="user",
+        password_digest=None,
+        created_at=connection.created_at,
+    )
+    identity = ExternalIdentityRecord(
+        actor_id=user.actor_id,
+        connection_id=connection.connection_id,
+        external_subject="subject-target",
+        normalized_username="target",
+        normalized_email="target@example.test",
+        username="target",
+        display_name=user.display_name,
+        email=user.email,
+        groups=(),
+        department=None,
+        title=None,
+        employee_id=None,
+        directory_enabled=True,
+        status="current",
+        last_refreshed_at=connection.updated_at,
+    )
+    return ScopedDirectoryImportPreparation(
+        connection_id=connection.connection_id,
+        source_revision=directory_record_revision(connection),
+        credential_revision=directory_record_revision(secret),
+        users=(user,),
+        new_users=(user,),
+        expected_users=((user.actor_id, None),),
+        new_external_identities=(identity,),
+        expected_external_identities=((user.actor_id, None),),
+        expected_subject_bindings=((identity.external_subject, None),),
+    )
+
+
+def _scoped_team_import_change_set() -> ScopedDirectoryImportChangeSet:
+    preparation = _scoped_directory_preparation()
+    membership = TeamMembershipRecord(
+        membership_id=f"tm-team-1-{preparation.actor_ids[0]}",
+        team_id="team-1",
+        member_actor_type="user",
+        member_actor_id=preparation.actor_ids[0],
+        role="member",
+        status="active",
+        created_at="2026-07-17T00:00:00+00:00",
+    )
+    return ScopedDirectoryImportChangeSet(
+        authorization_actor_id="user-admin",
+        authorization_scope_type="team",
+        authorization_scope_id="team-1",
+        preparation=preparation,
+        team_memberships=(membership,),
+        expected_team_memberships=((membership.membership_id, None),),
+        audit_events=(_event("audit-directory-import"),),
+    )
+
+
+def _scoped_project_import_change_set() -> ScopedDirectoryImportChangeSet:
+    preparation = _scoped_directory_preparation()
+    actor_id = preparation.actor_ids[0]
+    grant = replace(
+        _grant(),
+        grant_id=f"grant-project-1-{actor_id}",
+        subject_id=actor_id,
+        role="viewer",
+    )
+    return ScopedDirectoryImportChangeSet(
+        authorization_actor_id="user-admin",
+        authorization_scope_type="project",
+        authorization_scope_id="project-1",
+        preparation=preparation,
+        project_grants=(grant,),
+        expected_project_grants=((grant.grant_id, None),),
+        audit_events=(_event("audit-project-directory-import"),),
+    )
+
+
 
 
 def _decision() -> AccessDecisionRecord:
@@ -314,6 +457,20 @@ def _decision() -> AccessDecisionRecord:
         source_id="user-admin",
         explanation="System admin grants access.",
         created_at="2026-07-17T00:00:00+00:00",
+    )
+
+
+def _active_admin_row() -> AtlasUserRow:
+    user = _user()
+    return AtlasUserRow(
+        actor_id=user.actor_id,
+        display_name=user.display_name,
+        email=user.email,
+        system_role=user.system_role,
+        password_digest=user.password_digest,
+        active=True,
+        actor_type=user.actor_type,
+        created_at=user.created_at,
     )
 
 
@@ -572,6 +729,127 @@ def test_identity_scope_acceptance_uses_one_session_for_audit_and_team_writer() 
     )
     assert any(isinstance(row, AtlasPermissionGrantRow) for row in project_session.merged)
     assert project_session.commits == 1
+def _scoped_import_session(
+    *,
+    fail_on_audit: bool = False,
+    connection_enabled: bool = True,
+    team_status: str = "active",
+    secret_ciphertext: str = "ciphertext",
+) -> RecordingSession:
+    source_connection, source_secret = _scoped_directory_source()
+    source_secret = replace(source_secret, ciphertext=secret_ciphertext)
+    connection = replace(source_connection, enabled=connection_enabled)
+    return RecordingSession(
+        fail_on_audit=fail_on_audit,
+        get_results=(
+            _active_admin_row(),
+            AtlasTeamRow(
+                team_id="team-1",
+                name="Team",
+                parent_team_id=None,
+                status=team_status,
+                created_at="2026-07-17T00:00:00+00:00",
+                inherit_parent_documents=True,
+            ),
+        ),
+        scalar_results=(
+            directory_connection_row(connection),
+            directory_secret_row(source_secret),
+            None,
+            None,
+            None,
+            None,
+        ),
+        scalars_results=((), ()),
+    )
+
+
+def test_scoped_directory_import_commits_identity_access_and_audit_once() -> None:
+    session = _scoped_import_session()
+    factory = SessionFactory(session)
+
+    IdentityRepository(factory).scoped_directory_import(
+        _scoped_team_import_change_set()
+    )
+
+    assert factory.calls == 1
+    assert session.commits == 1
+    assert session.rollbacks == 0
+    assert any(isinstance(row, AtlasUserRow) for row in session.merged)
+    assert any(isinstance(row, AtlasTeamMembershipRow) for row in session.merged)
+    assert any(isinstance(row, AtlasAuditEventRow) for row in session.added)
+
+
+def test_scoped_project_import_locks_team_hierarchy_before_authority_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_domain_keys: tuple[str, ...] = ()
+
+    def stop_after_locks(
+        _session: RecordingSession,
+        *,
+        domain_keys: tuple[str, ...],
+        identity_keys: tuple[str, ...],
+    ) -> None:
+        del identity_keys
+        nonlocal captured_domain_keys
+        captured_domain_keys = domain_keys
+        raise RuntimeError("stop after locks")
+
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_owner.identity.acquire_owner_locks",
+        stop_after_locks,
+    )
+    with pytest.raises(RuntimeError, match="stop after locks"):
+        IdentityRepository(SessionFactory(RecordingSession())).scoped_directory_import(
+            _scoped_project_import_change_set()
+        )
+
+    assert "team:hierarchy-control" in captured_domain_keys
+    assert "team:membership-control" in captured_domain_keys
+    assert "project:acl-control:project-1" in captured_domain_keys
+
+
+def test_scoped_directory_import_rolls_back_source_or_audit_failure() -> None:
+    disabled_session = _scoped_import_session(connection_enabled=False)
+    with pytest.raises(IdentityCurrentnessConflict, match="connection currentness"):
+        IdentityRepository(
+            SessionFactory(disabled_session)
+        ).scoped_directory_import(_scoped_team_import_change_set())
+    assert disabled_session.commits == 0
+    assert disabled_session.rollbacks == 1
+    assert disabled_session.merged == []
+
+    audit_session = _scoped_import_session(fail_on_audit=True)
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        IdentityRepository(SessionFactory(audit_session)).scoped_directory_import(
+            _scoped_team_import_change_set()
+        )
+    assert audit_session.commits == 0
+    assert audit_session.rollbacks == 1
+
+def test_scoped_directory_import_rechecks_target_and_opaque_credential_revision() -> None:
+    retired_team_session = _scoped_import_session(team_status="retired")
+    with pytest.raises(IdentityAuthorizationConflict, match="Team is no longer active"):
+        IdentityRepository(SessionFactory(retired_team_session)).scoped_directory_import(
+            _scoped_team_import_change_set()
+        )
+    assert retired_team_session.commits == 0
+    assert retired_team_session.merged == []
+
+    rotated_secret_session = _scoped_import_session(secret_ciphertext="rotated")
+    with pytest.raises(
+        IdentityCurrentnessConflict,
+        match="directory credential currentness changed",
+    ):
+        IdentityRepository(SessionFactory(rotated_secret_session)).scoped_directory_import(
+            _scoped_team_import_change_set()
+        )
+    assert rotated_secret_session.commits == 0
+    assert rotated_secret_session.merged == []
+
+
+
 
 
 def test_scope_acceptance_rechecks_pending_invite_inside_the_write_session() -> None:

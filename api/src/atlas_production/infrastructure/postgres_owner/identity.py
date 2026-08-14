@@ -27,21 +27,43 @@ from atlas_production.infrastructure.persistence.identity_access import (
     external_identity_record,
     external_identity_row,
 )
+from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
 from atlas_production.infrastructure.postgres_owner.lock_keys import (
     identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
+)
+from atlas_production.infrastructure.postgres_owner.identity_mappings import (
+    _agent_token_record,
+    _agent_token_row,
+    _grant_record,
+    _invite_record,
+    _invite_row,
+    _membership_record,
+    _user_record,
+    _user_row,
+)
+from atlas_production.infrastructure.postgres_owner.identity_lock_plans import (
+    identity_scope_acceptance_lock_plan,
+    identity_session_lock_plan,
+    scoped_directory_import_lock_plan,
+)
+from atlas_production.infrastructure.postgres_owner.identity_validators import (
+    has_active_direct_human_team_admin,
+    projected_active_admin_ids,
+    projected_users_by_actor,
 )
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.infrastructure.postgres_owner.project import ProjectGrantWriter
 from atlas_production.infrastructure.postgres_owner.team import TeamMembershipWriter
+from atlas_production.modules.identity_access.directory_service import canonical_identifier
 from atlas_production.modules.identity_access.directory_records import (
     DirectoryConnectionRecord,
     DirectorySecretRecord,
     ExternalIdentityRecord,
+    directory_record_revision,
+)
+from atlas_production.modules.identity_access.directory_ports import (
+    ScopedDirectoryImportChangeSet,
 )
 from atlas_production.modules.identity_access.records import (
     AgentTokenRecord,
@@ -66,123 +88,6 @@ _PROJECT_SCOPE_ROLES = {
     "uploader": "contributor",
     "admin": "admin",
 }
-
-
-def _user_row(record: UserRecord) -> AtlasUserRow:
-    return AtlasUserRow(
-        actor_id=record.actor_id,
-        display_name=record.display_name,
-        email=record.email,
-        system_role=record.system_role,
-        password_digest=record.password_digest,
-        active=record.active,
-        actor_type=record.actor_type,
-        created_at=record.created_at,
-    )
-
-
-def _invite_row(record: UserInviteRecord) -> AtlasUserInviteRow:
-    return AtlasUserInviteRow(
-        invite_id=record.invite_id,
-        actor_id=record.actor_id,
-        email=record.email,
-        display_name=record.display_name,
-        system_role=record.system_role,
-        token_digest=record.token_digest,
-        token_fingerprint=record.token_fingerprint,
-        status=record.status,
-        created_at=record.created_at,
-        expires_at=record.expires_at,
-        accepted_at=record.accepted_at,
-        revoked_at=record.revoked_at,
-        scope_type=record.scope_type,
-        scope_id=record.scope_id,
-        scope_role=record.scope_role,
-    )
-
-
-def _agent_token_row(record: AgentTokenRecord) -> AtlasAgentTokenRow:
-    return AtlasAgentTokenRow(
-        token_id=record.token_id,
-        actor_id=record.actor_id,
-        token_digest=record.token_digest,
-        token_fingerprint=record.token_fingerprint,
-        status=record.status,
-        created_at=record.created_at,
-        revoked_at=record.revoked_at,
-    )
-
-
-def _user_record(row: AtlasUserRow) -> UserRecord:
-    return UserRecord(
-        actor_id=row.actor_id,
-        display_name=row.display_name,
-        email=row.email,
-        system_role=row.system_role,
-        password_digest=row.password_digest,
-        active=row.active,
-        actor_type=row.actor_type,
-        created_at=row.created_at,
-    )
-
-
-def _invite_record(row: AtlasUserInviteRow) -> UserInviteRecord:
-    return UserInviteRecord(
-        invite_id=row.invite_id,
-        actor_id=row.actor_id,
-        email=row.email,
-        display_name=row.display_name,
-        system_role=row.system_role,
-        token_digest=row.token_digest,
-        token_fingerprint=row.token_fingerprint,
-        status=row.status,
-        created_at=row.created_at,
-        expires_at=row.expires_at,
-        accepted_at=row.accepted_at,
-        revoked_at=row.revoked_at,
-        scope_type=row.scope_type,
-        scope_id=row.scope_id,
-        scope_role=row.scope_role,
-    )
-
-
-def _agent_token_record(row: AtlasAgentTokenRow) -> AgentTokenRecord:
-    return AgentTokenRecord(
-        token_id=row.token_id,
-        actor_id=row.actor_id,
-        token_digest=row.token_digest,
-        token_fingerprint=row.token_fingerprint,
-        status=row.status,
-        created_at=row.created_at,
-        revoked_at=row.revoked_at,
-    )
-
-
-def _membership_record(row: AtlasTeamMembershipRow) -> TeamMembershipRecord:
-    return TeamMembershipRecord(
-        membership_id=row.membership_id,
-        team_id=row.team_id,
-        member_actor_type=row.member_actor_type,
-        member_actor_id=row.member_actor_id,
-        role=row.role,
-        status=row.status,
-        created_at=row.created_at,
-        removed_at=row.removed_at,
-    )
-
-
-def _grant_record(row: AtlasPermissionGrantRow) -> PermissionGrantRecord:
-    return PermissionGrantRecord(
-        grant_id=row.grant_id,
-        project_id=row.project_id,
-        subject_type=row.subject_type,
-        subject_id=row.subject_id,
-        role=row.role,
-        effect=row.effect,
-        status=row.status,
-        created_at=row.created_at,
-        revoked_at=row.revoked_at,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +267,7 @@ class SeedLocalPilotAdminCommand:
                         created=False,
                     )
 
-                normalized_email = (email or "").strip().lower()
+                normalized_email = canonical_identifier(email or "")
                 if not normalized_email or not password:
                     raise AdminBootstrapConfigurationError(
                         "identity_admin_bootstrap_configuration_required"
@@ -517,76 +422,33 @@ class IdentityRepository:
         session = self.session_factory()
         with session:
             try:
+                lock_plan = identity_session_lock_plan(
+                    protect_admin_count=change_set.protect_admin_count,
+                    users=change_set.users,
+                    authorization_scope_type=change_set.authorization_scope_type,
+                    authorization_scope_id=change_set.authorization_scope_id,
+                    authorization_actor_id=change_set.authorization_actor_id,
+                    identity_lock_keys=change_set.identity_lock_keys,
+                    external_identities=change_set.external_identities,
+                    expected_agent_actor_ids=tuple(
+                        actor_id
+                        for actor_id, _expected in change_set.expected_agent_users
+                    ),
+                    session_tokens=tuple(
+                        token for token, _actor_id in change_set.sessions
+                    ),
+                    deleted_session_tokens=change_set.deleted_session_tokens,
+                    invite_ids=tuple(
+                        transition.record.invite_id
+                        for transition in change_set.invite_transitions
+                    ),
+                    agent_tokens=change_set.agent_tokens,
+                    protected_admin_team_ids=change_set.protected_admin_team_ids,
+                )
                 acquire_owner_locks(
                     session,
-                    domain_keys=(
-                        *(("identity:system-admin-control",) if change_set.protect_admin_count else ()),
-                        *(("team:membership-control",) if change_set.users else ()),
-                        *(("team:hierarchy-control",) if change_set.authorization_scope_type in {"team", "project"} else ()),
-                    ),
-                    identity_keys=(
-                        *change_set.identity_lock_keys,
-                        *(
-                            identity_actor_owner_key(user.actor_id)
-                            for user in change_set.users
-                        ),
-                        *(
-                            identity_actor_owner_key(actor_id)
-                            for actor_id, _expected in change_set.expected_agent_users
-                        ),
-                        *(
-                            (identity_actor_owner_key(change_set.authorization_actor_id),)
-                            if change_set.authorization_actor_id
-                            else ()
-                        ),
-                        *(
-                            (team_owner_key(change_set.authorization_scope_id),)
-                            if change_set.authorization_scope_type == "team"
-                            and change_set.authorization_scope_id
-                            else ()
-                        ),
-                        *(
-                            (project_owner_key(change_set.authorization_scope_id),)
-                            if change_set.authorization_scope_type == "project"
-                            and change_set.authorization_scope_id
-                            else ()
-                        ),
-                        *(
-                            (
-                                team_subject_owner_key(
-                                    "user",
-                                    change_set.authorization_actor_id,
-                                ),
-                                project_acl_subject_owner_key(
-                                    "user",
-                                    change_set.authorization_actor_id,
-                                ),
-                            )
-                            if change_set.authorization_actor_id
-                            and change_set.authorization_scope_type == "project"
-                            else ()
-                        ),
-                        *(
-                            f"identity:session:{token}"
-                            for token, _actor_id in change_set.sessions
-                        ),
-                        *(
-                            f"identity:session:{token}"
-                            for token in change_set.deleted_session_tokens
-                        ),
-                        *(
-                            f"identity:invite:{transition.record.invite_id}"
-                            for transition in change_set.invite_transitions
-                        ),
-                        *(
-                            f"identity:agent-token:{token.token_id}"
-                            for token in change_set.agent_tokens
-                        ),
-                        *(
-                            f"team:admin-control:{team_id}"
-                            for team_id in change_set.protected_admin_team_ids
-                        ),
-                    ),
+                    domain_keys=lock_plan.domain_keys,
+                    identity_keys=lock_plan.identity_keys,
                 )
                 self._lock_invite_transitions(
                     session,
@@ -608,6 +470,15 @@ class IdentityRepository:
                         session,
                         change_set.external_identities,
                     )
+                    self._validate_directory_subject_conflicts(
+                        session,
+                        change_set.external_identities,
+                    )
+                self._validate_local_email_conflicts(
+                    session,
+                    change_set.users,
+                    change_set.external_identities,
+                )
                 if change_set.protect_admin_count:
                     self._validate_active_admin_invariant(session, change_set.users)
                 (
@@ -638,45 +509,16 @@ class IdentityRepository:
         session = self.session_factory()
         with session:
             try:
+                lock_plan = identity_scope_acceptance_lock_plan(
+                    user=change_set.user,
+                    invite_id=change_set.invite.invite_id,
+                    team_membership=change_set.team_membership,
+                    project_grant=change_set.project_grant,
+                )
                 acquire_owner_locks(
                     session,
-                    domain_keys=(
-                        *(("team:membership-control",) if change_set.team_membership else ()),
-                        *(
-                            (f"project:acl-control:{change_set.project_grant.project_id}",)
-                            if change_set.project_grant
-                            else ()
-                        ),
-                    ),
-                    identity_keys=(
-                        identity_actor_owner_key(change_set.user.actor_id),
-                        f"identity:invite:{change_set.invite.invite_id}",
-                        *(
-                            (
-                                "team:membership:"
-                                f"{change_set.team_membership.membership_id}",
-                                team_owner_key(change_set.team_membership.team_id),
-                                team_subject_owner_key(
-                                    change_set.team_membership.member_actor_type,
-                                    change_set.team_membership.member_actor_id,
-                                ),
-                            )
-                            if change_set.team_membership is not None
-                            else ()
-                        ),
-                        *(
-                            (
-                                f"project:grant:{change_set.project_grant.grant_id}",
-                                project_owner_key(change_set.project_grant.project_id),
-                                project_acl_subject_owner_key(
-                                    change_set.project_grant.subject_type,
-                                    change_set.project_grant.subject_id,
-                                ),
-                            )
-                            if change_set.project_grant is not None
-                            else ()
-                        ),
-                    ),
+                    domain_keys=lock_plan.domain_keys,
+                    identity_keys=lock_plan.identity_keys,
                 )
                 self._lock_scope_acceptance_currentness(session, change_set)
                 session.merge(_user_row(change_set.user))
@@ -685,6 +527,46 @@ class IdentityRepository:
                     TeamMembershipWriter(session).merge(change_set.team_membership)
                 if change_set.project_grant is not None:
                     ProjectGrantWriter(session).merge(change_set.project_grant)
+                AuditEventWriter(session).append_many(change_set.audit_events)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+    def scoped_directory_import(
+        self,
+        change_set: ScopedDirectoryImportChangeSet,
+    ) -> None:
+        preparation = change_set.preparation
+        session = self.session_factory()
+        with session:
+            try:
+                lock_plan = scoped_directory_import_lock_plan(change_set)
+                acquire_owner_locks(
+                    session,
+                    domain_keys=lock_plan.domain_keys,
+                    identity_keys=lock_plan.identity_keys,
+                )
+                self._validate_authorization(
+                    session,
+                    IdentitySessionChangeSet(
+                        authorization_actor_id=change_set.authorization_actor_id,
+                        authorization_scope_type=change_set.authorization_scope_type,
+                        authorization_scope_id=change_set.authorization_scope_id,
+                    ),
+                )
+                self._lock_scoped_directory_currentness(session, change_set)
+                for user in preparation.new_users:
+                    session.merge(_user_row(user))
+                if preparation.new_users:
+                    session.flush()
+                for identity in preparation.new_external_identities:
+                    session.merge(external_identity_row(identity))
+                team_writer = TeamMembershipWriter(session)
+                for membership in change_set.team_memberships:
+                    team_writer.merge(membership)
+                project_writer = ProjectGrantWriter(session)
+                for grant in change_set.project_grants:
+                    project_writer.merge(grant)
                 AuditEventWriter(session).append_many(change_set.audit_events)
                 session.commit()
             except Exception:
@@ -729,14 +611,22 @@ class IdentityRepository:
         actor = session.get(AtlasUserRow, actor_id)
         if actor is None or not actor.active or actor.actor_type != "user":
             raise IdentityAuthorizationConflict("identity actor is no longer active")
+        scope_type = change_set.authorization_scope_type
+        scope_id = change_set.authorization_scope_id
+        team = None
+        if scope_type == "team" and scope_id:
+            team = session.get(AtlasTeamRow, scope_id)
+            if team is None or team.status != "active":
+                raise IdentityAuthorizationConflict("Team is no longer active")
+        elif scope_type == "project" and scope_id:
+            project = session.get(AtlasProjectRow, scope_id)
+            if project is None:
+                raise IdentityAuthorizationConflict("Project no longer exists")
         if actor.system_role == "admin":
             return
         if change_set.authorization_requires_system_admin:
             raise IdentityAuthorizationConflict("System Admin authority changed")
-        scope_type = change_set.authorization_scope_type
-        scope_id = change_set.authorization_scope_id
         if scope_type == "team" and scope_id:
-            team = session.get(AtlasTeamRow, scope_id)
             membership = session.scalar(
                 select(AtlasTeamMembershipRow).where(
                     AtlasTeamMembershipRow.team_id == scope_id,
@@ -746,7 +636,7 @@ class IdentityRepository:
                     AtlasTeamMembershipRow.role == "admin",
                 ).limit(1)
             )
-            if team is not None and team.status == "active" and membership is not None:
+            if team is not None and membership is not None:
                 return
         elif scope_type == "project" and scope_id:
             from atlas_production.infrastructure.postgres_owner.project import (
@@ -799,6 +689,29 @@ class IdentityRepository:
             ):
                 raise IdentityCurrentnessConflict(
                     "agent token target currentness changed"
+                )
+
+    @staticmethod
+    def _validate_directory_subject_conflicts(
+        session: Session,
+        identities: tuple[ExternalIdentityRecord, ...],
+    ) -> None:
+        changed_actor_ids = {identity.actor_id for identity in identities}
+        for identity in identities:
+            conflict = session.scalar(
+                select(AtlasExternalIdentityRow.actor_id)
+                .where(
+                    AtlasExternalIdentityRow.connection_id
+                    == identity.connection_id,
+                    AtlasExternalIdentityRow.external_subject
+                    == identity.external_subject,
+                    AtlasExternalIdentityRow.actor_id.not_in(changed_actor_ids),
+                )
+                .limit(1)
+            )
+            if conflict is not None:
+                raise IdentityCurrentnessConflict(
+                    "directory subject binding is ambiguous"
                 )
 
     @staticmethod
@@ -868,17 +781,18 @@ class IdentityRepository:
                 )
                 if conflict is not None:
                     raise IdentityCurrentnessConflict("directory alias is ambiguous")
-            if identity.normalized_email is None:
-                continue
             local_rows = session.scalars(
                 select(AtlasUserRow)
                 .where(
-                    func.lower(AtlasUserRow.email) == identity.normalized_email,
+                    AtlasUserRow.email.is_not(None),
                     AtlasUserRow.actor_id.not_in(changed_actor_ids),
                 )
                 .with_for_update()
             ).all()
             for local_row in local_rows:
+                local_email = canonical_identifier(local_row.email or "")
+                if local_email not in aliases:
+                    continue
                 binding = session.scalar(
                     select(AtlasExternalIdentityRow.actor_id).where(
                         AtlasExternalIdentityRow.actor_id == local_row.actor_id
@@ -1029,6 +943,104 @@ class IdentityRepository:
                     "invite Project grant currentness changed"
                 )
 
+    @classmethod
+    def _lock_scoped_directory_currentness(
+        cls,
+        session: Session,
+        change_set: ScopedDirectoryImportChangeSet,
+    ) -> None:
+        preparation = change_set.preparation
+        connection = session.scalar(
+            select(AtlasDirectoryConnectionRow)
+            .where(
+                AtlasDirectoryConnectionRow.connection_id
+                == preparation.connection_id
+            )
+            .with_for_update()
+        )
+        if (
+            connection is None
+            or not connection.enabled
+            or directory_record_revision(directory_connection_record(connection))
+            != preparation.source_revision
+        ):
+            raise IdentityCurrentnessConflict(
+                "directory connection currentness changed"
+            )
+        secret = session.scalar(
+            select(AtlasDirectoryConnectionSecretRow)
+            .where(
+                AtlasDirectoryConnectionSecretRow.connection_id
+                == preparation.connection_id,
+                AtlasDirectoryConnectionSecretRow.secret_kind == "bind_password",
+            )
+            .with_for_update()
+        )
+        if (
+            secret is None
+            or directory_record_revision(directory_secret_record(secret))
+            != preparation.credential_revision
+        ):
+            raise IdentityCurrentnessConflict(
+                "directory credential currentness changed"
+            )
+        cls._lock_user_currentness(session, preparation.expected_users)
+        cls._lock_directory_currentness(
+            session,
+            IdentitySessionChangeSet(
+                expected_external_identities=(
+                    preparation.expected_external_identities
+                ),
+            ),
+        )
+        for external_subject, expected in preparation.expected_subject_bindings:
+            rows = session.scalars(
+                select(AtlasExternalIdentityRow)
+                .where(
+                    AtlasExternalIdentityRow.connection_id
+                    == preparation.connection_id,
+                    AtlasExternalIdentityRow.external_subject == external_subject,
+                )
+                .order_by(AtlasExternalIdentityRow.actor_id)
+                .with_for_update()
+                .limit(2)
+            ).all()
+            if len(rows) > 1:
+                raise IdentityCurrentnessConflict(
+                    "directory subject binding is ambiguous"
+                )
+            current = external_identity_record(rows[0]) if rows else None
+            if current != expected:
+                raise IdentityCurrentnessConflict(
+                    "directory subject binding currentness changed"
+                )
+        cls._validate_directory_alias_conflicts(
+            session,
+            preparation.new_external_identities,
+        )
+        for membership_id, expected in change_set.expected_team_memberships:
+            row = session.scalar(
+                select(AtlasTeamMembershipRow)
+                .where(AtlasTeamMembershipRow.membership_id == membership_id)
+                .with_for_update()
+            )
+            current = _membership_record(row) if row is not None else None
+            if current != expected:
+                raise IdentityCurrentnessConflict(
+                    "directory Team membership currentness changed"
+                )
+        for grant_id, expected in change_set.expected_project_grants:
+            row = session.scalar(
+                select(AtlasPermissionGrantRow)
+                .where(AtlasPermissionGrantRow.grant_id == grant_id)
+                .with_for_update()
+            )
+            current = _grant_record(row) if row is not None else None
+            if current != expected:
+                raise IdentityCurrentnessConflict(
+                    "directory Project grant currentness changed"
+                )
+
     @staticmethod
     def _validate_active_admin_invariant(
         session: Session,
@@ -1044,14 +1056,50 @@ class IdentityRepository:
             .order_by(AtlasUserRow.actor_id)
             .with_for_update()
         ).all()
-        active_admin_ids = {row.actor_id for row in current_admin_rows}
-        for user in changed_users:
-            if user.actor_type == "user" and user.active and user.system_role == "admin":
-                active_admin_ids.add(user.actor_id)
-            else:
-                active_admin_ids.discard(user.actor_id)
+        active_admin_ids = projected_active_admin_ids(
+            {row.actor_id for row in current_admin_rows},
+            changed_users,
+        )
         if not active_admin_ids:
             raise IdentityInvariantViolation("at least one active System Admin is required")
+
+    @staticmethod
+    def _validate_local_email_conflicts(
+        session: Session,
+        users: tuple[UserRecord, ...],
+        identities: tuple[ExternalIdentityRecord, ...],
+    ) -> None:
+        changed_directory_actor_ids = {
+            identity.actor_id for identity in identities
+        }
+        for user in users:
+            if user.email is None or user.actor_id in changed_directory_actor_ids:
+                continue
+            existing_binding = session.scalar(
+                select(AtlasExternalIdentityRow.actor_id)
+                .where(AtlasExternalIdentityRow.actor_id == user.actor_id)
+                .limit(1)
+            )
+            if existing_binding is not None:
+                continue
+            conflict = session.scalar(
+                select(AtlasExternalIdentityRow.actor_id)
+                .where(
+                    or_(
+                        AtlasExternalIdentityRow.normalized_username
+                        == canonical_identifier(user.email),
+                        AtlasExternalIdentityRow.normalized_email
+                        == canonical_identifier(user.email),
+                    ),
+                    AtlasExternalIdentityRow.actor_id != user.actor_id,
+                )
+                .limit(1)
+            )
+            if conflict is not None:
+                raise IdentityCurrentnessConflict(
+                    "local email conflicts with a directory alias"
+                )
+
 
     @staticmethod
     def _validate_active_team_admin_invariant(
@@ -1074,24 +1122,22 @@ class IdentityRepository:
             .order_by(AtlasUserRow.actor_id)
             .with_for_update()
         ).all()
-        projected_users = {
-            row.actor_id: _user_record(row) for row in current_user_rows
-        }
-        projected_users.update({user.actor_id: user for user in changed_users})
+        projected_users = projected_users_by_actor(
+            tuple(_user_record(row) for row in current_user_rows),
+            changed_users,
+        )
+        membership_records = tuple(
+            _membership_record(row) for row in membership_rows
+        )
         for team_id in sorted(set(team_ids)):
-            if not any(
-                row.team_id == team_id
-                and row.member_actor_type == "user"
-                and row.status == "active"
-                and row.role == "admin"
-                and (user := projected_users.get(row.member_actor_id)) is not None
-                and user.active
-                for row in membership_rows
+            if not has_active_direct_human_team_admin(
+                team_id=team_id,
+                memberships=membership_records,
+                users_by_actor=projected_users,
             ):
                 raise IdentityInvariantViolation(
                     "at least one active direct human Team Admin is required"
                 )
-
     @staticmethod
     def _write_identity_rows(
         session: Session,
@@ -1137,14 +1183,16 @@ class IdentityRepository:
             return _user_record(row) if row is not None else None
 
     def user_by_email(self, email: str) -> UserRecord | None:
-        normalized = email.strip().lower()
+        normalized = canonical_identifier(email)
         with self.session_factory() as session:
-            rows = session.scalars(
-                select(AtlasUserRow)
-                .where(AtlasUserRow.email == normalized)
-                .order_by(AtlasUserRow.actor_id)
-                .limit(2)
-            ).all()
+            rows = [
+                row
+                for row in session.scalars(
+                    select(AtlasUserRow).order_by(AtlasUserRow.actor_id)
+                ).all()
+                if row.email is not None
+                and canonical_identifier(row.email) == normalized
+            ]
             return _user_record(rows[0]) if len(rows) == 1 else None
 
     def list_users(
@@ -1244,21 +1292,20 @@ class IdentityRepository:
             return _invite_record(row) if row is not None else None
 
     def pending_invite_for_email(self, email: str) -> UserInviteRecord | None:
-        normalized = email.strip().lower()
+        normalized = canonical_identifier(email)
         with self.session_factory() as session:
-            row = session.scalar(
+            rows = session.scalars(
                 select(AtlasUserInviteRow)
-                .where(
-                    AtlasUserInviteRow.email == normalized,
-                    AtlasUserInviteRow.status == "pending",
-                )
+                .where(AtlasUserInviteRow.status == "pending")
                 .order_by(
                     AtlasUserInviteRow.created_at,
                     AtlasUserInviteRow.invite_id,
                 )
-                .limit(1)
-            )
-            return _invite_record(row) if row is not None else None
+            ).all()
+            for row in rows:
+                if canonical_identifier(row.email) == normalized:
+                    return _invite_record(row)
+            return None
 
     def list_invites(
         self,
@@ -1348,6 +1395,7 @@ class IdentityRepository:
                     .order_by(AtlasTeamMembershipRow.team_id)
                 ).all()
             )
+
 
 
 __all__ = [

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request
+from typing import Literal
 from fastapi.responses import JSONResponse
 
 from atlas_production.modules.model_routing.public import (
@@ -162,17 +163,18 @@ def update_model_route(
 
 
 @router.post(
-    "/api/v1/admin/config/model-routes/{route_id}/default",
+    "/api/v1/admin/config/model-routes/{route_id}/defaults/{purpose}",
     response_model=ModelRouteStatus,
 )
 def set_default_model_route(
     route_id: str,
+    purpose: Literal["text", "vision"],
     payload: ModelRouteDefaultRequest,
     request: Request,
 ):
     try:
         outcome = _model_routing_service(request).set_default(
-            current_user(request), route_id, payload
+            current_user(request), route_id, purpose, payload
         )
     except ModelRoutingError as exc:
         return _model_routing_error(exc)

@@ -640,7 +640,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.String(), nullable=False),
     sa.Column('updated_at', sa.String(), nullable=False),
     sa.CheckConstraint("provider_type IN ('active_directory', 'ldap')", name='ck_atlas_directory_connection_provider_type'),
-    sa.CheckConstraint("tls_mode IN ('ldaps', 'start_tls')", name='ck_atlas_directory_connection_tls_mode'),
+    sa.CheckConstraint("tls_mode IN ('ldaps', 'start_tls', 'plain')", name='ck_atlas_directory_connection_tls_mode'),
     sa.CheckConstraint('priority >= 0', name='ck_atlas_directory_connection_priority'),
     sa.CheckConstraint('port >= 1 AND port <= 65535', name='ck_atlas_directory_connection_port'),
     sa.CheckConstraint('connect_timeout_seconds >= 1 AND connect_timeout_seconds <= 30', name='ck_atlas_directory_connection_connect_timeout'),
@@ -816,14 +816,16 @@ def upgrade() -> None:
     sa.Column('runtime_policy', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('supports_vision', sa.Boolean(), nullable=False),
     sa.Column('last_tested_at', sa.String(), nullable=True),
-    sa.Column('is_default', sa.Boolean(), nullable=False),
+    sa.Column('is_text_default', sa.Boolean(), nullable=False),
+    sa.Column('is_vision_default', sa.Boolean(), nullable=False),
     sa.Column('readiness_schema_name', sa.String(), nullable=True),
     sa.Column('readiness_schema_digest', sa.String(), nullable=True),
     sa.ForeignKeyConstraint(['connection_id'], ['atlas_provider_connections.connection_id'], ),
     sa.PrimaryKeyConstraint('route_id')
     )
     op.create_index(op.f('ix_atlas_model_routes_connection_id'), 'atlas_model_routes', ['connection_id'], unique=False)
-    op.create_index('ux_atlas_model_routes_single_default', 'atlas_model_routes', ['is_default'], unique=True, postgresql_where=sa.text('is_default = true'))
+    op.create_index('ux_atlas_model_routes_single_text_default', 'atlas_model_routes', ['is_text_default'], unique=True, postgresql_where=sa.text('is_text_default = true'))
+    op.create_index('ux_atlas_model_routes_single_vision_default', 'atlas_model_routes', ['is_vision_default'], unique=True, postgresql_where=sa.text('is_vision_default = true'))
     op.create_table('atlas_provider_connection_secrets',
     sa.Column('connection_id', sa.String(), nullable=False),
     sa.Column('storage_backend', sa.String(), nullable=False),
@@ -1581,7 +1583,8 @@ def downgrade() -> None:
     op.drop_index('ix_atlas_storage_request_lease_drain', table_name='atlas_storage_request_leases')
     op.drop_table('atlas_storage_request_leases')
     op.drop_table('atlas_provider_connection_secrets')
-    op.drop_index('ux_atlas_model_routes_single_default', table_name='atlas_model_routes', postgresql_where=sa.text('is_default = true'))
+    op.drop_index('ux_atlas_model_routes_single_vision_default', table_name='atlas_model_routes', postgresql_where=sa.text('is_vision_default = true'))
+    op.drop_index('ux_atlas_model_routes_single_text_default', table_name='atlas_model_routes', postgresql_where=sa.text('is_text_default = true'))
     op.drop_index(op.f('ix_atlas_model_routes_connection_id'), table_name='atlas_model_routes')
     op.drop_table('atlas_model_routes')
     op.drop_index('ix_atlas_write_attempt_reconcile', table_name='atlas_artifact_write_attempts')

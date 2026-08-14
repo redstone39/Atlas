@@ -46,6 +46,33 @@ class AtlasTurnExecutionRow(OrmBase):
     max_output_tokens_per_invocation: Mapped[int] = mapped_column(Integer, nullable=False)
     max_tool_result_tokens_per_execution: Mapped[int] = mapped_column(Integer, nullable=False)
     max_total_tokens_per_conversation: Mapped[int] = mapped_column(Integer, nullable=False)
+    vision_route_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    vision_route_revision: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_runtime_policy_revision: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_tokenizer_profile: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    vision_context_window_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_max_input_tokens_per_invocation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_max_output_tokens_per_invocation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_max_tool_result_tokens_per_execution: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    vision_max_total_tokens_per_conversation: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     max_tool_invocations: Mapped[int] = mapped_column(Integer, nullable=False)
     max_catalog_pages: Mapped[int] = mapped_column(Integer, nullable=False)
     max_search_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -110,6 +137,33 @@ class AtlasTurnExecutionRow(OrmBase):
             "max_total_tokens_per_conversation >= 1 AND "
             "max_input_tokens_per_invocation + max_output_tokens_per_invocation <= context_window_tokens",
             name="ck_atlas_turn_execution_model_token_policy",
+        ),
+        CheckConstraint(
+            "("
+            "vision_route_id IS NULL AND "
+            "vision_route_revision IS NULL AND "
+            "vision_runtime_policy_revision IS NULL AND "
+            "vision_tokenizer_profile IS NULL AND "
+            "vision_context_window_tokens IS NULL AND "
+            "vision_max_input_tokens_per_invocation IS NULL AND "
+            "vision_max_output_tokens_per_invocation IS NULL AND "
+            "vision_max_tool_result_tokens_per_execution IS NULL AND "
+            "vision_max_total_tokens_per_conversation IS NULL"
+            ") OR ("
+            "vision_route_id IS NOT NULL AND "
+            "vision_route_revision >= 1 AND "
+            "vision_runtime_policy_revision >= 1 AND "
+            "vision_tokenizer_profile IS NOT NULL AND "
+            "vision_context_window_tokens >= 1 AND "
+            "vision_max_input_tokens_per_invocation >= 1 AND "
+            "vision_max_output_tokens_per_invocation >= 1 AND "
+            "vision_max_tool_result_tokens_per_execution >= 1 AND "
+            "vision_max_total_tokens_per_conversation >= 1 AND "
+            "vision_max_input_tokens_per_invocation + "
+            "vision_max_output_tokens_per_invocation <= "
+            "vision_context_window_tokens"
+            ")",
+            name="ck_atlas_turn_execution_vision_route_snapshot",
         ),
         CheckConstraint(
             "max_tool_invocations >= 0 AND max_catalog_pages >= 0 AND "

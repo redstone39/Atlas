@@ -253,28 +253,44 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
             raise ClaimAssessmentUnavailable(
                 "claim assessment deadline elapsed", reason_code="deadline_elapsed"
             )
+        selected_route = route
+        if declared_evidence_subset.visual_images:
+            if route.vision_route is None:
+                raise ClaimAssessmentUnavailable(
+                    "vision claim assessment route is unavailable",
+                    reason_code="route_unavailable",
+                )
+            selected_route = route.vision_route
         try:
-            attempt = self._routing.open_tested_attempt(route.route_id)
+            attempt = self._routing.open_tested_attempt(selected_route.route_id)
         except ProviderError as error:
             raise ClaimAssessmentUnavailable(
                 "claim assessment route is unavailable",
                 reason_code="route_unavailable",
             ) from error
+        if (
+            selected_route is not route
+            and not getattr(attempt.route, "supports_vision", False)
+        ):
+            raise ClaimAssessmentUnavailable(
+                "vision claim assessment route is unavailable",
+                reason_code="route_unavailable",
+            )
         policy = attempt.route.runtime_policy
         if (
-            attempt.route.route_id != route.route_id
-            or attempt.route.revision != route.route_revision
-            or policy.revision != route.runtime_policy_revision
-            or policy.tokenizer_profile != route.tokenizer_profile
-            or policy.context_window_tokens != route.context_window_tokens
+            attempt.route.route_id != selected_route.route_id
+            or attempt.route.revision != selected_route.route_revision
+            or policy.revision != selected_route.runtime_policy_revision
+            or policy.tokenizer_profile != selected_route.tokenizer_profile
+            or policy.context_window_tokens != selected_route.context_window_tokens
             or policy.max_input_tokens_per_invocation
-            != route.max_input_tokens_per_invocation
+            != selected_route.max_input_tokens_per_invocation
             or policy.max_output_tokens_per_invocation
-            != route.max_output_tokens_per_invocation
+            != selected_route.max_output_tokens_per_invocation
             or policy.max_tool_result_tokens_per_execution
-            != route.max_tool_result_tokens_per_execution
+            != selected_route.max_tool_result_tokens_per_execution
             or policy.max_total_tokens_per_conversation
-            != route.max_total_tokens_per_conversation
+            != selected_route.max_total_tokens_per_conversation
         ):
             raise ProviderProtocolError(
                 safe_code="model_route_revision_conflict"

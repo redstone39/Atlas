@@ -67,7 +67,10 @@ from atlas_production.modules.identity_access.agent_contracts import (
 )
 from atlas_production.modules.identity_access.agent_ports import AgentAccessRepository
 from atlas_production.modules.identity_access.contracts import IdentityAuditCommand
-from atlas_production.modules.identity_access.directory_ports import DirectoryRepository
+from atlas_production.modules.identity_access.directory_ports import (
+    DirectoryRepository,
+    ScopedDirectoryImportCommitPort,
+)
 from atlas_production.modules.identity_access.ports import (
     IdentityAccessRepository,
     InviteScopeGrantPort,
@@ -230,7 +233,11 @@ def test_route_facing_adapters_cover_every_public_port_signature(
     implementation: type[object],
 ) -> None:
     contract_owners = (
-        (DirectoryRepository, IdentityAccessRepository)
+        (
+            DirectoryRepository,
+            IdentityAccessRepository,
+            ScopedDirectoryImportCommitPort,
+        )
         if contract is DirectoryRepository
         else (contract,)
     )
@@ -251,8 +258,11 @@ def test_route_facing_adapters_cover_every_public_port_signature(
     assert implementation_methods == contract_methods
     for name in sorted(contract_methods):
         assert callable(getattr(implementation, name, None)), name
+        contract_owner = next(
+            owner for owner in contract_owners if name in owner.__dict__
+        )
         assert _parameter_shape(implementation, name) == _parameter_shape(
-            contract,
+            contract_owner,
             name,
         )
 

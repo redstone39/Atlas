@@ -4,6 +4,12 @@ from fastapi.responses import JSONResponse
 from atlas_production.shared.public import (
     AdminActionResult,
 )
+from atlas_production.modules.identity_access.public import (
+    ScopedDirectoryConnectionListResult,
+    ScopedDirectoryMemberImportResult,
+    ScopedDirectoryUserSearchRequest,
+    ScopedDirectoryUserSearchResult,
+)
 from atlas_production.modules.project_governance.public import (
     ProjectAccessGrant,
     ProjectAccessGrantCreateRequest,
@@ -11,6 +17,7 @@ from atlas_production.modules.project_governance.public import (
     ProjectAccessGrantUpdateRequest,
     ProjectAdminListResult,
     ProjectCreateRequest,
+    ProjectDirectoryMemberImportRequest,
     ProjectMemberCandidatesResult,
     ProjectUpdateRequest,
 )
@@ -123,6 +130,67 @@ def list_project_member_candidates(
         )
     except ProjectGovernanceError as exc:
         return _project_error(exc)
+@router.get(
+    "/api/v1/admin/projects/{project_id}/directory-connections",
+    response_model=ScopedDirectoryConnectionListResult,
+)
+def list_project_directory_connections(
+    project_id: str,
+    request: Request,
+) -> ScopedDirectoryConnectionListResult | JSONResponse:
+    try:
+        return _project_service(request).list_directory_connections(
+            current_user(request),
+            project_id,
+        )
+    except ProjectGovernanceError as exc:
+        return _project_error(exc)
+
+
+@router.post(
+    "/api/v1/admin/projects/{project_id}/directory-connections/"
+    "{connection_id}/users/search",
+    response_model=ScopedDirectoryUserSearchResult,
+)
+def search_project_directory_users(
+    project_id: str,
+    connection_id: str,
+    payload: ScopedDirectoryUserSearchRequest,
+    request: Request,
+) -> ScopedDirectoryUserSearchResult | JSONResponse:
+    try:
+        return _project_service(request).search_directory_users(
+            current_user(request),
+            project_id,
+            connection_id,
+            payload,
+        )
+    except ProjectGovernanceError as exc:
+        return _project_error(exc)
+
+
+@router.post(
+    "/api/v1/admin/projects/{project_id}/directory-connections/"
+    "{connection_id}/users/import",
+    response_model=ScopedDirectoryMemberImportResult,
+)
+def import_project_directory_members(
+    project_id: str,
+    connection_id: str,
+    payload: ProjectDirectoryMemberImportRequest,
+    request: Request,
+) -> ScopedDirectoryMemberImportResult | JSONResponse:
+    try:
+        return _project_service(request).import_directory_members(
+            current_user(request),
+            project_id,
+            connection_id,
+            payload,
+        )
+    except ProjectGovernanceError as exc:
+        return _project_error(exc, payload.idempotency_key)
+
+
 
 
 @router.post(

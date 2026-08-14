@@ -18,6 +18,8 @@ from atlas_production.infrastructure.postgres_owner.model_routing import (
     DefaultRouteConnectionPrecondition,
     FinalizeDefaultRouteCommand,
     FinalizeDefaultRouteInput,
+    FinalizeRouteConfigurationCommand,
+    FinalizeRouteConfigurationInput,
     FinalizeInvocationLifecycleCommand,
     FinalizeInvocationLifecycleInput,
     FinalizeProviderConfigurationCommand,
@@ -54,6 +56,7 @@ from atlas_production.infrastructure.postgres_owner.processing_registry import (
 from atlas_production.infrastructure.postgres_processing_adapter import (
     PostgresProcessingAdapter,
 )
+from atlas_production.modules.model_routing.contracts import ModelRoutingError
 from atlas_production.modules.model_routing.records import (
     ModelInvocationRecord,
     ModelRouteRecord,
@@ -382,7 +385,9 @@ def _invocation_audit() -> AuditEventRecord:
     )
 
 
-def _model_route(route_id: str, *, revision: int, is_default: bool) -> ModelRouteRecord:
+def _model_route(
+    route_id: str, *, revision: int, is_text_default: bool
+) -> ModelRouteRecord:
     return ModelRouteRecord(
         route_id=route_id, display_name=route_id,
         provider_type="openai_compatible", model_name=f"model-{route_id}",
@@ -391,24 +396,27 @@ def _model_route(route_id: str, *, revision: int, is_default: bool) -> ModelRout
             **model_route_runtime_policy(), revision=1
         ),
         status="test_passed", enabled=True, revision=revision,
-        last_tested_at="2026-07-18T00:00:00+00:00", is_default=is_default,
+        last_tested_at="2026-07-18T00:00:00+00:00",
+        is_text_default=is_text_default,
     )
 
 
 def _default_replay() -> ModelRoutingReplayRecord:
-    route = _model_route("B", revision=8, is_default=True)
+    route = _model_route("B", revision=7, is_text_default=True)
     return ModelRoutingReplayRecord(
-        idempotency_key="default-key", operation="model_route_default",
+        idempotency_key="default-key", operation="model_route_default_text",
         target_ref="model-route:B", request_fingerprint="f" * 64,
         response_model="ModelRouteStatus", response_payload={
-            "message_code": "model.default_model_route_is_updated",
+            "message_code": "model.default_text_model_route_is_updated",
             "message_params": {}, "route_id": route.route_id,
             "display_name": route.display_name, "provider_type": route.provider_type,
             "model_name": route.model_name, "connection_id": route.connection_id,
             "status": route.status, "enabled": route.enabled,
             "supports_vision": route.supports_vision, "revision": route.revision,
             "runtime_policy": asdict(route.runtime_policy),
-            "audit_event_ref": "audit-invocation", "is_default": True,
+            "audit_event_ref": "audit-invocation",
+            "is_text_default": True,
+            "is_vision_default": False,
         },
         status_code=200, created_at="2026-07-18T00:00:00+00:00",
     )
@@ -451,12 +459,24 @@ def _provider_disable_records():
 
 
 def _default_b_request() -> FinalizeDefaultRouteInput:
-    prior_a = _model_route("A", revision=3, is_default=True)
-    prior_b = _model_route("B", revision=7, is_default=False)
+    prior_a = _model_route("A", revision=3, is_text_default=True)
+    prior_b = _model_route("B", revision=7, is_text_default=False)
     return FinalizeDefaultRouteInput(
         routes=(
-            ModelRouteWrite(replace(prior_a, revision=4, is_default=False), 3),
-            ModelRouteWrite(replace(prior_b, revision=8, is_default=True), 7),
+            ModelRouteWrite(
+                replace(prior_a, is_text_default=False),
+                3,
+                preserve_revision=True,
+                expected_default=True,
+                expected_other_default=False,
+            ),
+            ModelRouteWrite(
+                replace(prior_b, is_text_default=True),
+                7,
+                preserve_revision=True,
+                expected_default=False,
+                expected_other_default=False,
+            ),
         ),
         audit_events=(_invocation_audit(),), replay=_default_replay(),
         connection_precondition=DefaultRouteConnectionPrecondition(
@@ -466,30 +486,72 @@ def _default_b_request() -> FinalizeDefaultRouteInput:
 
 
 def test_default_route_a_to_b_uses_both_exact_preimages_and_rejects_stale() -> None:
-    prior_a = _model_route("A", revision=3, is_default=True)
-    prior_b = _model_route("B", revision=7, is_default=False)
-    candidate_a = replace(prior_a, revision=4, is_default=False)
-    candidate_b = replace(prior_b, revision=8, is_default=True)
+    prior_a = _model_route("A", revision=3, is_text_default=True)
+    prior_b = _model_route("B", revision=7, is_text_default=False)
+    candidate_a = replace(prior_a, is_text_default=False)
+    candidate_b = replace(prior_b, is_text_default=True)
     request = FinalizeDefaultRouteInput(
-        routes=(ModelRouteWrite(candidate_a, 3), ModelRouteWrite(candidate_b, 7)),
+        routes=(
+            ModelRouteWrite(
+                candidate_a,
+                3,
+                preserve_revision=True,
+                expected_default=True,
+                expected_other_default=False,
+            ),
+            ModelRouteWrite(
+                candidate_b,
+                7,
+                preserve_revision=True,
+                expected_default=False,
+                expected_other_default=False,
+            ),
+        ),
         audit_events=(_invocation_audit(),), replay=_default_replay(),
     )
     success = Session(
         scalars=(
-            SimpleNamespace(route_id="A", revision=3, is_default=True),
-            SimpleNamespace(route_id="B", revision=7, is_default=False),
-            SimpleNamespace(route_id="A", revision=3, is_default=True),
+            SimpleNamespace(
+                route_id="A", revision=3,
+                is_text_default=True, is_vision_default=False,
+            ),
+            SimpleNamespace(
+                route_id="B", revision=7,
+                is_text_default=False, is_vision_default=False,
+            ),
+            SimpleNamespace(
+                route_id="A", revision=3,
+                is_text_default=True, is_vision_default=False,
+            ),
             None,
         )
     )
     FinalizeDefaultRouteCommand(SessionFactory(success)).execute(request)
     assert success.commits == 1
-    assert {row.route_id for row in success.merged} == {"A", "B"}
+    assert success.merged == []
+    default_updates = [
+        item[0]
+        for item in success.executed
+        if isinstance(item, tuple)
+        and "UPDATE atlas_model_routes" in str(item[0])
+    ]
+    assert len(default_updates) == 2
+    assert all(
+        "is_text_default" in str(statement)
+        and "is_vision_default" not in str(statement)
+        for statement in default_updates
+    )
 
     stale_selected = Session(
         scalars=(
-            SimpleNamespace(route_id="A", revision=3, is_default=True),
-            SimpleNamespace(route_id="B", revision=8, is_default=False),
+            SimpleNamespace(
+                route_id="A", revision=3,
+                is_text_default=True, is_vision_default=False,
+            ),
+            SimpleNamespace(
+                route_id="B", revision=8,
+                is_text_default=False, is_vision_default=False,
+            ),
         )
     )
     with pytest.raises(ModelRoutingCurrentnessConflict, match="route revision"):
@@ -497,11 +559,44 @@ def test_default_route_a_to_b_uses_both_exact_preimages_and_rejects_stale() -> N
     assert stale_selected.rollbacks == 1
 
     stale_prior = Session(
-        scalars=(SimpleNamespace(route_id="A", revision=4, is_default=True),)
+        scalars=(
+            SimpleNamespace(
+                route_id="A", revision=4,
+                is_text_default=True, is_vision_default=False,
+            ),
+        )
     )
     with pytest.raises(ModelRoutingCurrentnessConflict, match="route revision"):
         FinalizeDefaultRouteCommand(SessionFactory(stale_prior)).execute(request)
     assert stale_prior.rollbacks == 1
+
+def test_route_configuration_rejects_a_concurrent_default_flag_change() -> None:
+    prior = _model_route("A", revision=3, is_text_default=True)
+    candidate = replace(prior, display_name="Updated A", revision=4)
+    request = FinalizeRouteConfigurationInput(
+        routes=(ModelRouteWrite(candidate, 3),),
+        replay=_default_replay(),
+        audit_events=(_invocation_audit(),),
+    )
+    stale_flags = Session(
+        scalars=(
+            SimpleNamespace(
+                route_id="A",
+                revision=3,
+                is_text_default=False,
+                is_vision_default=False,
+            ),
+        )
+    )
+
+    with pytest.raises(
+        ModelRoutingCurrentnessConflict,
+        match="default selection changed",
+    ):
+        FinalizeRouteConfigurationCommand(SessionFactory(stale_flags)).execute(
+            request
+        )
+    assert stale_flags.rollbacks == 1
 
 
 def test_connection_disable_then_set_default_rejects_stale_connection() -> None:
@@ -545,9 +640,18 @@ def test_set_default_then_connection_disable_rejects_current_default_link() -> N
                 connection_id="connection-B", revision=1,
                 enabled=True, status="verified",
             ),
-            SimpleNamespace(route_id="A", revision=3, is_default=True),
-            SimpleNamespace(route_id="B", revision=7, is_default=False),
-            SimpleNamespace(route_id="A", revision=3, is_default=True),
+            SimpleNamespace(
+                route_id="A", revision=3,
+                is_text_default=True, is_vision_default=False,
+            ),
+            SimpleNamespace(
+                route_id="B", revision=7,
+                is_text_default=False, is_vision_default=False,
+            ),
+            SimpleNamespace(
+                route_id="A", revision=3,
+                is_text_default=True, is_vision_default=False,
+            ),
             None,
         )
     )
@@ -579,14 +683,16 @@ def test_set_default_then_connection_disable_rejects_current_default_link() -> N
 
 
 def test_default_route_scope_uses_named_selected_and_prior_intent(monkeypatch) -> None:
-    selected = _model_route("B", revision=7, is_default=False)
-    prior = _model_route("A", revision=3, is_default=True)
-    concurrent_default = _model_route("C", revision=2, is_default=True)
-    calls: list[tuple[str, str]] = []
+    selected = _model_route("B", revision=7, is_text_default=False)
+    prior = _model_route("A", revision=3, is_text_default=True)
+    concurrent_default = _model_route("C", revision=2, is_text_default=True)
+    calls: list[tuple[str, str, str]] = []
 
-    def detached(_self, key: str, route_id: str) -> DefaultRouteIntent:
-        calls.append((key, route_id))
-        return DefaultRouteIntent(None, selected, prior)
+    def detached(
+        _self, key: str, route_id: str, purpose: str
+    ) -> DefaultRouteIntent:
+        calls.append((key, route_id, purpose))
+        return DefaultRouteIntent(None, selected, prior, "text")
 
     monkeypatch.setattr(
         "atlas_production.infrastructure.postgres_model_routing_adapter.BeginDefaultRouteIntentCommand.execute",
@@ -594,7 +700,7 @@ def test_default_route_scope_uses_named_selected_and_prior_intent(monkeypatch) -
     )
     monkeypatch.setattr(
         "atlas_production.infrastructure.postgres_owner.model_routing.ModelRoutingReadModel.default_route",
-        lambda _self: concurrent_default,
+        lambda _self, _purpose: concurrent_default,
     )
     selected_connection, _disabled, _replay = _provider_disable_records()
     monkeypatch.setattr(
@@ -607,12 +713,12 @@ def test_default_route_scope_uses_named_selected_and_prior_intent(monkeypatch) -
         "atlas_production.infrastructure.postgres_model_routing_adapter.FinalizeDefaultRouteCommand.execute",
         lambda _self, request: finalized.append(request),
     )
-    with adapter.default_route_scope("default-key", "B"):
+    with adapter.default_route_scope("default-key", "B", "text"):
         intent = adapter._active_intent()
         assert isinstance(intent, DefaultRouteIntent)
         assert intent.selected is selected
         assert intent.current_default is prior
-        assert adapter.default_route().route_id == "A"
+        assert adapter.default_route("text").route_id == "A"
         assert adapter.get_route("B").revision == 7
         with pytest.raises(
             ModelRoutingCurrentnessConflict, match="identity changed"
@@ -620,16 +726,16 @@ def test_default_route_scope_uses_named_selected_and_prior_intent(monkeypatch) -
             adapter.commit_configuration(
                 connections=[], secrets=[],
                 routes=[
-                    replace(concurrent_default, revision=3, is_default=False),
-                    replace(selected, revision=8, is_default=True),
+                    replace(concurrent_default, is_text_default=False),
+                    replace(selected, is_text_default=True),
                 ],
                 audits=[], replay_factory=lambda _events: _default_replay(),
             )
         adapter.commit_configuration(
             connections=[], secrets=[],
             routes=[
-                replace(prior, revision=4, is_default=False),
-                replace(selected, revision=8, is_default=True),
+                replace(prior, is_text_default=False),
+                replace(selected, is_text_default=True),
             ],
             audits=[], replay_factory=lambda _events: _default_replay(),
         )
@@ -638,7 +744,157 @@ def test_default_route_scope_uses_named_selected_and_prior_intent(monkeypatch) -
                 "connection-B", 1, True, "verified"
             )
         )
-    assert calls == [("default-key", "B")]
+        assert all(write.preserve_revision for write in finalized[0].routes)
+    assert calls == [("default-key", "B", "text")]
+
+def test_same_default_selection_carries_an_exact_flag_preimage(
+    monkeypatch,
+) -> None:
+    selected = _model_route("A", revision=3, is_text_default=True)
+    selected_connection, _disabled, _replay = _provider_disable_records()
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_model_routing_adapter.BeginDefaultRouteIntentCommand.execute",
+        lambda _self, _key, _route_id, _purpose: DefaultRouteIntent(
+            None, selected, selected, "text"
+        ),
+    )
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_owner.model_routing.ModelRoutingReadModel.get_connection",
+        lambda _self, _connection_id: selected_connection,
+    )
+    adapter = PostgresModelRoutingAdapter(
+        lambda: None, lambda *_args: None
+    )  # type: ignore[arg-type]
+    finalized: list[FinalizeDefaultRouteInput] = []
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_model_routing_adapter.FinalizeDefaultRouteCommand.execute",
+        lambda _self, request: finalized.append(request),
+    )
+
+    with adapter.default_route_scope("same-default-key", "A", "text"):
+        adapter.commit_configuration(
+            connections=[],
+            secrets=[],
+            routes=[selected],
+            audits=[],
+            replay_factory=lambda _events: _default_replay(),
+        )
+
+    assert len(finalized[0].routes) == 1
+    assert finalized[0].routes[0].expected_revision == 3
+    assert finalized[0].routes[0].expected_default is True
+    assert finalized[0].routes[0].expected_other_default is False
+
+
+def test_default_selection_maps_locked_preimage_conflict_to_typed_409(
+    monkeypatch,
+) -> None:
+    selected = _model_route("A", revision=3, is_text_default=True)
+    selected_connection, _disabled, _replay = _provider_disable_records()
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_model_routing_adapter.BeginDefaultRouteIntentCommand.execute",
+        lambda _self, _key, _route_id, _purpose: DefaultRouteIntent(
+            None, selected, selected, "text"
+        ),
+    )
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_owner.model_routing.ModelRoutingReadModel.get_connection",
+        lambda _self, _connection_id: selected_connection,
+    )
+
+    def reject(_self, _request) -> None:
+        raise ModelRoutingCurrentnessConflict("default preimage changed")
+
+    monkeypatch.setattr(
+        "atlas_production.infrastructure.postgres_model_routing_adapter.FinalizeDefaultRouteCommand.execute",
+        reject,
+    )
+    adapter = PostgresModelRoutingAdapter(
+        lambda: None, lambda *_args: None
+    )  # type: ignore[arg-type]
+
+    with adapter.default_route_scope("conflict-key", "A", "text"):
+        with pytest.raises(ModelRoutingError) as raised:
+            adapter.commit_configuration(
+                connections=[],
+                secrets=[],
+                routes=[selected],
+                audits=[_invocation_audit()],
+                replay_factory=lambda _events: _default_replay(),
+            )
+
+    assert raised.value.error_code == "configuration_revision_conflict"
+    assert raised.value.status_code == 409
+
+
+def test_same_default_selection_rejects_a_stale_flag_preimage() -> None:
+    selected = _model_route("A", revision=3, is_text_default=True)
+    request = FinalizeDefaultRouteInput(
+        routes=(
+            ModelRouteWrite(
+                selected,
+                3,
+                preserve_revision=True,
+                expected_default=True,
+                expected_other_default=False,
+            ),
+        ),
+        audit_events=(_invocation_audit(),),
+        replay=_default_replay(),
+        purpose="text",
+    )
+    stale = Session(
+        scalars=(
+            SimpleNamespace(
+                route_id="A",
+                revision=3,
+                is_text_default=False,
+                is_vision_default=False,
+            ),
+        )
+    )
+
+    with pytest.raises(
+        ModelRoutingCurrentnessConflict,
+        match="model route default preimage changed",
+    ):
+        FinalizeDefaultRouteCommand(SessionFactory(stale)).execute(request)
+    assert stale.rollbacks == 1
+
+
+def test_default_selection_rejects_a_stale_other_purpose_preimage() -> None:
+    selected = _model_route("A", revision=3, is_text_default=True)
+    request = FinalizeDefaultRouteInput(
+        routes=(
+            ModelRouteWrite(
+                selected,
+                3,
+                preserve_revision=True,
+                expected_default=True,
+                expected_other_default=False,
+            ),
+        ),
+        audit_events=(_invocation_audit(),),
+        replay=_default_replay(),
+        purpose="text",
+    )
+    stale = Session(
+        scalars=(
+            SimpleNamespace(
+                route_id="A",
+                revision=3,
+                is_text_default=True,
+                is_vision_default=True,
+            ),
+        )
+    )
+
+    with pytest.raises(
+        ModelRoutingCurrentnessConflict,
+        match="model route default preimage changed",
+    ):
+        FinalizeDefaultRouteCommand(SessionFactory(stale)).execute(request)
+    assert stale.rollbacks == 1
 
 
 def test_same_session_invocation_writer_validates_preimage_before_raw_write(
@@ -1051,7 +1307,7 @@ def test_ops_ready_projects_are_complete_and_probes_are_session_free() -> None:
         "project-1", "project-2", "project-3"
     ]
 def test_model_attempt_uses_one_detached_joined_snapshot(monkeypatch) -> None:
-    route = _model_route("A", revision=3, is_default=True)
+    route = _model_route("A", revision=3, is_text_default=True)
     connection = ProviderConnectionRecord(
         connection_id=route.connection_id,
         display_name="Provider A",

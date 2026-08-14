@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from hashlib import sha256
+import json
+
+def validate_directory_transport(provider_type: str, tls_mode: str) -> None:
+    if tls_mode not in {"ldaps", "start_tls", "plain"}:
+        raise ValueError("unsupported directory transport")
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +61,18 @@ class DirectorySecretRecord:
     algorithm: str
     storage_backend: str
     updated_at: str
+
+
+def directory_record_revision(
+    record: DirectoryConnectionRecord | DirectorySecretRecord,
+) -> str:
+    payload = json.dumps(
+        asdict(record),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

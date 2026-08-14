@@ -1,28 +1,45 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from copy import deepcopy
-from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
-from atlas_production.infrastructure.history_authority import (
-    HISTORY_AUTHORITY_POLICY,
-    history_exchange_payload,
-    history_summary_payload,
+from atlas_production.infrastructure.strict_turn_model_capabilities import (
+    _ACTION_MODELS,
+    _final_schema,
+    _tool,
+    _within_capabilities,
+)
+from atlas_production.infrastructure.strict_turn_model_messages import (
+    _canonical,
+    _digest,
+    _initial_provider_messages,
+)
+from atlas_production.infrastructure.strict_turn_model_reasoning import (
+    _ProviderInitialPlanDecisionV1,
+    _ProviderProcessEvaluationV1,
+    _ProviderProcessRubricDecisionV1,
+    _ProviderReplanDecisionV1,
+    _bounded_plan_summaries,
+    _bounded_plan_text,
+    _build_reasoning_wire,
+    _evaluation_payload,
+    _evaluation_schema,
+    _next_runtime_plan_item_id,
+    _plan_payload,
+    _replan_payload,
+    _replan_schema,
+    _usage_value,
 )
 from atlas_production.modules.model_routing.public import (
     ModelRoutingRuntime,
     ProviderAssistantToolCallMessage,
     ProviderCompleted,
     ProviderConversationRequest,
-    ProviderFunctionTool,
     ProviderIncomplete,
     ProviderImageContentPart,
     ProviderProtocolError,
-    ProviderSystemMessage,
     ProviderRefused,
     ProviderToolCall,
     ProviderToolResultMessage,
@@ -32,16 +49,8 @@ from atlas_production.modules.model_routing.public import (
     require_provider_wire_within_limits,
 )
 from atlas_production.modules.retrieval.public import (
-    DiscoverRelevantDocumentsV1,
-    ExpandKnowledgeV1,
-    FindKnowledgeDocumentsV1,
-    InspectKnowledgeV1,
-    InspectVisualV1,
     KnowledgeToolObservationEnvelopeV1,
     KnowledgeToolObservationV1,
-    ListKnowledgeDocumentsV1,
-    NavigateDocumentV1,
-    SearchKnowledgeV1,
     VisualImagePayloadV1,
     VisualInspectionResultV1,
 )
@@ -55,70 +64,20 @@ from atlas_production.modules.turn_execution.public import (
     ModelActionResultV1,
     ModelContractViolationV1,
     ModelStepResultV1,
-    TurnModelCapabilitySnapshotV1,
     StrictTurnModel,
     StrictTurnModelSession,
     TurnModelInputV3,
-    finalize_answer_schema,
 )
+from atlas_production.providers import ProviderError
 from atlas_production.modules.turn_runtime.public import (
     ProcessScoreV1,
     ReasoningEvaluationV1,
     ReasoningPlanV2,
     SchemaRetryOriginCode,
 )
-from atlas_production.providers import build_native_json_schema
 
 
 logger = logging.getLogger(__name__)
-
-
-_ACTION_MODELS = {
-    "list_knowledge_documents": ListKnowledgeDocumentsV1,
-    "find_knowledge_documents": FindKnowledgeDocumentsV1,
-    "discover_relevant_documents": DiscoverRelevantDocumentsV1,
-    "search_knowledge": SearchKnowledgeV1,
-    "inspect_knowledge": InspectKnowledgeV1,
-    "inspect_visual": InspectVisualV1,
-    "expand_knowledge": ExpandKnowledgeV1,
-    "navigate_document": NavigateDocumentV1,
-}
-
-
-class _ProviderInitialPlanDecisionV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    next_objective: str
-    completion_condition: str
-    item_summaries: list[str]
-
-
-class _ProviderReplanDecisionV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    next_objective: str
-    completion_condition: str
-    completed_item_ids: list[str]
-    skipped_item_ids: list[str]
-    new_item_summaries: list[str]
-
-
-class _ProviderProcessRubricDecisionV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    plan_coverage: Literal[0, 1, 2]
-    evidence_handling: Literal[0, 1, 2]
-    conflict_handling: Literal[0, 1, 2]
-    gap_resolution: Literal[0, 1, 2]
-    revision_completion: Literal[0, 1, 2]
-
-
-class _ProviderProcessEvaluationV1(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    verdict: Literal["accept", "revise_only", "research_then_revise"]
-    summary: str = Field(min_length=1, max_length=240)
-    rubric_dimensions: _ProviderProcessRubricDecisionV1
 
 
 _PROCESS_FINDING_CODE_BY_DIMENSION = {
@@ -129,489 +88,35 @@ _PROCESS_FINDING_CODE_BY_DIMENSION = {
     "revision_completion": "revision_incomplete",
 }
 
-_TOOL_DESCRIPTIONS = {
-    "list_knowledge_documents": (
-        "List authorized document candidates and their names, versions, tags, "
-        "modalities, and current-execution handles, at most 10 per call. Continue "
-        "with next_cursor when more candidates are needed before selecting documents."
-    ),
-    "find_knowledge_documents": (
-        "Find authorized document candidates by one concise identity keyword for a "
-        "document name, model, version, or tag, at most 10 per call. This searches "
-        "document identity only, not document content. Review the returned names, "
-        "continue with next_cursor or another identity keyword when useful, then "
-        "use search_knowledge with selected document handles for content questions."
-    ),
-    "discover_relevant_documents": (
-        "Discover up to 20 authorized document candidates by a natural-language "
-        "content query of 1 to 4000 characters. Candidate previews guide document "
-        "selection only and are not evidence. Select disclosed document handles "
-        "and use search_knowledge "
-        "to obtain exact evidence."
-    ),
-    "search_knowledge": (
-        "Search evidence only inside the non-empty subset of disclosed document "
-        "handles selected for this call. You may change the query or selected "
-        "handles and search again within the current budget."
-    ),
-    "inspect_knowledge": "Inspect already obtained evidence handles.",
-    "inspect_visual": (
-        "This is the visual inspection tool. Use it to directly view an authorized "
-        "document page or visual region. Call it proactively whenever visual "
-        "inspection would help you understand, verify, compare, or resolve ambiguity "
-        "in the requested task; the user does not need to ask explicitly. It is "
-        "especially useful for figures, diagrams, images, shapes, visual labels, "
-        "relative positions, page layouts, waveforms, schematics, and visually "
-        "encoded tables. Any page_handle in current capabilities, whether returned "
-        "by search_knowledge or navigate_document, is a legal target. Text "
-        "extraction, snippets, captions, and navigation metadata may help locate the "
-        "page but do not replace visual inspection when the conclusion depends on "
-        "visual content. For comparisons, inspect every material visual target."
-    ),
-    "expand_knowledge": "Expand from already obtained evidence handles.",
-    "navigate_document": (
-        "Explore one selected document's fixed structure with overview, search, "
-        "or around. Each returned page_handle is a legal target for "
-        "inspect_visual when it remains in current capabilities. Returned "
-        "locations and page handles are navigation choices, not evidence; "
-        "inspect text or visuals before relying on content."
-    ),
-}
-
-
-def _canonical(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
-
-
-def _available_knowledge_payload(
-    model_input: TurnModelInputV3,
-) -> dict[str, object] | None:
-    capabilities = model_input.capabilities
-    available: dict[str, object] = {}
-    if capabilities.documents:
-        available["documents"] = [
-            item.model_dump(mode="json") for item in capabilities.documents
-        ]
-    if capabilities.evidence:
-        available["evidence"] = [
-            item.model_dump(mode="json") for item in capabilities.evidence
-        ]
-    if capabilities.visuals:
-        available["visuals"] = [
-            item.model_dump(mode="json") for item in capabilities.visuals
-        ]
-    if capabilities.navigation:
-        available["navigation"] = [
-            item.model_dump(mode="json") for item in capabilities.navigation
-        ]
-    if not available:
-        return None
-    return {"available_knowledge": available}
-
-
-def _initial_provider_messages(model_input: TurnModelInputV3) -> list:
-    answer_behavior = model_input.answer_behavior
-    messages = [
-        ProviderSystemMessage(
-            content=_canonical(
-                {
-                    "system_behavior_contract": model_input.behavior_contract.model_dump(
-                        mode="json"
-                    ),
-                    "history_authority": HISTORY_AUTHORITY_POLICY,
-                    "answer_policy_snapshot": {
-                        "knowledge_assistant_scope_rule": (
-                            "Act as a knowledge and information assistant. Allow "
-                            "informational question answering, explanation, summary, "
-                            "comparison, and translation of existing information. "
-                            "Softly refuse code generation, code debugging, new creative "
-                            "or authored content, and ghostwriting. Brief greetings, "
-                            "confirmations, clarification questions, and refusal text are "
-                            "allowed when needed for dialogue."
-                        ),
-                        "direct_response_rule": (
-                            "Answer the user's direct question at the requested scope. "
-                            "Treat facts and values explicitly supplied by the current "
-                            "user request as task premises unless the user asks you to "
-                            "verify them. Deterministic arithmetic or logical derivations "
-                            "from those premises do not require separate retrieved evidence. "
-                            "Historical assistant content remains pending verification: "
-                            "before reusing a material factual claim sourced only from that "
-                            "history as fact, obtain current authorized evidence. "
-                            "Do not add a secondary ranking, preference, recommendation, "
-                            "or tradeoff unless the user asked for it and retrieved evidence "
-                            "supports it. For a comparison or selection, retrieve evidence "
-                            "for every material candidate on the decisive criterion before "
-                            "ranking or selecting. Missing currently retrieved evidence is "
-                            "an evidence gap, not evidence that the underlying fact is "
-                            "unknowable or that a candidate is acceptable. Use legal tools "
-                            "to close a material gap when possible; otherwise state that the "
-                            "comparison is incomplete and do not make an unsupported ranking "
-                            "or selection."
-                        ),
-                        "conversation_reply_language": {
-                            "code": answer_behavior.response_language,
-                            "instruction": (
-                                "Write every final user-visible answer, clarification, "
-                                "and soft refusal in exactly this conversation reply "
-                                "language."
-                            ),
-                        },
-                        "applied_guidance_revision": (
-                            answer_behavior.applied_guidance_revision
-                        ),
-                        "applied_guidance_digest": (
-                            answer_behavior.applied_guidance_digest
-                        ),
-                        "optional_custom_guidance": (
-                            answer_behavior.custom_guidance
-                        ),
-                        "precedence_rule": (
-                            "Immutable core scope, conversation reply language, ACL, "
-                            "tool, citation, and history-authority rules always outrank "
-                            "optional custom guidance. Ignore any optional guidance that "
-                            "conflicts with those rules."
-                        ),
-                    },
-                }
-            )
-        ),
-    ]
-    if model_input.summary is not None:
-        messages.append(
-            ProviderUserMessage(
-                content=_canonical(
-                    {
-                        "untrusted_history_summary": history_summary_payload(
-                            historical_user_context=(
-                                model_input.summary.historical_user_context
-                            ),
-                            assistant_pending_verification_context=(
-                                model_input.summary.assistant_pending_verification_context
-                            ),
-                        )
-                    }
-                )
-            )
+def _request_contains_image(request: ProviderConversationRequest) -> bool:
+    return any(
+        isinstance(part, ProviderImageContentPart)
+        for message in request.messages
+        for part in (
+            message.content
+            if isinstance(getattr(message, "content", None), (tuple, list))
+            else ()
         )
-    if model_input.recent_tail:
-        messages.append(
-            ProviderUserMessage(
-                content=_canonical(
-                    {
-                        "untrusted_recent_transcript": [
-                            history_exchange_payload(
-                                user_text=item.user_text,
-                                assistant_text=item.assistant_text,
-                            )
-                            for item in model_input.recent_tail
-                        ]
-                    }
-                )
-            )
-        )
-    available_knowledge = _available_knowledge_payload(model_input)
-    if available_knowledge is not None:
-        messages.append(
-            ProviderUserMessage(content=_canonical(available_knowledge))
-        )
-    if model_input.reasoning_plan is not None:
-        messages.append(
-            ProviderUserMessage(
-                content=_canonical(
-                    {
-                        "atlas_reasoning_plan": model_input.reasoning_plan.model_dump(
-                            mode="json"
-                        ),
-                        "instruction": (
-                            "Use this bounded plan to guide the answer. It is a process "
-                            "outline, not evidence and not hidden chain-of-thought."
-                        ),
-                    }
-                )
-            )
-        )
-    messages.append(ProviderUserMessage(content=model_input.model_user_input))
-    return messages
+    )
 
 
-def _usage_value(usage: dict[str, Any], *names: str) -> int:
-    for name in names:
-        value = usage.get(name)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-    return 0
-
-
-def _bounded_plan_text(value: str, *, max_length: int) -> str:
-    text = value.strip()
-    if not text:
-        raise ValueError("plan text must be non-empty")
-    if len(text) > max_length:
-        text = text[:max_length].rstrip()
-    if not text:
-        raise ValueError("bounded plan text must be non-empty")
-    return text
-
-
-def _bounded_plan_summaries(values: list[str], *, limit: int) -> list[str]:
-    summaries: list[str] = []
-    for value in values:
-        if len(summaries) >= limit:
-            break
-        if not value.strip():
-            continue
-        summaries.append(_bounded_plan_text(value, max_length=120))
-    return summaries
-
-
-def _with_schema_repair_instruction(instruction: str, *, repair: bool) -> str:
-    if not repair:
-        return instruction
+def _attempt_matches_snapshot(attempt, snapshot) -> bool:
+    policy = attempt.route.runtime_policy
     return (
-        instruction
-        + " The previous response violated the required JSON or schema contract. "
-        "Return exactly one JSON object that matches the supplied response schema; "
-        "do not add Markdown fences, commentary, prefixes, or suffixes."
+        attempt.route.route_id == snapshot.route_id
+        and attempt.route.revision == snapshot.route_revision
+        and policy.revision == snapshot.runtime_policy_revision
+        and policy.tokenizer_profile == snapshot.tokenizer_profile
+        and policy.context_window_tokens == snapshot.context_window_tokens
+        and policy.max_input_tokens_per_invocation
+        == snapshot.max_input_tokens_per_invocation
+        and policy.max_output_tokens_per_invocation
+        == snapshot.max_output_tokens_per_invocation
+        and policy.max_tool_result_tokens_per_execution
+        == snapshot.max_tool_result_tokens_per_execution
+        and policy.max_total_tokens_per_conversation
+        == snapshot.max_total_tokens_per_conversation
     )
-
-
-def _next_runtime_plan_item_id(
-    *, generation: int, used_item_ids: set[str], ordinal: int
-) -> str:
-    candidate_ordinal = ordinal
-    while True:
-        candidate = f"g{generation}-item-{candidate_ordinal:02d}"
-        if candidate not in used_item_ids:
-            return candidate
-        candidate_ordinal += 1
-
-
-def _array_enum(schema: dict[str, Any], path: tuple[str, ...], values: list[str]) -> None:
-    current = schema
-    for key in path:
-        current = current[key]
-    if values:
-        current["items"]["enum"] = values
-    else:
-        # Azure's strict function-schema subset rejects array-valued enums.
-        # Keep the required wire field closed as null when a schema is built
-        # without any legal values. Capability gating omits such tools; null
-        # is never normalized into a domain action.
-        current.clear()
-        current["type"] = "null"
-
-
-def _integer_enum(
-    schema: dict[str, Any], path: tuple[str, ...], values: list[int]
-) -> None:
-    current = schema
-    for key in path:
-        current = current[key]
-    current["enum"] = values
-
-
-def _nullable_string_enum(schema: dict[str, Any], name: str, values: list[str]) -> None:
-    field = schema["properties"][name]
-    if not values:
-        field.clear()
-        field["type"] = "null"
-        return
-    target = next(
-        (
-            item
-            for item in field.get("anyOf", [])
-            if item.get("type") == "string"
-        ),
-        field,
-    )
-    target["enum"] = values
-
-
-def _tool(model: type, capabilities: TurnModelCapabilitySnapshotV1) -> ProviderFunctionTool:
-    action = next(iter(model.model_fields["action"].annotation.__args__))
-    application_schema = deepcopy(model.model_json_schema())
-    limits = capabilities.limits
-    if "max_output_tokens" in application_schema["properties"]:
-        _integer_enum(
-            application_schema,
-            ("properties", "max_output_tokens"),
-            [limits.max_output_tokens],
-        )
-    if action == "list_knowledge_documents":
-        _integer_enum(
-            application_schema,
-            ("properties", "page_size"),
-            list(range(1, limits.max_page_size + 1)),
-        )
-    if action == "discover_relevant_documents":
-        _integer_enum(
-            application_schema,
-            ("properties", "limit"),
-            list(range(1, limits.max_discovery_limit + 1)),
-        )
-    if action == "search_knowledge":
-        _integer_enum(
-            application_schema,
-            ("properties", "limit"),
-            list(range(1, limits.max_search_limit + 1)),
-        )
-        _array_enum(
-            application_schema,
-            ("properties", "document_handles"),
-            [item.document_handle for item in capabilities.documents],
-        )
-        _array_enum(
-            application_schema,
-            ("properties", "required_modalities"),
-            list(capabilities.allowed_modalities),
-        )
-    elif action == "inspect_knowledge":
-        _array_enum(
-            application_schema,
-            ("properties", "handles"),
-            [item.evidence_handle for item in capabilities.evidence],
-        )
-    elif action == "inspect_visual":
-        application_schema["properties"]["handle"]["enum"] = [
-            item.handle for item in capabilities.visuals
-        ]
-    elif action == "expand_knowledge":
-        _integer_enum(
-            application_schema,
-            ("properties", "limit"),
-            list(range(1, limits.max_expand_limit + 1)),
-        )
-        _array_enum(
-            application_schema,
-            ("properties", "anchor_handles"),
-            [item.evidence_handle for item in capabilities.evidence],
-        )
-        application_schema["properties"]["direction"]["enum"] = list(
-            capabilities.allowed_expand_directions
-        )
-    elif action == "navigate_document":
-        _integer_enum(
-            application_schema,
-            ("properties", "limit"),
-            list(range(1, limits.max_navigation_limit + 1)),
-        )
-        _nullable_string_enum(
-            application_schema,
-            "document_handle",
-            [item.document_handle for item in capabilities.documents],
-        )
-        _nullable_string_enum(
-            application_schema,
-            "navigation_handle",
-            [item.navigation_handle for item in capabilities.navigation],
-        )
-        _nullable_string_enum(
-            application_schema,
-            "relation",
-            list(capabilities.allowed_navigation_relations),
-        )
-    schema = build_native_json_schema(
-        f"{action}_v1_{capabilities.digest[:12]}",
-        application_schema,
-    )
-    provider_schema = schema.schema
-    if action == "expand_knowledge":
-        provider_schema["properties"]["anchor_handles"]["maxItems"] = (
-            limits.max_expand_anchor_handles
-        )
-    return ProviderFunctionTool(
-        name=action,
-        description=_TOOL_DESCRIPTIONS[action],
-        parameters=provider_schema,
-        strict=True,
-    )
-
-def _final_schema(capabilities: TurnModelCapabilitySnapshotV1):
-    application_schema = deepcopy(finalize_answer_schema())
-    return build_native_json_schema(
-        f"finalize_answer_v1_{capabilities.digest[:12]}", application_schema
-    )
-
-
-def _duplicates(values: list[str]) -> bool:
-    return len(values) != len(set(values))
-
-
-def _within_capabilities(action, capabilities: TurnModelCapabilitySnapshotV1) -> bool:
-    if action.action not in capabilities.allowed_actions:
-        return False
-    limits = capabilities.limits
-    if not isinstance(
-        action,
-        (
-            FinalizeAnswerV1,
-            FindKnowledgeDocumentsV1,
-            DiscoverRelevantDocumentsV1,
-            InspectVisualV1,
-        ),
-    ):
-        if (
-            limits.max_output_tokens < 256
-            or action.max_output_tokens > limits.max_output_tokens
-        ):
-            return False
-    if isinstance(action, ListKnowledgeDocumentsV1):
-        return action.page_size <= limits.max_page_size
-    if isinstance(action, FindKnowledgeDocumentsV1):
-        return limits.max_page_size >= 10
-    if isinstance(action, DiscoverRelevantDocumentsV1):
-        return action.limit <= limits.max_discovery_limit
-    if isinstance(action, SearchKnowledgeV1):
-        documents = {item.document_handle for item in capabilities.documents}
-        return (
-            action.limit <= limits.max_search_limit
-            and bool(action.document_handles)
-            and not _duplicates(action.document_handles)
-            and set(action.document_handles).issubset(documents)
-            and set(action.required_modalities).issubset(
-                capabilities.allowed_modalities
-            )
-        )
-    if isinstance(action, InspectKnowledgeV1):
-        evidence = {item.evidence_handle for item in capabilities.evidence}
-        return not _duplicates(action.handles) and set(action.handles).issubset(evidence)
-    if isinstance(action, InspectVisualV1):
-        return action.handle in {item.handle for item in capabilities.visuals}
-    if isinstance(action, ExpandKnowledgeV1):
-        evidence = {item.evidence_handle for item in capabilities.evidence}
-        return (
-            action.limit <= limits.max_expand_limit
-            and len(action.anchor_handles) <= limits.max_expand_anchor_handles
-            and not _duplicates(action.anchor_handles)
-            and set(action.anchor_handles).issubset(evidence)
-            and action.direction in capabilities.allowed_expand_directions
-        )
-    if isinstance(action, NavigateDocumentV1):
-        documents = {item.document_handle for item in capabilities.documents}
-        navigation = {
-            item.navigation_handle for item in capabilities.navigation
-        }
-        return (
-            action.limit <= limits.max_navigation_limit
-            and (
-                (
-                    action.mode in {"overview", "search"}
-                    and action.document_handle in documents
-                )
-                or (
-                    action.mode == "around"
-                    and action.navigation_handle in navigation
-                    and action.relation in capabilities.allowed_navigation_relations
-                )
-            )
-        )
-    assert isinstance(action, FinalizeAnswerV1)
-    return True
 
 
 class ProviderTurnModelSession(StrictTurnModelSession):
@@ -626,22 +131,10 @@ class ProviderTurnModelSession(StrictTurnModelSession):
     ) -> None:
         self._routing = routing
         self._attempt = routing.open_tested_attempt(model_input.route.route_id)
-        policy = self._attempt.route.runtime_policy
-        if (
-            self._attempt.route.revision != model_input.route.route_revision
-            or policy.revision != model_input.route.runtime_policy_revision
-            or policy.tokenizer_profile != model_input.route.tokenizer_profile
-            or policy.context_window_tokens != model_input.route.context_window_tokens
-            or policy.max_input_tokens_per_invocation
-            != model_input.route.max_input_tokens_per_invocation
-            or policy.max_output_tokens_per_invocation
-            != model_input.route.max_output_tokens_per_invocation
-            or policy.max_tool_result_tokens_per_execution
-            != model_input.route.max_tool_result_tokens_per_execution
-            or policy.max_total_tokens_per_conversation
-            != model_input.route.max_total_tokens_per_conversation
-        ):
+        if not _attempt_matches_snapshot(self._attempt, model_input.route):
             raise ProviderProtocolError(safe_code="model_route_revision_conflict")
+        self._vision_route = model_input.route.vision_route
+        self._vision_attempt = None
         self._execution_id = model_input.execution_id
         self._answer_behavior_digest = _digest(
             model_input.answer_behavior.model_dump(mode="json")
@@ -655,6 +148,32 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self._discarded = False
         self._provider_ordinal = 0
         self._record_invocations = record_invocations
+
+    def _attempt_for_request(self, request: ProviderConversationRequest):
+        if not _request_contains_image(request):
+            return self._attempt
+        if self._vision_route is None:
+            raise ProviderProtocolError(
+                safe_code="vision_model_route_unavailable"
+            )
+        if self._vision_attempt is None:
+            try:
+                candidate = self._routing.open_tested_attempt(
+                    self._vision_route.route_id
+                )
+            except ProviderError as error:
+                raise ProviderProtocolError(
+                    safe_code="vision_model_route_unavailable"
+                ) from error
+            if (
+                not getattr(candidate.route, "supports_vision", False)
+                or not _attempt_matches_snapshot(candidate, self._vision_route)
+            ):
+                raise ProviderProtocolError(
+                    safe_code="vision_model_route_unavailable"
+                )
+            self._vision_attempt = candidate
+        return self._vision_attempt
 
     def _next_request(
         self,
@@ -701,22 +220,31 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 self._attempt.route.runtime_policy.max_output_tokens_per_invocation,
             ),
         )
+        attempt = self._attempt_for_request(request)
+        selected_max_output = min(
+            16000,
+            attempt.route.runtime_policy.max_output_tokens_per_invocation,
+        )
+        if request.max_output_tokens != selected_max_output:
+            request = request.model_copy(
+                update={"max_output_tokens": selected_max_output}
+            )
         sizing = (
             require_provider_wire_within_limits
             if enforce_limits
             else estimate_provider_wire
         )
         estimate = sizing(
-            policy=self._attempt.route.runtime_policy,
+            policy=attempt.route.runtime_policy,
             request=request,
             response_schema=final_schema,
             tool_reserve_tokens=(
                 0
                 if finalize_only
-                else self._attempt.route.runtime_policy.max_tool_result_tokens_per_execution
+                else attempt.route.runtime_policy.max_tool_result_tokens_per_execution
             ),
         )
-        return messages, request, final_schema, input_digest, estimate
+        return messages, request, final_schema, input_digest, estimate, attempt
 
     def estimate_next_request_tokens(
         self, model_input: TurnModelInputV3, *, finalize_only: bool
@@ -748,9 +276,14 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         if self._pending_tool_call_id is not None:
             raise ProviderProtocolError(safe_code="turn_model_tool_result_missing")
 
-        messages, request, final_schema, input_digest, _estimate = self._next_request(
-            model_input, finalize_only=finalize_only
-        )
+        (
+            messages,
+            request,
+            final_schema,
+            input_digest,
+            _estimate,
+            attempt,
+        ) = self._next_request(model_input, finalize_only=finalize_only)
         # Keep the carrier transcript distinct from the immutable request
         # snapshot retained by providers/tests for audit.
         self._messages = list(messages)
@@ -759,7 +292,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         handle = None
         if self._record_invocations:
             handle = self._routing.prepare_invocation(
-                self._attempt.route,
+                attempt.route,
                 final_schema,
                 invocation_purpose="turn_execution",
                 subject_kind="turn_execution",
@@ -775,7 +308,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             )
             self._routing.record_invocation_started(handle)
         try:
-            outcome = self._routing.invoke(self._attempt, request, final_schema)
+            outcome = self._routing.invoke(attempt, request, final_schema)
         except Exception as error:
             if handle is not None:
                 self._routing.record_invocation_failure(
@@ -1089,27 +622,14 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             != model_input.route.max_output_tokens_per_invocation
         ):
             raise ProviderProtocolError(safe_code="model_route_revision_conflict")
-        response_schema = build_native_json_schema(schema_name, schema)
-        request = ProviderConversationRequest(
-            messages=[
-                ProviderSystemMessage(
-                    content=_canonical(
-                        {
-                            "atlas_deep_reasoning_contract": {
-                                "purpose": purpose,
-                                "structured_process_only": True,
-                                "provider_reasoning_forbidden": True,
-                                "accuracy_or_confidence_claim_forbidden": True,
-                            }
-                        }
-                    )
-                ),
-                ProviderUserMessage(content=_canonical(payload)),
-            ],
-            tools=[],
-            tool_choice="none",
-            parallel_tool_calls=False,
-            max_output_tokens=min(max_output_tokens, policy.max_output_tokens_per_invocation),
+        request, response_schema = _build_reasoning_wire(
+            purpose=purpose,
+            payload=payload,
+            schema_name=schema_name,
+            schema=schema,
+            max_output_tokens=min(
+                max_output_tokens, policy.max_output_tokens_per_invocation
+            ),
         )
         estimate = require_provider_wire_within_limits(
             policy=policy,
@@ -1180,41 +700,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
     def _plan_payload(
         model_input: TurnModelInputV3, *, repair: bool
     ) -> dict[str, object]:
-        return {
-            "instruction": _with_schema_repair_instruction(
-                "Return only a bounded next_objective of at most 160 characters, a "
-                "completion_condition of at most 160 characters, and item_summaries "
-                "containing 1 to 8 concise observable work steps of at most 120 characters "
-                "each. Runtime owns generation, parent linkage, item IDs and status. Do not "
-                "include hidden reasoning, draft answer text, evidence snippets, confidence, "
-                "or accuracy claims.",
-                repair=repair,
-            ),
-            "schema_repair": repair,
-            "current_user_request": model_input.model_user_input,
-            "history_authority_policy": HISTORY_AUTHORITY_POLICY,
-            "history_summary": (
-                None
-                if model_input.summary is None
-                else history_summary_payload(
-                    historical_user_context=(
-                        model_input.summary.historical_user_context
-                    ),
-                    assistant_pending_verification_context=(
-                        model_input.summary.assistant_pending_verification_context
-                    ),
-                )
-            ),
-            "recent_history": [
-                history_exchange_payload(
-                    user_text=item.user_text,
-                    assistant_text=item.assistant_text,
-                )
-                for item in model_input.recent_tail
-            ],
-            "catalog_document_count": model_input.catalog_document_count,
-            "allowed_actions": model_input.capabilities.allowed_actions,
-        }
+        return _plan_payload(model_input, repair=repair)
 
     def estimate_plan_request_tokens(
         self, model_input: TurnModelInputV3, *, repair: bool
@@ -1293,7 +779,9 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
     ) -> dict[str, object]:
         remaining = {
             "tool_invocations": max(
-                0, model_input.policy.max_tool_invocations - model_input.budget.tool_invocations
+                0,
+                model_input.policy.max_tool_invocations
+                - model_input.budget.tool_invocations,
             ),
             "provider_invocations": max(
                 0,
@@ -1301,7 +789,9 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
                 - model_input.budget.provider_invocations,
             ),
             "search_rounds": max(
-                0, model_input.policy.max_search_rounds - model_input.budget.search_rounds
+                0,
+                model_input.policy.max_search_rounds
+                - model_input.budget.search_rounds,
             ),
             "model_visible_items": max(
                 0,
@@ -1309,40 +799,18 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
                 - model_input.budget.model_visible_items,
             ),
         }
-        return {
-            "instruction": _with_schema_repair_instruction(
-                "Return only a bounded next_objective and completion_condition, each at "
-                "most 160 characters; completed_item_ids and skipped_item_ids selected "
-                "only from currently pending item IDs; and concise new_item_summaries of "
-                "at most 120 characters each. Omit an unchanged pending item from both ID "
-                "lists and Runtime will retain it. Runtime owns generation, parent linkage, "
-                "new item IDs and pending status. Do not include draft text, evidence "
-                "excerpts, opaque handles, provider reasoning, confidence, or accuracy claims.",
-                repair=repair,
-            ),
-            "schema_repair": repair,
-            "current_plan": plan.model_dump(mode="json"),
-            "evaluator_finding": {
-                "cycle": evaluation.cycle,
-                "verdict": evaluation.verdict,
-                "finding_codes": evaluation.finding_codes,
-                "summary": evaluation.summary,
-            },
-            "allowed_action_kinds": model_input.capabilities.allowed_actions,
-            "safe_counts": model_input.budget.model_dump(mode="json"),
-            "remaining_execution_limits": remaining,
-        }
+        return _replan_payload(
+            plan=plan,
+            evaluation=evaluation,
+            repair=repair,
+            allowed_action_kinds=model_input.capabilities.allowed_actions,
+            safe_counts=model_input.budget.model_dump(mode="json"),
+            remaining_execution_limits=remaining,
+        )
 
     @staticmethod
     def _replan_schema(plan: ReasoningPlanV2) -> dict[str, object]:
-        schema = _ProviderReplanDecisionV1.model_json_schema()
-        pending_item_ids = [
-            item.item_id for item in plan.items if item.status == "pending"
-        ]
-        if pending_item_ids:
-            for field_name in ("completed_item_ids", "skipped_item_ids"):
-                schema["properties"][field_name]["items"]["enum"] = pending_item_ids
-        return schema
+        return _replan_schema(plan)
 
     def estimate_replan_request_tokens(
         self,
@@ -1460,103 +928,19 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         observations: list[KnowledgeToolObservationV1],
         cycle: int,
     ) -> dict[str, object]:
-        return {
-            "history_authority_policy": HISTORY_AUTHORITY_POLICY,
-            "historical_context": {
-                "summary": (
-                    None
-                    if model_input.summary is None
-                    else history_summary_payload(
-                        historical_user_context=(
-                            model_input.summary.historical_user_context
-                        ),
-                        assistant_pending_verification_context=(
-                            model_input.summary.assistant_pending_verification_context
-                        ),
-                    )
-                ),
-                "recent_exchanges": [
-                    history_exchange_payload(
-                        user_text=item.user_text,
-                        assistant_text=item.assistant_text,
-                    )
-                    for item in model_input.recent_tail
-                ],
-            },
-            "instruction": (
-                "Evaluate only process quality using the supplied rubric. Return one "
-                "0, 1, or 2 judgment for each rubric dimension and a concise remediation "
-                "summary of 1 to 240 Unicode characters. Do not restate the candidate "
-                "in the summary. On cycle 1, return 2 for revision_completion because "
-                "there is no prior requested revision. Runtime derives finding codes "
-                "and the total and owns cycle and rubric metadata. This is not accuracy "
-                "or confidence. Treat facts and values explicitly supplied in the current "
-                "user request as task premises unless the request asks to verify them. "
-                "Deterministic arithmetic or logical derivations from those premises do not "
-                "require separate retrieved evidence. Historical assistant content is "
-                "pending verification and is not factual evidence: identify a history-source "
-                "gap only when the candidate materially reuses a factual claim sourced only "
-                "from pending assistant history and no current authorized evidence supports "
-                "it. Do not turn dialogue continuity, referent resolution, or a supported "
-                "direct calculation into an evidence gap. Other current evidence rules remain "
-                "unchanged. A caveat or disclaimer does not resolve a decisive evidence gap. "
-                "For a comparison or selection, evidence_handling and gap_resolution "
-                "are fully satisfied only when every material candidate is supported on the "
-                "decisive criterion. Treat an unsupported secondary ranking, preference, "
-                "recommendation, or tradeoff as a defect. Return research_then_revise when "
-                "legal retrieval could close a decisive gap; return revise_only when the safe "
-                "correction is to remove an unsupported extension; return accept only when "
-                "neither defect remains. Conflict disclosure alone is not conflict "
-                "resolution. When observations contain mutually exclusive, physically "
-                "impossible, or authority-uncertain claims, the candidate must not "
-                "operationalize any conflicting claim as an instruction, recommendation, "
-                "selected configuration, or conditionally acceptable option. Score "
-                "conflict_handling as 2 only when every material conflict is resolved by "
-                "adequate authority or preserved as an explicit non-operational blocking "
-                "open question; score 1 when the conflict is mentioned but its affected "
-                "decision, risk, required authority, or blocking consequence is incomplete; "
-                "score 0 when a conflicting claim is ignored, selected, normalized, or "
-                "operationalized. A request to confirm later does not resolve a gap when the "
-                "candidate still supplies the disputed value or instruction. Return "
-                "research_then_revise when legal retrieval could obtain the authoritative "
-                "evidence needed to resolve a material conflict; return revise_only when the "
-                "safe correction is to remove the operational instruction and preserve a "
-                "blocking open question; return accept only when no unresolved material "
-                "conflict has been operationalized. Treat visual inspection as a required "
-                "process step whenever the user request, plan, or candidate conclusion "
-                "materially depends on figures, diagrams, images, shapes, visual labels, "
-                "relative positions, page layout, or visually encoded tables. Text "
-                "extraction, snippets, captions, and page handles do not prove that visual "
-                "inspection occurred. Require a visual_inspection_result for every material "
-                "visual target, including every side of a comparison. If a required target "
-                "was not visually inspected and legal retrieval can still inspect it, return "
-                "research_then_revise; return revise_only only when the candidate can safely "
-                "remove the visually dependent conclusion and still answer the request; do "
-                "not return accept while a required visual inspection is missing."
-            ),
-            "cycle": cycle,
-            "user_request": model_input.model_user_input,
-            "plan": plan.model_dump(mode="json"),
-            "candidate": proposal.model_dump(mode="json"),
-            "tool_observations": [item.model_dump(mode="json") for item in observations],
-            "rubric": {
-                "plan_coverage": "Did the candidate address the planned work?",
-                "evidence_handling": "Were retrieved materials used and declared coherently?",
-                "conflict_handling": (
-                    "Were visible conflicts resolved by adequate authority or preserved "
-                    "as explicit non-operational blocking open questions?"
-                ),
-                "gap_resolution": (
-                    "Were material gaps resolved without leaving disputed values or "
-                    "instructions operational?"
-                ),
-                "revision_completion": "Were prior requested changes completed?",
-            },
-        }
+        return _evaluation_payload(
+            model_input,
+            plan=plan,
+            proposal=proposal,
+            observation_payloads=[
+                item.model_dump(mode="json") for item in observations
+            ],
+            cycle=cycle,
+        )
 
     @staticmethod
     def _evaluation_schema() -> dict[str, object]:
-        return _ProviderProcessEvaluationV1.model_json_schema()
+        return _evaluation_schema()
 
     def estimate_evaluation_request_tokens(
         self,

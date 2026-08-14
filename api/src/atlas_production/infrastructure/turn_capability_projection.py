@@ -229,6 +229,7 @@ def project_turn_model_capabilities(
     inspect_allowed = tool_allowed and bool(evidence)
     inspect_visual_allowed = (
         tool_allowed
+        and snapshot.route.vision_route is not None
         and remaining_items > 0
         and bool(visuals)
     )

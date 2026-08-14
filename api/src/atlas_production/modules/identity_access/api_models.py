@@ -1,8 +1,17 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from atlas_production.shared.user_messages import MessageReferenceModel
+from .directory_records import validate_directory_transport
+
 
 
 class ActorContext(BaseModel):
@@ -49,7 +58,7 @@ class DirectoryConnectionConfig(StrictIdentityModel):
     provider_type: Literal["active_directory", "ldap"]
     host: str = Field(min_length=1, max_length=253)
     port: int = Field(ge=1, le=65535)
-    tls_mode: Literal["ldaps", "start_tls"]
+    tls_mode: Literal["ldaps", "start_tls", "plain"]
     connect_timeout_seconds: int = Field(ge=1, le=30)
     operation_timeout_seconds: int = Field(ge=1, le=30)
     bind_dn: str = Field(min_length=1, max_length=1000)
@@ -64,6 +73,12 @@ class DirectoryConnectionConfig(StrictIdentityModel):
     title_attribute: str = Field(min_length=1, max_length=200)
     employee_id_attribute: str = Field(min_length=1, max_length=200)
     enabled: bool
+    @model_validator(mode="after")
+    def validate_transport(self) -> "DirectoryConnectionConfig":
+        validate_directory_transport(self.provider_type, self.tls_mode)
+        return self
+
+
 
 
 class DirectoryConnectionCreateRequest(DirectoryConnectionConfig):
@@ -77,7 +92,7 @@ class DirectoryConnectionUpdateRequest(StrictIdentityModel):
     provider_type: Literal["active_directory", "ldap"] | None = None
     host: str | None = Field(default=None, min_length=1, max_length=253)
     port: int | None = Field(default=None, ge=1, le=65535)
-    tls_mode: Literal["ldaps", "start_tls"] | None = None
+    tls_mode: Literal["ldaps", "start_tls", "plain"] | None = None
     connect_timeout_seconds: int | None = Field(default=None, ge=1, le=30)
     operation_timeout_seconds: int | None = Field(default=None, ge=1, le=30)
     bind_dn: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -118,6 +133,46 @@ class DirectoryConnectionListResult(StrictIdentityModel):
 
 class DirectoryConnectionTestResult(StrictIdentityMessageModel):
     validation_status: Literal["passed", "failed"]
+
+class ScopedDirectoryConnectionSummary(StrictIdentityModel):
+    connection_id: str
+    display_name: str
+
+
+class ScopedDirectoryConnectionListResult(StrictIdentityModel):
+    connections: list[ScopedDirectoryConnectionSummary]
+
+
+class ScopedDirectoryUserSearchRequest(StrictIdentityModel):
+    search_mode: Literal["department", "member"]
+    query: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=100, ge=1, le=100)
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("directory search query must not be blank")
+        return normalized
+
+
+class ScopedDirectoryUserCandidate(StrictIdentityModel):
+    external_subject: str
+    username: str
+    display_name: str
+    email: str | None
+
+
+class ScopedDirectoryUserSearchResult(StrictIdentityModel):
+    users: list[ScopedDirectoryUserCandidate]
+    limit_reached: bool
+
+
+class ScopedDirectoryMemberImportResult(StrictIdentityMessageModel):
+    actor_ids: list[str]
+    applied_count: int
+
 
 
 class DirectoryUserSearchRequest(StrictIdentityModel):
@@ -353,6 +408,18 @@ class TeamMembershipCreateRequest(BaseModel):
     member_actor_id: str
     role: Literal["member", "uploader", "admin"] = "member"
     idempotency_key: str
+class TeamDirectoryMemberImportRequest(StrictIdentityModel):
+    external_subjects: list[str] = Field(min_length=1, max_length=100)
+    role: Literal["member", "uploader", "admin"]
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def reject_duplicate_subjects(self) -> "TeamDirectoryMemberImportRequest":
+        if len(self.external_subjects) != len(set(self.external_subjects)):
+            raise ValueError("external subjects must be unique")
+        return self
+
+
 
 
 class AccessDecision(BaseModel):

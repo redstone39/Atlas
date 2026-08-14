@@ -10,6 +10,7 @@ import hashlib
 import struct
 from uuid import uuid4
 import zlib
+from typing import Literal
 
 from atlas_production.infrastructure.provider_key_cipher import (
     AesGcmCredentialCipher,
@@ -170,10 +171,13 @@ class PostgresModelRoutingAdapter:
 
     @contextmanager
     def default_route_scope(
-        self, idempotency_key: str, route_id: str
+        self,
+        idempotency_key: str,
+        route_id: str,
+        purpose: Literal["text", "vision"],
     ) -> Iterator[None]:
         intent = BeginDefaultRouteIntentCommand(self.session_factory).execute(
-            idempotency_key, route_id
+            idempotency_key, route_id, purpose
         )
         selected_connection = (
             self._reader.get_connection(intent.selected.connection_id)
@@ -242,14 +246,18 @@ class PostgresModelRoutingAdapter:
     def linked_routes(self, connection_id: str) -> list[ModelRouteRecord]:
         return self._reader.linked_routes(connection_id, limit=500)
 
-    def default_route(self) -> ModelRouteRecord | None:
+    def default_route(
+        self, purpose: Literal["text", "vision"]
+    ) -> ModelRouteRecord | None:
         intent = self._intent.get()
-        if isinstance(intent, DefaultRouteIntent):
+        if isinstance(intent, DefaultRouteIntent) and intent.purpose == purpose:
             return deepcopy(intent.current_default)
-        return self._reader.default_route()
+        return self._reader.default_route(purpose)
 
     def tested_route(self) -> ModelRouteRecord | None:
         return self._reader.tested_route()
+    def tested_vision_default_route(self) -> ModelRouteRecord | None:
+        return self._reader.tested_vision_default_route()
 
     def is_system_admin(self, actor: UserRecord) -> bool:
         current = IdentityRepository(self.session_factory).get_user(actor.actor_id)
@@ -388,10 +396,27 @@ class PostgresModelRoutingAdapter:
                 raise ModelRoutingCurrentnessConflict(
                     "default route identity changed after intent"
                 )
+            expected_default_field = f"is_{intent.purpose}_default"
+            expected_other_default_field = (
+                "is_vision_default"
+                if intent.purpose == "text"
+                else "is_text_default"
+            )
             route_writes = tuple(
-                ModelRouteWrite(item, current_routes[item.route_id].revision)
+                ModelRouteWrite(
+                    item,
+                    current_routes[item.route_id].revision,
+                    preserve_revision=True,
+                    expected_default=getattr(
+                        current_routes[item.route_id],
+                        expected_default_field,
+                    ),
+                    expected_other_default=getattr(
+                        current_routes[item.route_id],
+                        expected_other_default_field,
+                    ),
+                )
                 for item in routes
-                if current_routes.get(item.route_id) != item
             )
             events = self._events(audits)
             replay = replay_factory(events)
@@ -406,11 +431,22 @@ class PostgresModelRoutingAdapter:
                 selected_connection.enabled,
                 selected_connection.status,
             )
-            FinalizeDefaultRouteCommand(self.session_factory).execute(
-                FinalizeDefaultRouteInput(
-                    route_writes, tuple(events), replay, connection_precondition
+            try:
+                FinalizeDefaultRouteCommand(self.session_factory).execute(
+                    FinalizeDefaultRouteInput(
+                        route_writes,
+                        tuple(events),
+                        replay,
+                        connection_precondition,
+                        intent.purpose,
+                    )
                 )
-            )
+            except ModelRoutingCurrentnessConflict as exc:
+                raise ModelRoutingError(
+                    "configuration_revision_conflict",
+                    "provider.configuration_changed_refresh_and_try_again",
+                    409,
+                ) from exc
             return events
         current_connections = {item.connection_id: item for item in intent.connections}
         current_secrets = {item.connection_id: item for item in intent.secrets}
@@ -444,22 +480,7 @@ class PostgresModelRoutingAdapter:
             )
         return events
 
-    def mark_default(self, route: ModelRouteRecord, audit: ModelRouteAuditCommand) -> tuple[ModelRouteRecord, AuditEventRecord]:
-        previous = self.default_route()
-        selected = deepcopy(route)
-        selected.is_default = True
-        selected.revision += 1
-        routes = [selected]
-        if previous is not None and previous.route_id != selected.route_id:
-            prior = deepcopy(previous)
-            prior.is_default = False
-            prior.revision += 1
-            routes.insert(0, prior)
-        events = self.commit_configuration(connections=[], secrets=[], routes=routes, audits=[audit])
-        return selected, events[0]
 
-    def tested_vision_route(self, route_id: str) -> ModelRouteRecord | None:
-        return self._reader.tested_vision_route(route_id)
 
     def open_attempt(self, route: ModelRouteRecord) -> ProviderAttemptSession:
         snapshot = self._reader.provider_attempt_snapshot(route.route_id)

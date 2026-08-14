@@ -15,6 +15,7 @@ from atlas_production.modules.identity_access.directory_records import (
     DirectoryConnectionRecord,
     DirectoryGatewayError,
     DirectoryPrincipal,
+    validate_directory_transport,
 )
 
 
@@ -57,17 +58,26 @@ class LdapDirectoryGateway:
         self,
         connection: DirectoryConnectionRecord,
         bind_password: str,
-        query: str,
+        *,
+        query: str | None,
+        department: str | None,
         limit: int,
     ) -> tuple[DirectoryPrincipal, ...]:
         self._validate_connection(connection)
-        escaped = escape_filter_chars(query.strip())
-        search_filter = (
-            f"(&{connection.user_object_filter}"
-            f"(|({connection.login_attribute}=*{escaped}*)"
-            f"({connection.display_name_attribute}=*{escaped}*)"
-            f"({connection.email_attribute}=*{escaped}*)))"
-        )
+        if (query is None) == (department is None):
+            raise DirectoryGatewayError("directory_entry_invalid")
+        if query is not None:
+            escaped = escape_filter_chars(query.strip())
+            predicate = (
+                f"(|({connection.login_attribute}=*{escaped}*)"
+                f"({connection.display_name_attribute}=*{escaped}*)"
+                f"({connection.email_attribute}=*{escaped}*))"
+            )
+        else:
+            assert department is not None
+            escaped = escape_filter_chars(department.strip())
+            predicate = f"({connection.department_attribute}={escaped})"
+        search_filter = f"(&{connection.user_object_filter}{predicate})"
         client = self._service_client(connection, bind_password)
         try:
             response = self._search(
@@ -161,20 +171,29 @@ class LdapDirectoryGateway:
         password: str,
     ) -> Any:
         try:
-            custom_ca = self._custom_ca_resolver(connection.connection_id)
-            tls = Tls(
-                validate=ssl.CERT_REQUIRED,
-                version=ssl.PROTOCOL_TLS_CLIENT,
-                ca_certs_data=custom_ca,
-            )
-            server = Server(
-                connection.host,
-                port=connection.port,
-                use_ssl=connection.tls_mode == "ldaps",
-                tls=tls,
-                connect_timeout=connection.connect_timeout_seconds,
-                get_info=NONE,
-            )
+            if connection.tls_mode == "plain":
+                server = Server(
+                    connection.host,
+                    port=connection.port,
+                    use_ssl=False,
+                    connect_timeout=connection.connect_timeout_seconds,
+                    get_info=NONE,
+                )
+            else:
+                custom_ca = self._custom_ca_resolver(connection.connection_id)
+                tls = Tls(
+                    validate=ssl.CERT_REQUIRED,
+                    version=ssl.PROTOCOL_TLS_CLIENT,
+                    ca_certs_data=custom_ca,
+                )
+                server = Server(
+                    connection.host,
+                    port=connection.port,
+                    use_ssl=connection.tls_mode == "ldaps",
+                    tls=tls,
+                    connect_timeout=connection.connect_timeout_seconds,
+                    get_info=NONE,
+                )
             return self._connection_factory(
                 server,
                 user=user,
@@ -428,8 +447,10 @@ class LdapDirectoryGateway:
     def _validate_connection(connection: DirectoryConnectionRecord) -> None:
         if connection.provider_type not in {"active_directory", "ldap"}:
             raise DirectoryGatewayError("directory_entry_invalid")
-        if connection.tls_mode not in {"ldaps", "start_tls"}:
-            raise DirectoryGatewayError("directory_entry_invalid")
+        try:
+            validate_directory_transport(connection.provider_type, connection.tls_mode)
+        except ValueError:
+            raise DirectoryGatewayError("directory_entry_invalid") from None
         if not 1 <= connection.port <= 65535:
             raise DirectoryGatewayError("directory_entry_invalid")
         if not 1 <= connection.connect_timeout_seconds <= 30:

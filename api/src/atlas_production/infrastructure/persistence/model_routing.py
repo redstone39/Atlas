@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping, get_args
+from typing import Any, Literal, Mapping, get_args
 
 from sqlalchemy import (
     Boolean,
@@ -54,7 +54,8 @@ _MODEL_ROUTE_FIELDS = frozenset(
         "enabled",
         "revision",
         "last_tested_at",
-        "is_default",
+        "is_text_default",
+        "is_vision_default",
         "readiness_schema_name",
         "readiness_schema_digest",
     }
@@ -188,10 +189,16 @@ class AtlasModelRouteRow(OrmBase):
     __tablename__ = "atlas_model_routes"
     __table_args__ = (
         Index(
-            "ux_atlas_model_routes_single_default",
-            "is_default",
+            "ux_atlas_model_routes_single_text_default",
+            "is_text_default",
             unique=True,
-            postgresql_where=text("is_default = true"),
+            postgresql_where=text("is_text_default = true"),
+        ),
+        Index(
+            "ux_atlas_model_routes_single_vision_default",
+            "is_vision_default",
+            unique=True,
+            postgresql_where=text("is_vision_default = true"),
         ),
     )
 
@@ -210,7 +217,12 @@ class AtlasModelRouteRow(OrmBase):
     runtime_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     supports_vision: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_tested_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_text_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    is_vision_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     readiness_schema_name: Mapped[str | None] = mapped_column(String, nullable=True)
     readiness_schema_digest: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -446,6 +458,7 @@ def write_invocation_row(
 def runtime_joined_snapshot(
     session: Session,
     route_id: str | None = None,
+    default_purpose: Literal["text", "vision"] = "text",
 ) -> tuple[
     ModelRouteRecord,
     ProviderConnectionRecord,
@@ -479,12 +492,16 @@ def runtime_joined_snapshot(
         )
     )
     if route_id is None:
-        query = query.filter(AtlasModelRouteRow.is_default.is_(True))
+        default_column = (
+            AtlasModelRouteRow.is_text_default
+            if default_purpose == "text"
+            else AtlasModelRouteRow.is_vision_default
+        )
+        query = query.filter(default_column.is_(True))
     else:
         query = query.filter(AtlasModelRouteRow.route_id == route_id)
     route_row, connection_row, secret_row = query.order_by(
-        AtlasModelRouteRow.is_default.desc(),
-        AtlasModelRouteRow.route_id,
+        AtlasModelRouteRow.route_id
     ).first() or (None, None, None)
     if route_row is None:
         return None

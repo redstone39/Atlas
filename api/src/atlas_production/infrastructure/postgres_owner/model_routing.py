@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Callable, cast
+from typing import Callable, Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.persistence import model_routing
@@ -89,14 +89,41 @@ class ProviderConnectionSecretWrite:
 class ModelRouteWrite:
     record: ModelRouteRecord
     expected_revision: int | None
+    preserve_revision: bool = False
+    expected_default: bool | None = None
+    expected_other_default: bool | None = None
 
     def __post_init__(self) -> None:
         if self.expected_revision is None:
+            if (
+                self.preserve_revision
+                or self.expected_default is not None
+                or self.expected_other_default is not None
+            ):
+                raise ValueError(
+                    "new model route cannot preserve a revision or default preimage"
+                )
             if self.record.revision != 1:
                 raise ValueError("new model route revision must start at 1")
             return
-        if self.expected_revision < 1 or self.record.revision != self.expected_revision + 1:
-            raise ValueError("model route write must advance the revision")
+        expected_record_revision = (
+            self.expected_revision
+            if self.preserve_revision
+            else self.expected_revision + 1
+        )
+        if (
+            self.expected_revision < 1
+            or self.record.revision != expected_record_revision
+        ):
+            action = "preserve" if self.preserve_revision else "advance"
+            raise ValueError(f"model route write must {action} the revision")
+        if self.preserve_revision != (
+            self.expected_default is not None
+            and self.expected_other_default is not None
+        ):
+            raise ValueError(
+                "revision-preserving route write requires both default preimages"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +156,7 @@ class _ModelRoutingWriteBatch:
     default_route_connection_precondition: (
         DefaultRouteConnectionPrecondition | None
     ) = None
+    default_purpose: Literal["text", "vision"] | None = None
     connection_disable_preconditions: tuple[
         ConnectionDisablePrecondition, ...
     ] = ()
@@ -321,7 +349,10 @@ class _ModelRoutingCommandCoordinator:
                 select(AtlasModelRouteRow)
                 .where(
                     AtlasModelRouteRow.connection_id == disable.connection_id,
-                    AtlasModelRouteRow.is_default.is_(True),
+                    (
+                        AtlasModelRouteRow.is_text_default.is_(True)
+                        | AtlasModelRouteRow.is_vision_default.is_(True)
+                    ),
                 )
                 .order_by(AtlasModelRouteRow.route_id)
                 .with_for_update()
@@ -400,6 +431,7 @@ class _ModelRoutingCommandCoordinator:
                     "Provider connection secret version changed"
                 )
 
+        purpose = change_set.default_purpose
         for write in change_set.routes:
             current = session.scalar(
                 select(AtlasModelRouteRow)
@@ -413,30 +445,62 @@ class _ModelRoutingCommandCoordinator:
                     )
             elif current is None or current.revision != write.expected_revision:
                 raise ModelRoutingCurrentnessConflict("model route revision changed")
+            if write.expected_revision is not None:
+                if write.preserve_revision:
+                    if purpose is None:
+                        raise ModelRoutingCurrentnessConflict(
+                            "revision-preserving route write requires a default purpose"
+                        )
+                    other_purpose = "vision" if purpose == "text" else "text"
+                    if (
+                        getattr(current, f"is_{purpose}_default")
+                        != write.expected_default
+                        or getattr(current, f"is_{other_purpose}_default")
+                        != write.expected_other_default
+                    ):
+                        raise ModelRoutingCurrentnessConflict(
+                            "model route default preimage changed"
+                        )
+                elif (
+                    current.is_text_default != write.record.is_text_default
+                    or current.is_vision_default != write.record.is_vision_default
+                ):
+                    raise ModelRoutingCurrentnessConflict(
+                        "model route default selection changed"
+                    )
 
-        selected_defaults = [
-            write.record for write in change_set.routes if write.record.is_default
-        ]
-        if len(selected_defaults) > 1:
-            raise ModelRoutingCurrentnessConflict(
-                "model-routing change set contains multiple defaults"
-            )
-        if selected_defaults:
-            current_default = session.scalar(
-                select(AtlasModelRouteRow)
-                .where(AtlasModelRouteRow.is_default.is_(True))
-                .with_for_update()
-            )
-            desired = selected_defaults[0].route_id
-            route_ids = {write.record.route_id for write in change_set.routes}
-            if (
-                current_default is not None
-                and current_default.route_id != desired
-                and current_default.route_id not in route_ids
-            ):
+        if purpose is not None:
+            default_field = f"is_{purpose}_default"
+            selected_defaults = [
+                write.record
+                for write in change_set.routes
+                if getattr(write.record, default_field)
+            ]
+            if len(selected_defaults) > 1:
                 raise ModelRoutingCurrentnessConflict(
-                    "default route change omits the prior default"
+                    f"model-routing change set contains multiple {purpose} defaults"
                 )
+            if selected_defaults:
+                default_column = (
+                    AtlasModelRouteRow.is_text_default
+                    if purpose == "text"
+                    else AtlasModelRouteRow.is_vision_default
+                )
+                current_default = session.scalar(
+                    select(AtlasModelRouteRow)
+                    .where(default_column.is_(True))
+                    .with_for_update()
+                )
+                desired = selected_defaults[0].route_id
+                route_ids = {write.record.route_id for write in change_set.routes}
+                if (
+                    current_default is not None
+                    and current_default.route_id != desired
+                    and current_default.route_id not in route_ids
+                ):
+                    raise ModelRoutingCurrentnessConflict(
+                        f"{purpose} default route change omits the prior default"
+                    )
 
         for replay in change_set.replays:
             current = session.scalar(
@@ -487,23 +551,33 @@ class _ModelRoutingCommandCoordinator:
         for write in change_set.provider_secrets:
             session.merge(AtlasProviderConnectionSecretRow(**asdict(write.record)))
 
-        non_defaults = sorted(
-            (write.record for write in change_set.routes if not write.record.is_default),
-            key=lambda record: record.route_id,
-        )
-        for route in non_defaults:
-            session.merge(
-                AtlasModelRouteRow(**model_routing._model_route_payload(route))
+        purpose = change_set.default_purpose
+        if purpose is None:
+            ordered_routes = sorted(
+                (write.record for write in change_set.routes),
+                key=lambda record: record.route_id,
             )
-        if non_defaults:
-            session.flush()
-        for write in change_set.routes:
-            if write.record.is_default:
+            for route in ordered_routes:
                 session.merge(
-                    AtlasModelRouteRow(
-                        **model_routing._model_route_payload(write.record)
-                    )
+                    AtlasModelRouteRow(**model_routing._model_route_payload(route))
                 )
+                session.flush()
+        else:
+            default_field = f"is_{purpose}_default"
+            ordered_routes = sorted(
+                (write.record for write in change_set.routes),
+                key=lambda record: (
+                    getattr(record, default_field),
+                    record.route_id,
+                ),
+            )
+            for route in ordered_routes:
+                session.execute(
+                    update(AtlasModelRouteRow)
+                    .where(AtlasModelRouteRow.route_id == route.route_id)
+                    .values(**{default_field: getattr(route, default_field)})
+                )
+                session.flush()
 
         for replay in change_set.replays:
             session.add(
@@ -615,11 +689,18 @@ class ModelRoutingReadModel:
             ).all()
             return [_route_record(row) for row in rows]
 
-    def default_route(self) -> ModelRouteRecord | None:
+    def default_route(
+        self, purpose: Literal["text", "vision"]
+    ) -> ModelRouteRecord | None:
+        default_column = (
+            AtlasModelRouteRow.is_text_default
+            if purpose == "text"
+            else AtlasModelRouteRow.is_vision_default
+        )
         with self.session_factory() as session:
             row = session.scalar(
                 select(AtlasModelRouteRow)
-                .where(AtlasModelRouteRow.is_default.is_(True))
+                .where(default_column.is_(True))
                 .order_by(AtlasModelRouteRow.route_id)
                 .limit(1)
             )
@@ -629,10 +710,11 @@ class ModelRoutingReadModel:
         with self.session_factory() as session:
             snapshot = model_routing.runtime_joined_snapshot(session)
             return snapshot[0] if snapshot is not None else None
-
-    def tested_vision_route(self, route_id: str) -> ModelRouteRecord | None:
+    def tested_vision_default_route(self) -> ModelRouteRecord | None:
         with self.session_factory() as session:
-            snapshot = model_routing.runtime_joined_snapshot(session, route_id)
+            snapshot = model_routing.runtime_joined_snapshot(
+                session, default_purpose="vision"
+            )
             if snapshot is None or not snapshot[0].supports_vision:
                 return None
             return snapshot[0]
@@ -775,18 +857,25 @@ class DefaultRouteIntent:
     replay: ModelRoutingReplayRecord | None
     selected: ModelRouteRecord | None
     current_default: ModelRouteRecord | None
+    purpose: Literal["text", "vision"]
 
 
 @dataclass(frozen=True, slots=True)
 class BeginDefaultRouteIntentCommand:
     session_factory: SessionFactory
 
-    def execute(self, idempotency_key: str, route_id: str) -> DefaultRouteIntent:
+    def execute(
+        self,
+        idempotency_key: str,
+        route_id: str,
+        purpose: Literal["text", "vision"],
+    ) -> DefaultRouteIntent:
         reader = ModelRoutingReadModel(self.session_factory)
         return DefaultRouteIntent(
             reader.get_replay(idempotency_key),
             reader.get_route(route_id),
-            reader.default_route(),
+            reader.default_route(purpose),
+            purpose,
         )
 
 
@@ -863,6 +952,7 @@ class FinalizeDefaultRouteInput:
     audit_events: tuple[AuditEventRecord, ...]
     replay: ModelRoutingReplayRecord | None = None
     connection_precondition: DefaultRouteConnectionPrecondition | None = None
+    purpose: Literal["text", "vision"] = "text"
 
 
 @dataclass(frozen=True, slots=True)
@@ -878,6 +968,7 @@ class FinalizeDefaultRouteCommand:
                 default_route_connection_precondition=(
                     request.connection_precondition
                 ),
+                default_purpose=request.purpose,
             )
         )
 

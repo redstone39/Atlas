@@ -58,6 +58,7 @@ from atlas_production.modules.turn_runtime.public import (
     TurnRuntimeReplayConflict,
     TurnRuntimeTerminalConflict,
     TurnRouteSnapshotV2,
+    VisionRouteSnapshotV1,
 )
 
 
@@ -151,7 +152,34 @@ def _route_model(row: AtlasTurnExecutionRow) -> TurnRouteSnapshotV2:
         max_output_tokens_per_invocation=row.max_output_tokens_per_invocation,
         max_tool_result_tokens_per_execution=row.max_tool_result_tokens_per_execution,
         max_total_tokens_per_conversation=row.max_total_tokens_per_conversation,
+        vision_route=_vision_route_model(row),
     )
+def _vision_route_model(
+    row: AtlasTurnExecutionRow,
+) -> VisionRouteSnapshotV1 | None:
+    if row.vision_route_id is None:
+        return None
+    return VisionRouteSnapshotV1(
+        route_id=row.vision_route_id,
+        route_revision=row.vision_route_revision,
+        runtime_policy_revision=row.vision_runtime_policy_revision,
+        tokenizer_profile=row.vision_tokenizer_profile,
+        context_window_tokens=row.vision_context_window_tokens,
+        max_input_tokens_per_invocation=(
+            row.vision_max_input_tokens_per_invocation
+        ),
+        max_output_tokens_per_invocation=(
+            row.vision_max_output_tokens_per_invocation
+        ),
+        max_tool_result_tokens_per_execution=(
+            row.vision_max_tool_result_tokens_per_execution
+        ),
+        max_total_tokens_per_conversation=(
+            row.vision_max_total_tokens_per_conversation
+        ),
+    )
+
+
 
 
 def _release_model(row: AtlasTurnReleaseIntentRow) -> ReleaseIntentV1:
@@ -469,6 +497,16 @@ class PostgresTurnRuntimeOwner:
 
             policy = command.route_policy
             lease_policy = command.lease_policy
+            route_values = command.route.model_dump(exclude={"vision_route"})
+            vision_route = command.route.vision_route
+            vision_route_values = (
+                {}
+                if vision_route is None
+                else {
+                    f"vision_{key}": value
+                    for key, value in vision_route.model_dump().items()
+                }
+            )
             inserted_id = session.scalar(
                 insert(AtlasTurnExecutionRow)
                 .values(
@@ -485,7 +523,8 @@ class PostgresTurnRuntimeOwner:
                     state=ExecutionState.ALLOCATED.value,
                     version=1,
                     **policy.model_dump(),
-                    **command.route.model_dump(),
+                    **route_values,
+                    **vision_route_values,
                     **lease_policy.model_dump(),
                     grant_ref=None,
                     catalog_ref=None,

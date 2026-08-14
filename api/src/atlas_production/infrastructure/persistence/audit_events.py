@@ -87,6 +87,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "member_actor_id",
         "member_actor_type",
         "model_invocation_refs",
+        "model_route_purpose",
         "new_default_route_id",
         "next_attempt",
         "operation",

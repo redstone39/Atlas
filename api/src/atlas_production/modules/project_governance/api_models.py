@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class ProjectCreateRequest(BaseModel):
     project_id: str
@@ -61,6 +61,20 @@ class ProjectAccessGrantCreateRequest(BaseModel):
     role: Literal["viewer", "contributor", "admin"]
     effect: Literal["allow", "deny"]
     idempotency_key: str
+class ProjectDirectoryMemberImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_subjects: list[str] = Field(min_length=1, max_length=100)
+    role: Literal["viewer", "contributor", "admin"]
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def reject_duplicate_subjects(self) -> "ProjectDirectoryMemberImportRequest":
+        if len(self.external_subjects) != len(set(self.external_subjects)):
+            raise ValueError("external subjects must be unique")
+        return self
+
+
 
 
 class ProjectAccessGrantUpdateRequest(BaseModel):

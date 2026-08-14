@@ -394,8 +394,10 @@ class Carrier:
 
 
 class ModelRoutes:
-    def __init__(self):
+    def __init__(self, vision_route=None):
         self.calls = 0
+        self.vision_calls = 0
+        self.vision_route = vision_route
 
     def tested_route(self):
         self.calls += 1
@@ -423,6 +425,9 @@ class ModelRoutes:
                 turn_timeout_seconds=240,
             ),
         )
+    def tested_vision_default_route(self):
+        self.vision_calls += 1
+        return self.vision_route
 
 
 class ContextPreparer:
@@ -868,10 +873,54 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
         "max_output_tokens_per_invocation": 16000,
         "max_tool_result_tokens_per_execution": 64000,
         "max_total_tokens_per_conversation": 1000000,
+        "vision_route": None,
     }
     assert routes.calls == 1
     assert usage.calls == ["conversation-1"]
     assert contexts.projection_create_calls == 1
+
+
+def test_fresh_turn_pins_optional_vision_route_and_replay_does_not_reread() -> None:
+    routes = ModelRoutes()
+    vision_route = routes.tested_route()
+    routes.calls = 0
+    vision_route.route_id = "vision-route-b"
+    vision_route.revision = 7
+    vision_route.runtime_policy.revision = 3
+    vision_route.runtime_policy.tokenizer_profile = "o200k_base"
+    vision_route.runtime_policy.context_window_tokens = 128000
+    vision_route.runtime_policy.max_input_tokens_per_invocation = 96000
+    vision_route.runtime_policy.max_output_tokens_per_invocation = 12000
+    vision_route.runtime_policy.max_tool_result_tokens_per_execution = 24000
+    vision_route.runtime_policy.max_total_tokens_per_conversation = 500000
+    routes.vision_route = vision_route
+    application, runtime, _source = _app(Carrier(), model_routes=routes)
+    command = WorkspaceTurnCreateV1(
+        input_text="question",
+        idempotency_key="pin-vision-route",
+    )
+
+    first = application.accept_turn(ACTOR, "conversation-1", command)
+    pinned = runtime.current.route.vision_route
+    assert pinned is not None
+    assert pinned.model_dump() == {
+        "route_id": "vision-route-b",
+        "route_revision": 7,
+        "runtime_policy_revision": 3,
+        "tokenizer_profile": "o200k_base",
+        "context_window_tokens": 128000,
+        "max_input_tokens_per_invocation": 96000,
+        "max_output_tokens_per_invocation": 12000,
+        "max_tool_result_tokens_per_execution": 24000,
+        "max_total_tokens_per_conversation": 500000,
+    }
+
+    routes.vision_route.route_id = "vision-route-c"
+    replay = application.accept_turn(ACTOR, "conversation-1", command)
+    assert replay == first
+    assert runtime.current.route.vision_route == pinned
+    assert routes.calls == 1
+    assert routes.vision_calls == 1
 
 
 def test_fresh_deep_turn_pins_mode_and_updates_conversation_default() -> None:
@@ -1446,7 +1495,76 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
     assert sentinel not in repr(answer_routing.requests[0])
 
 
-def test_questionable_answer_is_excluded_and_invalidates_legacy_authority_digest() -> None:
+def test_context_excludes_current_retry_chain_before_ordered_runtime_reads() -> None:
+    application, runtime, _source = _app(Carrier())
+    application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(input_text="current", idempotency_key="current-key"),
+    )
+    current = application._conversations.member
+    assert current is not None
+
+    def member(turn_id: str, execution_id: str, ordinal: int):
+        return ConversationTurnMemberV1(
+            turn_id=turn_id,
+            conversation_id="conversation-1",
+            execution_id=execution_id,
+            role="user",
+            ordinal=ordinal,
+            created_at=NOW,
+        )
+
+    excluded_root = member("excluded-root", "excluded-root-execution", 1)
+    excluded_retry = member("excluded-retry", "excluded-retry-execution", 2)
+    eligible_first = member("eligible-first", "eligible-first-execution", 3)
+    eligible_second = member("eligible-second", "eligible-second-execution", 4)
+    current = current.model_copy(update={"ordinal": 5})
+    application._conversations.candidate_turns = lambda _conversation_id: [
+        eligible_second,
+        excluded_retry,
+        current,
+        excluded_root,
+        eligible_first,
+    ]
+    application._retry_lineage.retry_sources = lambda _conversation_id: {
+        excluded_retry.turn_id: excluded_root.turn_id,
+        current.turn_id: excluded_retry.turn_id,
+    }
+    for item in (eligible_first, eligible_second):
+        runtime.executions[item.execution_id] = runtime.current.model_copy(
+            update={
+                "execution_id": item.execution_id,
+                "turn_id": item.turn_id,
+                "state": ExecutionState.TERMINAL_FAILED,
+                "context_pack_ref": None,
+            }
+        )
+
+    snapshot_calls: list[str] = []
+    original_snapshot = runtime.snapshot
+
+    def recording_snapshot(execution_id: str):
+        snapshot_calls.append(execution_id)
+        return original_snapshot(execution_id)
+
+    runtime.snapshot = recording_snapshot
+    command = application._context_command(
+        snapshot=runtime.current,
+        actor_id="actor-1",
+        input_text="current",
+    )
+
+    assert command.recent_tail == []
+    assert snapshot_calls[:2] == [
+        eligible_first.execution_id,
+        eligible_second.execution_id,
+    ]
+    assert excluded_root.execution_id not in snapshot_calls
+    assert excluded_retry.execution_id not in snapshot_calls
+
+
+def test_questionable_answer_is_pending_and_invalidates_legacy_authority_digest() -> None:
     contexts = Contexts()
     application, runtime, _source = _app(Carrier(), contexts=contexts)
     application.accept_turn(

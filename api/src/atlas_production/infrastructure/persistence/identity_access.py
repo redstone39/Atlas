@@ -59,7 +59,7 @@ class AtlasDirectoryConnectionRow(OrmBase):
             name="ck_atlas_directory_connection_provider_type",
         ),
         CheckConstraint(
-            "tls_mode IN ('ldaps', 'start_tls')",
+            "tls_mode IN ('ldaps', 'start_tls', 'plain')",
             name="ck_atlas_directory_connection_tls_mode",
         ),
         CheckConstraint("priority >= 0", name="ck_atlas_directory_connection_priority"),

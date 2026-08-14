@@ -67,7 +67,11 @@ from atlas_production.modules.retrieval.public import (
     VisualImagePayloadV1,
 )
 from atlas_production.providers import ProviderError
-from atlas_production.modules.turn_runtime.public import RoutePolicyV1, TurnRouteSnapshotV2
+from atlas_production.modules.turn_runtime.public import (
+    RoutePolicyV1,
+    TurnRouteSnapshotV2,
+    VisionRouteSnapshotV1,
+)
 from tests.test_turn_model_loop import Runtime
 
 
@@ -782,9 +786,10 @@ class _EvaluatorRouting:
         self.opened_route_ids.append(route_id)
         if self.open_error is not None:
             raise self.open_error
+        selected_route_id = route_id or "route-1"
         return SimpleNamespace(
             route=SimpleNamespace(
-                route_id="route-1",
+                route_id=selected_route_id,
                 revision=1,
                 supports_vision=True,
                 runtime_policy=self.policy,
@@ -832,6 +837,25 @@ def _route_snapshot(routing: _EvaluatorRouting) -> TurnRouteSnapshotV2:
         ),
         max_total_tokens_per_conversation=(
             routing.policy.max_total_tokens_per_conversation
+        ),
+        vision_route=VisionRouteSnapshotV1(
+            route_id="vision-route-1",
+            route_revision=1,
+            runtime_policy_revision=1,
+            tokenizer_profile=routing.policy.tokenizer_profile,
+            context_window_tokens=routing.policy.context_window_tokens,
+            max_input_tokens_per_invocation=(
+                routing.policy.max_input_tokens_per_invocation
+            ),
+            max_output_tokens_per_invocation=(
+                routing.policy.max_output_tokens_per_invocation
+            ),
+            max_tool_result_tokens_per_execution=(
+                routing.policy.max_tool_result_tokens_per_execution
+            ),
+            max_total_tokens_per_conversation=(
+                routing.policy.max_total_tokens_per_conversation
+            ),
         ),
     )
 
@@ -1101,6 +1125,7 @@ def test_evaluator_receives_exact_visual_evidence_without_persisting_semantics()
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
         route=_route_snapshot(routing),
     )
+    assert routing.opened_route_ids == ["vision-route-1"]
 
     image_parts = [
         part
@@ -1113,6 +1138,40 @@ def test_evaluator_receives_exact_visual_evidence_without_persisting_semantics()
     assert image_parts[0].content == image
     assert image_parts[0].digest == digest
     assert "visual_images" not in subset.model_dump(mode="json")
+
+
+def test_evaluator_fails_closed_before_visual_request_without_pinned_route() -> None:
+    image = b"exact-rendered-image"
+    digest = hashlib.sha256(image).hexdigest()
+    subset = _declared_subset().model_copy(
+        update={
+            "visual_images": [
+                VisualImagePayloadV1(
+                    visual_handle=HANDLE,
+                    image_ref=f"image:{digest}",
+                    image_digest=digest,
+                    width=800,
+                    height=600,
+                    content=image,
+                )
+            ]
+        }
+    )
+    routing = _EvaluatorRouting(_completed({"item_outcomes": ["aligned"]}))
+    route = _route_snapshot(routing).model_copy(update={"vision_route": None})
+
+    with pytest.raises(ClaimAssessmentUnavailable) as error:
+        StrictPostHocClaimEvaluator(routing, record_invocations=False).assess(
+            execution_id="execution-1",
+            finalized_answer=_answer(),
+            declared_evidence_subset=subset,
+            deadline_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+            route=route,
+        )
+
+    assert error.value.reason_code == "route_unavailable"
+    assert routing.opened_route_ids == []
+    assert routing.calls == 0
 
 
 def test_evaluator_v2_payload_contains_only_declared_model_visible_subset() -> None:

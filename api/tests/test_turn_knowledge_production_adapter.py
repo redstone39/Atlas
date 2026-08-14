@@ -241,10 +241,11 @@ def _backend_document() -> BackendCatalogDocument:
 
 
 def test_production_adapter_is_read_only_and_has_no_owner_repository_calls() -> None:
-    source = (
-        Path(__file__).parents[1]
-        / "src/atlas_production/infrastructure/postgres_turn_knowledge_production.py"
-    ).read_text()
+    infrastructure = Path(__file__).parents[1] / "src/atlas_production/infrastructure"
+    source = "\n".join(
+        path.read_text()
+        for path in sorted(infrastructure.glob("postgres_turn_knowledge_*.py"))
+    )
     assert "postgres_owner" not in source
     assert "with_for_update" not in source
     assert "pg_advisory" not in source
@@ -306,7 +307,7 @@ def test_selected_scope_empty_intersection_never_falls_back_to_all(
         return set()
 
     monkeypatch.setattr(
-        "atlas_production.infrastructure.postgres_turn_knowledge_production.read_effective_document_scope",
+        "atlas_production.infrastructure.postgres_turn_knowledge_rows.read_effective_document_scope",
         _scope,
     )
     source = PostgresProductionKnowledgeRowSource(lambda: SimpleNamespace())

@@ -368,8 +368,16 @@ def build_api_composition(
     agent_access, agent_query_authority = build_postgres_agent_access(
         session_factory
     )
-    team_access = build_postgres_team_access(session_factory)
-    project_governance = build_postgres_project_governance(session_factory)
+    team_access = build_postgres_team_access(
+        session_factory,
+        directory_identity,
+        identity_repository,
+    )
+    project_governance = build_postgres_project_governance(
+        session_factory,
+        directory_identity,
+        identity_repository,
+    )
     audit_reader, audit_writer = build_postgres_audit_adapter(session_factory)
     agent_runtime = AgentRuntimeApplication(agent_query_authority, audit_writer)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ...providers import NativeJsonSchema
 from .provider_contracts import ProviderCompleted, ProviderConversationOutcome, ProviderConversationRequest
@@ -32,6 +32,7 @@ class ModelRoutingRuntime(Protocol):
     ) -> ProviderAttemptSession: ...
 
     def tested_route(self) -> ModelRouteRecord | None: ...
+    def tested_vision_default_route(self) -> ModelRouteRecord | None: ...
 
     def tested_vision_route(self, route_id: str) -> ModelRouteRecord | None: ...
 
@@ -85,7 +86,10 @@ class ModelRoutingRepository(Protocol):
     def mutation_scope(self, connection_ids: list[str]) -> AbstractContextManager[None]: ...
 
     def default_route_scope(
-        self, idempotency_key: str, route_id: str
+        self,
+        idempotency_key: str,
+        route_id: str,
+        purpose: Literal["text", "vision"],
     ) -> AbstractContextManager[None]: ...
 
     def get_replay(
@@ -110,10 +114,12 @@ class ModelRoutingRepository(Protocol):
 
     def linked_routes(self, connection_id: str) -> list[ModelRouteRecord]: ...
 
-    def default_route(self) -> ModelRouteRecord | None: ...
+    def default_route(
+        self, purpose: Literal["text", "vision"]
+    ) -> ModelRouteRecord | None: ...
 
-    def tested_route(self) -> ModelRouteRecord | None: ...
 
+    def tested_vision_default_route(self) -> ModelRouteRecord | None: ...
     def is_system_admin(self, actor: UserRecord) -> bool: ...
 
     def encrypt_secret(
@@ -156,11 +162,6 @@ class ModelRoutingRepository(Protocol):
         ] | None = None,
     ) -> list[AuditEventRecord]: ...
 
-    def mark_default(
-        self,
-        route: ModelRouteRecord,
-        audit: ModelRouteAuditCommand,
-    ) -> tuple[ModelRouteRecord, AuditEventRecord]: ...
 
     def open_attempt(self, route: ModelRouteRecord) -> ProviderAttemptSession: ...
 

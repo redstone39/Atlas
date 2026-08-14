@@ -29,6 +29,10 @@ from atlas_production.modules.identity_access.team_contracts import (
     TeamAuditCommand,
 )
 from atlas_production.modules.identity_access.team_ports import TeamAccessRepository
+from atlas_production.modules.identity_access.directory_ports import (
+    ScopedDirectoryIdentityCapability,
+    ScopedDirectoryImportCommitPort,
+)
 from atlas_production.modules.identity_access.team_service import TeamAccessService
 from atlas_production.rbac import TEAM_ROLE_ORDER
 from atlas_production.shared.public import AuditEventRecord
@@ -376,8 +380,14 @@ class PostgresTeamAccessRepository(TeamAccessRepository):
 
 def build_postgres_team_access(
     session_factory: SessionFactory,
+    directory_identity: ScopedDirectoryIdentityCapability,
+    directory_import_commit: ScopedDirectoryImportCommitPort,
 ) -> TeamAccessService:
-    return TeamAccessService(PostgresTeamAccessRepository(session_factory))
+    return TeamAccessService(
+        PostgresTeamAccessRepository(session_factory),
+        directory_identity,
+        directory_import_commit,
+    )
 
 
 __all__ = [

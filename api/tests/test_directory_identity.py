@@ -3,9 +3,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from atlas_production.infrastructure.envelope_cipher import AesGcmEnvelopeCipher
 from atlas_production.app import create_app
@@ -15,6 +17,8 @@ from atlas_production.modules.identity_access.api_models import (
     DirectoryConnectionCreateRequest,
     DirectoryUserImportRequest,
     LoginRequest,
+    ScopedDirectoryUserSearchRequest,
+    TeamDirectoryMemberImportRequest,
 )
 from atlas_production.modules.identity_access.contracts import IdentityAccessError
 from atlas_production.modules.identity_access.directory_records import (
@@ -24,10 +28,30 @@ from atlas_production.modules.identity_access.directory_records import (
 from atlas_production.modules.identity_access.directory_service import (
     DirectoryIdentityService,
 )
-from atlas_production.modules.identity_access.records import UserRecord
-from atlas_production.modules.identity_access.service import IdentityAccessService
+from atlas_production.modules.identity_access.records import (
+    PermissionGrantRecord,
+    TeamMembershipRecord,
+    TeamRecord,
+    UserRecord,
+)
 from atlas_production.modules.identity_access.security import password_digest
-from atlas_production.shared.public import AuditEventRecord, utc_now_iso
+from atlas_production.modules.identity_access.service import IdentityAccessService
+from atlas_production.modules.identity_access.team_contracts import TeamAccessError
+from atlas_production.modules.identity_access.team_service import TeamAccessService
+from atlas_production.modules.project_governance.api_models import (
+    ProjectDirectoryMemberImportRequest,
+)
+from atlas_production.modules.project_governance.contracts import (
+    ProjectGovernanceError,
+)
+from atlas_production.modules.project_governance.records import ProjectRecord
+from atlas_production.modules.project_governance.service import (
+    ProjectGovernanceService,
+)
+from atlas_production.shared.public import (
+    AuditEventRecord,
+    utc_now_iso,
+)
 from atlas_production.modules.identity_access.api_models import SessionState
 
 
@@ -129,8 +153,11 @@ class FakeRepository:
         value = self.users.get(actor_id)
         return deepcopy(value) if value else None
 
-    def list_users(self):
-        return deepcopy(list(self.users.values()))
+    def list_users(self, *, limit=500, after_actor_id=None):
+        values = sorted(self.users.values(), key=lambda item: item.actor_id)
+        if after_actor_id is not None:
+            values = [item for item in values if item.actor_id > after_actor_id]
+        return deepcopy(values[:limit])
 
     def put_user(self, user):
         self.users[user.actor_id] = deepcopy(user)
@@ -282,13 +309,30 @@ class FakeGateway:
         if connection.connection_id in self.outages:
             raise DirectoryGatewayError("directory_unavailable")
 
-    def search_users(self, connection, bind_password, query, limit):
+    def search_users(
+        self,
+        connection,
+        bind_password,
+        *,
+        query,
+        department,
+        limit,
+    ):
         self.test_connection(connection, bind_password)
-        query = query.casefold()
+        if department is not None:
+            normalized = department.casefold()
+            return tuple(
+                item
+                for item in self.principals.values()
+                if (item.department or "").casefold() == normalized
+            )[:limit]
+        normalized = (query or "").casefold()
         return tuple(
             item
             for item in self.principals.values()
-            if query in item.username.casefold() or query in item.display_name.casefold()
+            if normalized in item.username.casefold()
+            or normalized in item.display_name.casefold()
+            or normalized in (item.email or "").casefold()
         )[:limit]
 
     def fetch_user(self, connection, bind_password, external_subject):
@@ -378,6 +422,365 @@ def test_admin_connection_import_is_all_or_nothing_and_secrets_are_redacted() ->
         )
     assert conflict.value.status_code == 409
     assert (repository.users, repository.identities, repository.audits) == before
+
+
+def test_scoped_directory_search_query_trims_before_length_validation() -> None:
+    assert ScopedDirectoryUserSearchRequest(
+        search_mode="member",
+        query=f" {'x' * 200} ",
+    ).query == "x" * 200
+    assert ScopedDirectoryUserSearchRequest(
+        search_mode="member",
+        query=" x ",
+    ).query == "x"
+    with pytest.raises(ValidationError):
+        ScopedDirectoryUserSearchRequest(search_mode="member", query="   ")
+    with pytest.raises(ValidationError):
+        ScopedDirectoryUserSearchRequest(
+            search_mode="member",
+            query=f" {'x' * 201} ",
+        )
+def test_scoped_directory_search_and_preparation_minimize_and_reuse_identity() -> None:
+    service, repository, gateway = service_fixture()
+    admin = repository.users["admin"]
+    service.create_connection(admin, create_payload())
+    disabled_payload = create_payload("disabled", priority=20).model_copy(
+        update={"enabled": False}
+    )
+    service.create_connection(admin, disabled_payload)
+
+    sources = service.list_scoped_connections()
+    assert sources.model_dump() == {
+        "connections": [{"connection_id": "main", "display_name": "Main"}]
+    }
+    with pytest.raises(IdentityAccessError) as disabled_search:
+        service.search_scoped_users(
+            "disabled",
+            ScopedDirectoryUserSearchRequest(search_mode="member", query="Ada"),
+        )
+    assert disabled_search.value.status_code == 409
+    assert disabled_search.value.message_code == "directory.import_entry_unavailable"
+    with pytest.raises(IdentityAccessError) as disabled_import:
+        service.prepare_scoped_import("disabled", ["subject-ada"])
+    assert disabled_import.value.status_code == 409
+    assert disabled_import.value.message_code == "directory.import_entry_unavailable"
+
+    gateway.principals["subject-disabled"] = DirectoryPrincipal(
+        "subject-disabled",
+        "disabled",
+        "Disabled User",
+        "disabled@example.test",
+        (),
+        "Engineering",
+        None,
+        None,
+        False,
+    )
+    department = service.search_scoped_users(
+        "main",
+        ScopedDirectoryUserSearchRequest(
+            search_mode="department",
+            query="  Engineering  ",
+        ),
+    )
+    assert [candidate.external_subject for candidate in department.users] == [
+        "subject-ada",
+        "subject-grace",
+    ]
+    assert set(department.users[0].model_dump()) == {
+        "external_subject",
+        "username",
+        "display_name",
+        "email",
+    }
+
+    for index in range(101):
+        gateway.principals[f"subject-user-{index:03d}"] = DirectoryPrincipal(
+            f"subject-user-{index:03d}",
+            f"user-{index:03d}",
+            f"Directory User {index:03d}",
+            f"user-{index:03d}@example.test",
+            (),
+            "Other",
+            None,
+            None,
+            True,
+        )
+    capped = service.search_scoped_users(
+        "main",
+        ScopedDirectoryUserSearchRequest(search_mode="member", query="user-"),
+    )
+    assert len(capped.users) == 100
+    assert capped.limit_reached is True
+    assert all(candidate.username != "disabled" for candidate in capped.users)
+
+    prepared = service.prepare_scoped_import(
+        "main",
+        ["subject-ada", "subject-grace"],
+    )
+    assert len(prepared.actor_ids) == 2
+    assert len(prepared.new_users) == 2
+    assert len(prepared.new_external_identities) == 2
+    for user in prepared.new_users:
+        repository.put_user(user)
+    for identity in prepared.new_external_identities:
+        repository.put_external_identity(identity)
+
+    replay = service.prepare_scoped_import(
+        "main",
+        ["subject-ada", "subject-grace"],
+    )
+    assert replay.actor_ids == prepared.actor_ids
+    assert replay.new_users == ()
+    assert replay.new_external_identities == ()
+
+    repository.users[prepared.actor_ids[0]] = replace(
+        repository.users[prepared.actor_ids[0]],
+        active=False,
+    )
+    with pytest.raises(IdentityAccessError) as inactive:
+        service.prepare_scoped_import("main", ["subject-ada"])
+    assert inactive.value.status_code == 409
+
+    secondary = create_payload("secondary", priority=30)
+    service.create_connection(admin, secondary)
+    cross_source = service.prepare_scoped_import("secondary", ["subject-grace"])
+    assert cross_source.actor_ids != (prepared.actor_ids[1],)
+
+
+def test_scoped_directory_preparation_fails_before_any_write() -> None:
+    service, repository, gateway = service_fixture()
+    admin = repository.users["admin"]
+    service.create_connection(admin, create_payload())
+    before = deepcopy((repository.users, repository.identities, repository.audits))
+
+    with pytest.raises(IdentityAccessError) as missing:
+        service.prepare_scoped_import("main", ["missing-subject"])
+    assert missing.value.status_code == 409
+    assert (repository.users, repository.identities, repository.audits) == before
+
+    gateway.outages.add("main")
+    with pytest.raises(IdentityAccessError) as outage:
+        service.prepare_scoped_import("main", ["subject-ada"])
+    assert outage.value.status_code == 503
+    assert (repository.users, repository.identities, repository.audits) == before
+
+def test_team_and_project_directory_import_build_owner_specific_atomic_intent() -> None:
+    directory, identity_repository, _gateway = service_fixture()
+    actor = identity_repository.users["admin"]
+    directory.create_connection(actor, create_payload())
+    prepared = directory.prepare_scoped_import(
+        "main",
+        ["subject-ada", "subject-grace"],
+    )
+    for user in prepared.new_users:
+        identity_repository.put_user(user)
+    for identity in prepared.new_external_identities:
+        identity_repository.put_external_identity(identity)
+
+    class CaptureCommit:
+        def __init__(self) -> None:
+            self.change_sets = []
+
+        def commit_scoped_directory_import(self, change_set) -> None:
+            self.change_sets.append(change_set)
+
+    team_memberships = {
+        f"tm-team-a-{prepared.actor_ids[0]}": TeamMembershipRecord(
+            membership_id=f"tm-team-a-{prepared.actor_ids[0]}",
+            team_id="team-a",
+            member_actor_type="user",
+            member_actor_id=prepared.actor_ids[0],
+            role="admin",
+            status="active",
+            created_at=utc_now_iso(),
+        ),
+        f"tm-team-a-{prepared.actor_ids[1]}": TeamMembershipRecord(
+            membership_id=f"tm-team-a-{prepared.actor_ids[1]}",
+            team_id="team-a",
+            member_actor_type="user",
+            member_actor_id=prepared.actor_ids[1],
+            role="member",
+            status="removed",
+            created_at=utc_now_iso(),
+            removed_at=utc_now_iso(),
+        ),
+    }
+    team_repository = SimpleNamespace(
+        get_team=lambda team_id: (
+            TeamRecord(
+                team_id="team-a",
+                name="Team A",
+                parent_team_id=None,
+                status="active",
+                created_at=utc_now_iso(),
+            )
+            if team_id == "team-a"
+            else None
+        ),
+        can_manage_team=lambda current_actor, team_id: (
+            current_actor.actor_id == actor.actor_id and team_id == "team-a"
+        ),
+        get_membership=lambda membership_id: team_memberships.get(membership_id),
+    )
+    team_commit = CaptureCommit()
+    team_service = TeamAccessService(team_repository, directory, team_commit)
+    team_result = team_service.import_directory_members(
+        actor,
+        "team-a",
+        "main",
+        TeamDirectoryMemberImportRequest(
+            external_subjects=["subject-ada", "subject-grace"],
+            role="uploader",
+            idempotency_key="team-import-1",
+        ),
+    )
+    assert team_result.applied_count == 2
+    team_change_set = team_commit.change_sets[0]
+    assert [membership.role for membership in team_change_set.team_memberships] == [
+        "admin",
+        "uploader",
+    ]
+    assert all(
+        membership.member_actor_type == "user"
+        for membership in team_change_set.team_memberships
+    )
+    assert team_change_set.audit_events[-1].event_type == (
+        "team_directory_members_imported"
+    )
+    assert "external_subject" not in repr(
+        team_change_set.audit_events[-1].metadata
+    )
+
+    project_grants = {
+        ProjectGovernanceService.project_access_grant_id(
+            "project-a", "user", prepared.actor_ids[0]
+        ): PermissionGrantRecord(
+            grant_id=ProjectGovernanceService.project_access_grant_id(
+                "project-a", "user", prepared.actor_ids[0]
+            ),
+            project_id="project-a",
+            subject_type="user",
+            subject_id=prepared.actor_ids[0],
+            role="viewer",
+            effect="allow",
+            status="active",
+            created_at=utc_now_iso(),
+        ),
+        ProjectGovernanceService.project_access_grant_id(
+            "project-a", "user", prepared.actor_ids[1]
+        ): PermissionGrantRecord(
+            grant_id=ProjectGovernanceService.project_access_grant_id(
+                "project-a", "user", prepared.actor_ids[1]
+            ),
+            project_id="project-a",
+            subject_type="user",
+            subject_id=prepared.actor_ids[1],
+            role="viewer",
+            effect="allow",
+            status="revoked",
+            created_at=utc_now_iso(),
+            revoked_at=utc_now_iso(),
+        ),
+    }
+    project_repository = SimpleNamespace(
+        get_project=lambda project_id: (
+            ProjectRecord(
+                project_id="project-a",
+                name="Project A",
+                policy_profile_id="default",
+            )
+            if project_id == "project-a"
+            else None
+        ),
+        resolve_access=lambda **_kwargs: SimpleNamespace(allowed=True),
+        get_grant=lambda grant_id: project_grants.get(grant_id),
+    )
+    project_commit = CaptureCommit()
+    project_service = ProjectGovernanceService(
+        project_repository,
+        directory,
+        project_commit,
+    )
+    project_result = project_service.import_directory_members(
+        actor,
+        "project-a",
+        "main",
+        ProjectDirectoryMemberImportRequest(
+            external_subjects=["subject-ada", "subject-grace"],
+            role="contributor",
+            idempotency_key="project-import-1",
+        ),
+    )
+    assert project_result.applied_count == 2
+    project_change_set = project_commit.change_sets[0]
+    assert [grant.role for grant in project_change_set.project_grants] == [
+        "viewer",
+        "contributor",
+    ]
+    assert all(grant.effect == "allow" for grant in project_change_set.project_grants)
+
+    first_grant_id = ProjectGovernanceService.project_access_grant_id(
+        "project-a",
+        "user",
+        prepared.actor_ids[0],
+    )
+    project_grants[first_grant_id] = replace(
+        project_grants[first_grant_id],
+        effect="deny",
+    )
+    with pytest.raises(ProjectGovernanceError) as deny:
+        project_service.import_directory_members(
+            actor,
+            "project-a",
+            "main",
+            ProjectDirectoryMemberImportRequest(
+                external_subjects=["subject-ada", "subject-grace"],
+                role="admin",
+                idempotency_key="project-import-2",
+            ),
+        )
+    assert deny.value.status_code == 409
+    assert len(project_commit.change_sets) == 1
+
+
+def test_scoped_owner_acl_precedes_directory_source_lookup() -> None:
+    class ExplodingDirectory:
+        called = False
+
+        def list_scoped_connections(self):
+            self.called = True
+            raise AssertionError("directory lookup must follow scope ACL")
+
+    directory = ExplodingDirectory()
+    repository = SimpleNamespace(
+        get_team=lambda _team_id: TeamRecord(
+            team_id="team-a",
+            name="Team A",
+            parent_team_id=None,
+            status="active",
+            created_at=utc_now_iso(),
+        ),
+        can_manage_team=lambda _actor, _team_id: False,
+    )
+    service = TeamAccessService(repository, directory, SimpleNamespace())
+    with pytest.raises(TeamAccessError) as denied:
+        service.list_directory_connections(
+            UserRecord(
+                actor_id="other-admin",
+                display_name="Other Admin",
+                email="other@example.test",
+                system_role="user",
+                password_digest=None,
+                created_at=utc_now_iso(),
+            ),
+            "team-a",
+        )
+    assert denied.value.status_code == 403
+    assert directory.called is False
+
+
+
 
 
 def test_directory_profile_never_changes_atlas_authority() -> None:
@@ -548,12 +951,35 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
     )
     client = TestClient(create_app(ApiComposition(**values)))
     payload = create_payload().model_dump(mode="json")
-    payload["bind_password"] = "bind-secret"
+    payload.update(port=389, tls_mode="plain", bind_password="bind-secret")
+    ad_plain_payload = {
+        **payload,
+        "connection_id": "ad-plain",
+        "display_name": "AD Plain",
+        "provider_type": "active_directory",
+        "user_object_filter": "(&(objectCategory=person)(objectClass=user))",
+        "login_attribute": "userPrincipalName",
+        "stable_id_attribute": "objectGUID",
+        "display_name_attribute": "displayName",
+        "employee_id_attribute": "employeeID",
+    }
+    ad_plain_created = client.post(
+        "/api/v1/admin/directory-connections",
+        json=ad_plain_payload,
+    )
+    assert ad_plain_created.status_code == 201
+    assert ad_plain_created.json()["provider_type"] == "active_directory"
+    assert ad_plain_created.json()["tls_mode"] == "plain"
+    assert ad_plain_created.json()["stable_id_attribute"] == "objectGUID"
+    assert "bind-secret" not in ad_plain_created.text
+
     created = client.post(
         "/api/v1/admin/directory-connections",
         json=payload,
     )
     assert created.status_code == 201
+    assert created.json()["tls_mode"] == "plain"
+    assert created.json()["port"] == 389
     assert created.json()["bind_password_configured"] is True
     assert "bind-secret" not in created.text
     rejected_update = client.patch(
@@ -566,6 +992,22 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
     )
     assert rejected_update.status_code == 422
     assert "validation-sentinel" not in rejected_update.text
+
+    ad_payload = create_payload("ad").model_dump(mode="json")
+    ad_payload.update(provider_type="active_directory", bind_password="bind-secret")
+    ad_created = client.post(
+        "/api/v1/admin/directory-connections",
+        json=ad_payload,
+    )
+    assert ad_created.status_code == 201
+    updated_ad_plain = client.patch(
+        "/api/v1/admin/directory-connections/ad",
+        json={"port": 389, "tls_mode": "plain"},
+    )
+    assert updated_ad_plain.status_code == 200
+    assert updated_ad_plain.json()["provider_type"] == "active_directory"
+    assert updated_ad_plain.json()["port"] == 389
+    assert updated_ad_plain.json()["tls_mode"] == "plain"
 
     invalid_filter = client.patch(
         "/api/v1/admin/directory-connections/main",
@@ -657,7 +1099,10 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
 def test_http_directory_login_sets_cookie_and_never_falls_back() -> None:
     directory, repository, gateway = service_fixture()
     admin = repository.users["admin"]
-    directory.create_connection(admin, create_payload())
+    directory.create_connection(
+        admin,
+        create_payload().model_copy(update={"port": 389, "tls_mode": "plain"}),
+    )
     directory.import_users(
         admin,
         "main",

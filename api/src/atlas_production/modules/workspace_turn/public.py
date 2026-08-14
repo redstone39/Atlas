@@ -6,10 +6,7 @@ each collaborator has closed its own transaction.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Annotated, Literal, Protocol
-from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -44,8 +41,6 @@ from atlas_production.modules.context_engineering.public import (
     ContextMessageV3,
     ContextSummaryInputV4,
     CreateTurnInputProjectionV1,
-    ModelUserInputV3,
-    ModelUserTextSegmentV3,
     MaterializeContextPackV3,
     TurnInputProjectionOwner,
 )
@@ -104,12 +99,24 @@ from atlas_production.modules.turn_runtime.public import (
     MessageParamValue,
     ReasoningPhase,
     ReasoningProgressStatus,
-    RoutePolicyV1,
     RuntimeEventV1,
     StageAcceptanceResourceV1,
     TurnRuntimeReplayConflict,
     TurnRuntimeOwner,
-    TurnRouteSnapshotV2,
+)
+from ._internals import (
+    acceptance_failure_code,
+    acceptance_identity,
+    build_context_command,
+    conversation_turn_status,
+    historical_exchange_content_digest as _historical_exchange_content_digest,
+    input_projection_ref as _input_projection_ref,
+    logical_member_chains,
+    logical_members,
+    reasoning_progress_payload,
+    route_snapshots,
+    stable_id as _stable_id,
+    terminal_projection_is_complete,
 )
 
 
@@ -417,46 +424,6 @@ class WorkspaceAuditDraftSource(
     """Read legacy and current immutable terminal audit drafts."""
 
 
-def _stable_id(kind: str, actor_id: str, key: str) -> str:
-    return f"{kind}-{uuid5(NAMESPACE_URL, f'atlas:{kind}:{actor_id}:{key}')}"
-
-
-def _context_ref(execution_id: str) -> str:
-    return f"context-pack-{hashlib.sha256(execution_id.encode()).hexdigest()}"
-
-
-def _historical_exchange_content_digest(
-    *,
-    user_text: str,
-    assistant_text: str,
-    direct_document_ids: list[str],
-) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "user_text": user_text,
-                "assistant_text": assistant_text,
-                "assistant_authority": (
-                    None
-                    if not assistant_text
-                    else {
-                        "authority": "pending_verification",
-                        "usage_scope": "dialogue_context_only",
-                    }
-                ),
-                "direct_document_ids": direct_document_ids,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def _input_projection_ref(execution_id: str) -> str:
-    return f"input-projection-{hashlib.sha256(execution_id.encode()).hexdigest()}"
-
-
 class WorkspaceTurnApplication:
     """Stateless coordinator over owner-local commands and request-time reads."""
 
@@ -612,13 +579,7 @@ class WorkspaceTurnApplication:
         if members:
             latest = max(members, key=lambda item: item.ordinal)
             state = self._runtime.snapshot(latest.execution_id).state
-            last_turn_status = (
-                "completed"
-                if state is ExecutionState.TERMINAL_COMPLETED
-                else "failed_closed"
-                if state is ExecutionState.TERMINAL_FAILED
-                else "processing"
-            )
+            last_turn_status = conversation_turn_status(state)
         return WorkspaceConversationSummaryV1(
             **conversation.model_dump(mode="python"),
             last_turn_status=last_turn_status,
@@ -648,13 +609,14 @@ class WorkspaceTurnApplication:
             if retry_of is not None
             else command.reasoning_mode or conversation.reasoning_mode
         )
-        identity_key = ":".join(
-            [conversation_id, operation, retry_of_turn_id or "none", command.idempotency_key]
+        turn_id, execution_id, holder_id, input_digest = acceptance_identity(
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            operation=operation,
+            retry_of_turn_id=retry_of_turn_id,
+            idempotency_key=command.idempotency_key,
+            input_text=command.input_text,
         )
-        turn_id = _stable_id("turn", actor_id, identity_key)
-        execution_id = _stable_id("execution", actor_id, identity_key)
-        holder_id = _stable_id("carrier", actor_id, identity_key)
-        input_digest = hashlib.sha256(command.input_text.encode("utf-8")).hexdigest()
         replay = self._runtime.find_execution(execution_id)
         if replay is not None:
             if (
@@ -679,6 +641,7 @@ class WorkspaceTurnApplication:
                 ),
             )
         route = self._model_routes.tested_route()
+        vision_route = self._model_routes.tested_vision_default_route()
         if route is None:
             raise WorkspaceTurnError(
                 "model_route_unavailable", "model.route_is_unavailable", 503
@@ -693,36 +656,7 @@ class WorkspaceTurnApplication:
                 "common.rejected",
                 429,
             )
-        route_snapshot = TurnRouteSnapshotV2(
-            route_id=route.route_id,
-            route_revision=route.revision,
-            runtime_policy_revision=runtime_policy.revision,
-            tokenizer_profile=runtime_policy.tokenizer_profile,
-            context_window_tokens=runtime_policy.context_window_tokens,
-            max_input_tokens_per_invocation=runtime_policy.max_input_tokens_per_invocation,
-            max_output_tokens_per_invocation=runtime_policy.max_output_tokens_per_invocation,
-            max_tool_result_tokens_per_execution=runtime_policy.max_tool_result_tokens_per_execution,
-            max_total_tokens_per_conversation=runtime_policy.max_total_tokens_per_conversation,
-        )
-        route_policy = RoutePolicyV1(
-            max_tool_invocations=runtime_policy.max_tool_executions,
-            max_provider_invocations=runtime_policy.max_provider_invocations,
-            max_reasoning_revision_cycles=runtime_policy.max_reasoning_revision_cycles,
-            max_schema_retries_per_turn=runtime_policy.max_schema_retries_per_turn,
-            max_catalog_pages=runtime_policy.max_catalog_pages,
-            max_search_rounds=runtime_policy.max_search_rounds,
-            max_model_visible_items_per_turn=runtime_policy.max_model_visible_items_per_turn,
-            max_retrieval_repairs=runtime_policy.max_retrieval_repairs,
-            max_selected_anchor_pages_per_round=(
-                runtime_policy.max_selected_anchor_pages_per_round
-            ),
-            context_token_budget=runtime_policy.max_input_tokens_per_invocation,
-            tool_token_budget=runtime_policy.max_tool_result_tokens_per_execution,
-            tool_execution_timeout_seconds=(
-                runtime_policy.tool_execution_timeout_seconds
-            ),
-            deadline_seconds=runtime_policy.turn_timeout_seconds,
-        )
+        route_snapshot, route_policy = route_snapshots(route, vision_route)
         answer_behavior = self._answer_behavior.current()
         try:
             snapshot = self._runtime.allocate(
@@ -839,15 +773,7 @@ class WorkspaceTurnApplication:
 
     @staticmethod
     def _acceptance_failure_code(error: Exception) -> str:
-        safe_code = getattr(error, "safe_code", None)
-        if safe_code in {
-            "summary_generation_failed",
-            "context_limit_exceeded",
-            "resolver_failed",
-            "rewrite_failed",
-        }:
-            return safe_code
-        return "contract_violation"
+        return acceptance_failure_code(error)
 
     def _fail_acceptance(
         self, snapshot: ExecutionSnapshotV1, failure_code: str
@@ -1018,49 +944,21 @@ class WorkspaceTurnApplication:
         input_text: str,
     ) -> MaterializeContextPackV3:
         retry_sources = self._retry_lineage.retry_sources(snapshot.conversation_id)
-
-        def root_turn_id(turn_id: str) -> str:
-            seen: set[str] = set()
-            current = turn_id
-            while current not in seen:
-                seen.add(current)
-                retry_source = retry_sources.get(current)
-                if retry_source is None:
-                    return current
-                current = retry_source
-            return turn_id
-
-        members = [
-            member
-            for member in sorted(
-                self._conversations.candidate_turns(snapshot.conversation_id),
-                key=lambda item: item.ordinal,
-            )
-            if member.turn_id != snapshot.turn_id
-        ]
-        current_retry_source = retry_sources.get(snapshot.turn_id)
-        excluded_root = (
-            root_turn_id(current_retry_source) if current_retry_source is not None else None
+        candidates = self._conversations.candidate_turns(snapshot.conversation_id)
+        chains = logical_member_chains(
+            candidates,
+            retry_sources,
+            current_turn_id=snapshot.turn_id,
         )
-        chains: dict[str, list[ConversationTurnMemberV1]] = {}
-        for member in members:
-            root = root_turn_id(member.turn_id)
-            if root == excluded_root:
-                continue
-            chains.setdefault(root, []).append(member)
-        logical_members: list[tuple[str, ConversationTurnMemberV1]] = []
-        for chain in chains.values():
-            completed = [
-                member
-                for member in chain
-                if self._runtime.snapshot(member.execution_id).state
-                is ExecutionState.TERMINAL_COMPLETED
-            ]
-            representative = (completed or chain)[-1]
-            logical_members.append(
-                (root_turn_id(representative.turn_id), representative)
-            )
-
+        states = {
+            member.execution_id: self._runtime.snapshot(member.execution_id).state
+            for _logical_turn_id, chain in chains
+            for member in chain
+        }
+        logical_turn_members = logical_members(
+            chains,
+            states,
+        )
         def exchange(
             logical_turn_id: str, member: ConversationTurnMemberV1
         ) -> ContextExchangeV3 | None:
@@ -1148,7 +1046,7 @@ class WorkspaceTurnApplication:
             )
 
         raw_exchanges = []
-        for logical_turn_id, member in logical_members:
+        for logical_turn_id, member in logical_turn_members:
             item = exchange(logical_turn_id, member)
             if item is not None:
                 raw_exchanges.append(item)
@@ -1156,7 +1054,7 @@ class WorkspaceTurnApplication:
             exchange.logical_turn_id: exchange for exchange in raw_exchanges
         }
         reusable_summary = None
-        for _logical_turn_id, member in reversed(logical_members):
+        for _logical_turn_id, member in reversed(logical_turn_members):
             prior_snapshot = self._runtime.snapshot(member.execution_id)
             if prior_snapshot.context_pack_ref is None:
                 continue
@@ -1203,45 +1101,15 @@ class WorkspaceTurnApplication:
             for item in raw_exchanges
             if item.logical_turn_id not in covered_logical_ids
         ]
-        context_pack_ref = _context_ref(snapshot.execution_id)
-        edges = [
-            ContextLineageEdgeV3(
-                dependent_turn_id=snapshot.turn_id,
-                dependent_context_pack_ref=context_pack_ref,
-                source_turn_id=item.representative_turn_id,
-                source_resource_kind="turn",
-                dependency_kind="recent_turn",
-            )
-            for item in recent
-        ]
-        if reusable_summary is not None:
-            edges.extend(
-                ContextLineageEdgeV3(
-                    dependent_turn_id=snapshot.turn_id,
-                    dependent_context_pack_ref=context_pack_ref,
-                    source_turn_id=source.representative_turn_id,
-                    source_resource_ref=reusable_summary.summary_ref,
-                    source_resource_kind="summary",
-                    dependency_kind="summary_source",
-                )
-                for source in reusable_summary.sources
-            )
-        return MaterializeContextPackV3(
-            context_pack_ref=context_pack_ref,
+        return build_context_command(
             execution_id=snapshot.execution_id,
-            input_projection_ref=_input_projection_ref(snapshot.execution_id),
+            actor_id=snapshot.actor_id,
             conversation_id=snapshot.conversation_id,
-            dependent_turn_id=snapshot.turn_id,
-            model_user_input=ModelUserInputV3(
-                content_segments=[ModelUserTextSegmentV3(text=input_text)]
-            ),
-            recent_tail=recent,
+            turn_id=snapshot.turn_id,
+            input_text=input_text,
+            recent=recent,
             summary=reusable_summary,
-            source_lineage=edges,
-            token_budget=snapshot.policy.context_token_budget,
-            idempotency_key=_stable_id(
-                "context", snapshot.actor_id, snapshot.execution_id
-            ),
+            context_token_budget=snapshot.policy.context_token_budget,
         )
 
     def retry_turn(
@@ -1748,26 +1616,16 @@ class WorkspaceTurnApplication:
             evidence_pack = self._retrieval.read_evidence_pack(
                 outcome.evidence_pack_ref
             )
-            if (
-                answer is None
-                or binding is None
-                or audit is None
-                or audit.execution_id != snapshot.execution_id
-                or evidence_pack is None
-                or evidence_pack.execution_id != snapshot.execution_id
-                or binding.execution_id != snapshot.execution_id
-                or binding.governed_answer_draft_ref != answer.draft_ref
-                or binding.governed_answer_digest != answer.digest
-                or audit.evidence_pack_ref != evidence_pack.evidence_pack_ref
-                or audit.evidence_pack_digest != evidence_pack.digest
-                or audit.governed_answer_draft_ref != answer.draft_ref
-                or audit.governed_answer_digest != answer.digest
-                or audit.citation_binding_draft_ref != binding.draft_ref
-                or audit.citation_binding_digest != binding.digest
-                or audit.evidence_review_status
-                != answer.evidence_review_status
+            if not terminal_projection_is_complete(
+                execution_id=snapshot.execution_id,
+                answer=answer,
+                binding=binding,
+                audit=audit,
+                evidence_pack=evidence_pack,
             ):
-                raise WorkspaceTurnError("projection_incomplete", "common.rejected", 503)
+                raise WorkspaceTurnError(
+                    "projection_incomplete", "common.rejected", 503
+                )
             segments = [
                 WorkspaceAnswerSegmentV2(
                     segment_id=segment.segment_id,
@@ -1829,31 +1687,16 @@ class WorkspaceTurnApplication:
     ) -> list[WorkspaceReasoningProgressV1]:
         projected: list[WorkspaceReasoningProgressV1] = []
         for event in self._runtime.events(execution_id):
-            if (
-                not isinstance(event, RuntimeEventV1)
-                or event.event_type != "reasoning_progressed"
-            ):
+            if not isinstance(event, RuntimeEventV1):
                 continue
-            if (
-                event.reasoning_phase is None
-                or event.progress_status is None
-                or event.message_code is None
-            ):
+            try:
+                payload = reasoning_progress_payload(event)
+            except ValueError as error:
                 raise WorkspaceTurnError(
                     "projection_incomplete", "common.rejected", 503
-                )
-            projected.append(
-                WorkspaceReasoningProgressV1(
-                    event_id=event.event_id,
-                    sequence=event.sequence,
-                    phase=event.reasoning_phase,
-                    status=event.progress_status,
-                    cycle=event.cycle,
-                    message_code=event.message_code,
-                    message_params=event.message_params,
-                    created_at=event.created_at,
-                )
-            )
+                ) from error
+            if payload is not None:
+                projected.append(WorkspaceReasoningProgressV1(**payload))
         return projected
 
     def _project_claimed_evidence(

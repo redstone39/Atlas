@@ -4,7 +4,12 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from atlas_production.modules.identity_access.public import (
+    ScopedDirectoryConnectionListResult,
+    ScopedDirectoryMemberImportResult,
+    ScopedDirectoryUserSearchRequest,
+    ScopedDirectoryUserSearchResult,
     TeamCreateRequest,
+    TeamDirectoryMemberImportRequest,
     TeamListResult,
     TeamMemberCandidatesResult,
     TeamMemberListResult,
@@ -179,6 +184,67 @@ def list_team_member_candidates(
         )
     except TeamAccessError as exc:
         return _team_error(exc)
+@router.get(
+    "/api/v1/admin/teams/{team_id}/directory-connections",
+    response_model=ScopedDirectoryConnectionListResult,
+)
+def list_team_directory_connections(
+    team_id: str,
+    request: Request,
+) -> ScopedDirectoryConnectionListResult | JSONResponse:
+    try:
+        return _team_service(request).list_directory_connections(
+            current_user(request),
+            team_id,
+        )
+    except TeamAccessError as exc:
+        return _team_error(exc)
+
+
+@router.post(
+    "/api/v1/admin/teams/{team_id}/directory-connections/"
+    "{connection_id}/users/search",
+    response_model=ScopedDirectoryUserSearchResult,
+)
+def search_team_directory_users(
+    team_id: str,
+    connection_id: str,
+    payload: ScopedDirectoryUserSearchRequest,
+    request: Request,
+) -> ScopedDirectoryUserSearchResult | JSONResponse:
+    try:
+        return _team_service(request).search_directory_users(
+            current_user(request),
+            team_id,
+            connection_id,
+            payload,
+        )
+    except TeamAccessError as exc:
+        return _team_error(exc)
+
+
+@router.post(
+    "/api/v1/admin/teams/{team_id}/directory-connections/"
+    "{connection_id}/users/import",
+    response_model=ScopedDirectoryMemberImportResult,
+)
+def import_team_directory_members(
+    team_id: str,
+    connection_id: str,
+    payload: TeamDirectoryMemberImportRequest,
+    request: Request,
+) -> ScopedDirectoryMemberImportResult | JSONResponse:
+    try:
+        return _team_service(request).import_directory_members(
+            current_user(request),
+            team_id,
+            connection_id,
+            payload,
+        )
+    except TeamAccessError as exc:
+        return _team_error(exc, payload.idempotency_key)
+
+
 
 
 @router.post("/api/v1/admin/teams", response_model=AdminActionResult)

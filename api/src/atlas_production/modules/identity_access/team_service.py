@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from uuid import uuid4
+from typing import NoReturn
+
 from atlas_production.shared.public import (
     AdminActionResult,
 )
 from .api_models import (
+    ScopedDirectoryConnectionListResult,
+    ScopedDirectoryMemberImportResult,
+    ScopedDirectoryUserSearchRequest,
+    ScopedDirectoryUserSearchResult,
     TeamCreateRequest,
+    TeamDirectoryMemberImportRequest,
     TeamListResult,
     TeamMemberCandidate,
     TeamMemberCandidatesResult,
@@ -23,13 +32,29 @@ from .records import (
 from atlas_production.shared.public import (
     utc_now_iso,
 )
+from .contracts import IdentityAccessError
 from .team_contracts import TeamAccessError, TeamActionOutcome, TeamAuditCommand
 from .team_ports import TeamAccessRepository
+from .directory_ports import (
+    ScopedDirectoryIdentityCapability,
+    ScopedDirectoryImportAuthorizationConflict,
+    ScopedDirectoryImportChangeSet,
+    ScopedDirectoryImportCommitPort,
+    ScopedDirectoryImportCurrentnessConflict,
+)
+from atlas_production.shared.public import AuditEventRecord
 
 
 class TeamAccessService:
-    def __init__(self, repository: TeamAccessRepository) -> None:
+    def __init__(
+        self,
+        repository: TeamAccessRepository,
+        directory_identity: ScopedDirectoryIdentityCapability,
+        directory_import_commit: ScopedDirectoryImportCommitPort,
+    ) -> None:
         self.repository = repository
+        self.directory_identity = directory_identity
+        self.directory_import_commit = directory_import_commit
 
     def _team_mutation_context(
         self,
@@ -168,6 +193,148 @@ class TeamAccessService:
                 key=lambda item: (item.display_name.casefold(), item.subject_id),
             )
         )
+    def list_directory_connections(
+        self,
+        actor: UserRecord | None,
+        team_id: str,
+    ) -> ScopedDirectoryConnectionListResult:
+        self._require_team_manage(actor, team_id)
+        try:
+            return self.directory_identity.list_scoped_connections()
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+
+    def search_directory_users(
+        self,
+        actor: UserRecord | None,
+        team_id: str,
+        connection_id: str,
+        payload: ScopedDirectoryUserSearchRequest,
+    ) -> ScopedDirectoryUserSearchResult:
+        self._require_team_manage(actor, team_id)
+        try:
+            return self.directory_identity.search_scoped_users(
+                connection_id,
+                payload,
+            )
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+
+    def import_directory_members(
+        self,
+        actor: UserRecord | None,
+        team_id: str,
+        connection_id: str,
+        payload: TeamDirectoryMemberImportRequest,
+    ) -> ScopedDirectoryMemberImportResult:
+        actor = self._require_team_manage(actor, team_id)
+        try:
+            preparation = self.directory_identity.prepare_scoped_import(
+                connection_id,
+                payload.external_subjects,
+            )
+        except IdentityAccessError as exc:
+            self._raise_directory_error(exc)
+        now = utc_now_iso()
+        memberships: list[TeamMembershipRecord] = []
+        expected_memberships: list[
+            tuple[str, TeamMembershipRecord | None]
+        ] = []
+        for user in preparation.users:
+            membership_id = f"tm-{team_id}-{user.actor_id}"
+            existing = self.repository.get_membership(membership_id)
+            expected_memberships.append(
+                (membership_id, replace(existing) if existing else None)
+            )
+            if existing and existing.status == "active":
+                membership = replace(existing)
+            elif existing:
+                membership = replace(
+                    existing,
+                    role=payload.role,
+                    status="active",
+                    removed_at=None,
+                )
+            else:
+                membership = TeamMembershipRecord(
+                    membership_id=membership_id,
+                    team_id=team_id,
+                    member_actor_type="user",
+                    member_actor_id=user.actor_id,
+                    role=payload.role,
+                    status="active",
+                    created_at=now,
+                )
+            memberships.append(membership)
+
+        actor_ids = list(preparation.actor_ids)
+        count = len(actor_ids)
+        audits = (
+            self._directory_import_audit(
+                event_type="directory_users_scoped_imported",
+                actor_id=actor.actor_id,
+                target_ref=f"directory-connection:{connection_id}",
+                scope_type="team",
+                scope_id=team_id,
+                message_code="directory.users_scoped_imported",
+                metadata={
+                    "connection_id": connection_id,
+                    "actor_ids": actor_ids,
+                    "count": count,
+                    "status": "imported",
+                },
+                count=count,
+            ),
+            self._directory_import_audit(
+                event_type="team_directory_members_imported",
+                actor_id=actor.actor_id,
+                target_ref=f"team:{team_id}",
+                scope_type="team",
+                scope_id=team_id,
+                message_code="team.directory_members_imported",
+                metadata={
+                    "connection_id": connection_id,
+                    "team_id": team_id,
+                    "role": payload.role,
+                    "actor_ids": actor_ids,
+                    "count": count,
+                    "status": "imported",
+                },
+                count=count,
+            ),
+        )
+        try:
+            self.directory_import_commit.commit_scoped_directory_import(
+                ScopedDirectoryImportChangeSet(
+                    authorization_actor_id=actor.actor_id,
+                    authorization_scope_type="team",
+                    authorization_scope_id=team_id,
+                    preparation=preparation,
+                    team_memberships=tuple(memberships),
+                    expected_team_memberships=tuple(expected_memberships),
+                    audit_events=audits,
+                )
+            )
+        except ScopedDirectoryImportAuthorizationConflict as exc:
+            raise TeamAccessError(
+                "access_denied",
+                "team.member_management_requires_team_admin_access",
+                403,
+                exc.audit_event_ref,
+            ) from exc
+        except ScopedDirectoryImportCurrentnessConflict as exc:
+            raise TeamAccessError(
+                "team_directory_import_conflict",
+                "directory.concurrent_change",
+                409,
+            ) from exc
+        return ScopedDirectoryMemberImportResult(
+            actor_ids=actor_ids,
+            applied_count=count,
+            message_code="team.directory_members_imported",
+            message_params={"count": count},
+        )
+
 
     def create_team(
         self,
@@ -617,6 +784,56 @@ class TeamAccessService:
         if not team or team.status != "active":
             raise TeamAccessError("not_found", 'team.was_not_found', 404)
         return team
+    def _require_team_manage(
+        self,
+        actor: UserRecord | None,
+        team_id: str,
+    ) -> UserRecord:
+        actor = self._require_actor(actor)
+        self._require_active_team(team_id)
+        if not self.repository.can_manage_team(actor, team_id):
+            raise TeamAccessError(
+                "access_denied",
+                "team.member_management_requires_team_admin_access",
+                403,
+            )
+        return actor
+
+    @staticmethod
+    def _directory_import_audit(
+        *,
+        event_type: str,
+        actor_id: str,
+        target_ref: str,
+        scope_type: str,
+        scope_id: str,
+        message_code: str,
+        metadata: dict[str, object],
+        count: int,
+    ) -> AuditEventRecord:
+        return AuditEventRecord(
+            event_id=f"audit-{uuid4().hex}",
+            event_type=event_type,
+            actor_id=actor_id,
+            target_ref=target_ref,
+            project_id=None,
+            message_code=message_code,
+            message_params={"count": count},
+            metadata=metadata,
+            created_at=utc_now_iso(),
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+
+
+    @staticmethod
+    def _raise_directory_error(error: IdentityAccessError) -> NoReturn:
+        raise TeamAccessError(
+            error.error_code,
+            error.message_code,
+            error.status_code,
+            error.audit_event_ref,
+        ) from error
 
     @staticmethod
     def _team_model(team: TeamRecord) -> TeamModel:

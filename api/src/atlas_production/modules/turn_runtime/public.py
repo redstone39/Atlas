@@ -322,6 +322,30 @@ class ReasoningTraceV3(_StrictModel):
         return self
 
 
+class VisionRouteSnapshotV1(_StrictModel):
+    route_id: Identity
+    route_revision: int = Field(ge=1)
+    runtime_policy_revision: int = Field(ge=1)
+    tokenizer_profile: Identity
+    context_window_tokens: int = Field(ge=1)
+    max_input_tokens_per_invocation: int = Field(ge=1)
+    max_output_tokens_per_invocation: int = Field(ge=1)
+    max_tool_result_tokens_per_execution: int = Field(ge=1)
+    max_total_tokens_per_conversation: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def require_legal_window(self) -> "VisionRouteSnapshotV1":
+        if (
+            self.max_input_tokens_per_invocation
+            + self.max_output_tokens_per_invocation
+            > self.context_window_tokens
+        ):
+            raise ValueError(
+                "vision route input and output limits exceed context window"
+            )
+        return self
+
+
 class TurnRouteSnapshotV2(_StrictModel):
     route_id: Identity
     route_revision: int = Field(ge=1)
@@ -332,6 +356,7 @@ class TurnRouteSnapshotV2(_StrictModel):
     max_output_tokens_per_invocation: int = Field(ge=1)
     max_tool_result_tokens_per_execution: int = Field(ge=1)
     max_total_tokens_per_conversation: int = Field(ge=1)
+    vision_route: VisionRouteSnapshotV1 | None = None
 
     @model_validator(mode="after")
     def require_legal_window(self) -> "TurnRouteSnapshotV2":
@@ -767,6 +792,7 @@ __all__ = [
     "ProvisionalEvidenceCheckV1",
     "ReasoningTraceV3",
     "TurnRouteSnapshotV2",
+    "VisionRouteSnapshotV1",
     "BudgetSnapshotV1",
     "ExecutionLeaseV1",
     "ExecutionSnapshotV1",

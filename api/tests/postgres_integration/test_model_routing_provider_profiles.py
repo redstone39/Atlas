@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import pytest
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from atlas_production.infrastructure.persistence.model_routing import (
     AtlasModelRouteRow,
@@ -156,7 +158,8 @@ def test_route_less_snapshot_never_falls_back_until_admin_changes_default(
             runtime_policy=policy,
             supports_vision=False,
             last_tested_at="2026-08-09T00:00:00+00:00",
-            is_default=True,
+            is_text_default=True,
+            is_vision_default=False,
             readiness_schema_name=None,
             readiness_schema_digest=None,
         ),
@@ -172,7 +175,8 @@ def test_route_less_snapshot_never_falls_back_until_admin_changes_default(
             runtime_policy=policy,
             supports_vision=False,
             last_tested_at="2026-08-09T00:00:00+00:00",
-            is_default=False,
+            is_text_default=False,
+            is_vision_default=False,
             readiness_schema_name=ROUTE_READINESS_SCHEMA.name,
             readiness_schema_digest=ROUTE_READINESS_SCHEMA.digest,
         ),
@@ -186,9 +190,10 @@ def test_route_less_snapshot_never_falls_back_until_admin_changes_default(
             enabled=True,
             revision=1,
             runtime_policy=policy,
-            supports_vision=False,
+            supports_vision=True,
             last_tested_at="2026-08-09T00:00:00+00:00",
-            is_default=False,
+            is_text_default=False,
+            is_vision_default=True,
             readiness_schema_name=ROUTE_READINESS_SCHEMA.name,
             readiness_schema_digest=ROUTE_READINESS_SCHEMA.digest,
         ),
@@ -215,15 +220,22 @@ def test_route_less_snapshot_never_falls_back_until_admin_changes_default(
             assert same_provider is not None
             assert same_provider[0].route_id == ROUTING_ROUTE_IDS[1]
             assert cross_provider is not None
-            assert cross_provider[0].route_id == ROUTING_ROUTE_IDS[2]
+
+        with postgres_runtime.session_factory() as session, session.begin():
+            selected = session.get(AtlasModelRouteRow, ROUTING_ROUTE_IDS[1])
+            assert selected is not None
+            with pytest.raises(IntegrityError):
+                with session.begin_nested():
+                    selected.is_vision_default = True
+                    session.flush()
 
         with postgres_runtime.session_factory() as session, session.begin():
             failed_default = session.get(AtlasModelRouteRow, ROUTING_ROUTE_IDS[0])
             selected = session.get(AtlasModelRouteRow, ROUTING_ROUTE_IDS[1])
             assert failed_default is not None
             assert selected is not None
-            failed_default.is_default = False
-            selected.is_default = True
+            failed_default.is_text_default = False
+            selected.is_text_default = True
 
         with postgres_runtime.session_factory() as session:
             selected = runtime_joined_snapshot(session)

@@ -9,7 +9,7 @@ from .api_models import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class IdentityAccessError(Exception):
     error_code: str
     message_code: str
@@ -18,7 +18,10 @@ class IdentityAccessError(Exception):
     message_params: MessageParams = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "message_params", validate_message_reference(self.message_code, self.message_params))
+        self.message_params = validate_message_reference(
+            self.message_code,
+            self.message_params,
+        )
 
 
 @dataclass(frozen=True)

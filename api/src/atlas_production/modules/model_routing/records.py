@@ -148,7 +148,8 @@ class ModelRouteRecord:
     enabled: bool = True
     revision: int = 1
     last_tested_at: str | None = None
-    is_default: bool = False
+    is_text_default: bool = False
+    is_vision_default: bool = False
     readiness_schema_name: str | None = None
     readiness_schema_digest: str | None = None
 

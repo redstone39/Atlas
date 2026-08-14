@@ -418,7 +418,10 @@
     "model.a_model_route_moved_to_this_provider_connection": {
       "params": {}
     },
-    "model.default_model_route_is_updated": {
+    "model.default_text_model_route_is_updated": {
+      "params": {}
+    },
+    "model.default_vision_model_route_is_updated": {
       "params": {}
     },
     "model.idempotency_key_was_already_used_for_another_model_routing_operation": {
@@ -610,6 +613,11 @@
     "project.member_is_active": {
       "params": {}
     },
+    "project.directory_members_imported": {
+      "params": {
+        "count": { "type": "integer", "required": false }
+      }
+    },
     "project.member_role_is_updated": {
       "params": {}
     },
@@ -760,6 +768,11 @@
     "team.member_is_active": {
       "params": {}
     },
+    "team.directory_members_imported": {
+      "params": {
+        "count": { "type": "integer", "required": false }
+      }
+    },
     "team.member_management_requires_team_admin_access": {
       "params": {}
     },
@@ -880,6 +893,9 @@
     "model.test_this_route_before_making_it_default": {
       "params": {}
     },
+    "model.vision_default_requires_vision_capability": {
+      "params": {}
+    },
     "result.knowledge_scope_access_required": { "params": {} },
     "result.validated_evidence_is_not_available": { "params": {} },
     "result.tested_model_route_is_required": { "params": {} },
@@ -917,6 +933,7 @@
     "provider.connection_fields_are_invalid": { "params": {} },
     "provider.choose_another_default_before_disabling_connection": { "params": {} },
     "model.choose_another_default_before_disabling_route": { "params": {} },
+    "model.choose_another_default_before_disabling_vision": { "params": {} },
     "provider.connection_display_name_is_invalid": { "params": {} },
     "processing.admin_action_was_rejected": { "params": {} },
     "processing.package_is_accepted_for_validation": { "params": {} },
@@ -952,6 +969,11 @@
     "directory.profile_not_found": { "params": {} },
     "directory.profile_is_read_only": { "params": {} },
     "directory.profile_refreshed": { "params": {} },
+    "directory.users_scoped_imported": {
+      "params": {
+        "count": { "type": "integer", "required": false }
+      }
+    },
     "directory.users_imported": {
       "params": {
         "count": { "type": "integer", "required": false }
