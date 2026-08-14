@@ -51,6 +51,39 @@ describe("useProcessingJobs", () => {
     vi.useRealTimers();
   });
 
+  it("runs a trailing refresh and observes the discovered job settle", async () => {
+    const initial = Promise.withResolvers<{ jobs: ProcessingJobStatus[] }>();
+    const terminalJob = { ...activeJob, status: "ready" as const, cancel_available: false };
+    const onProcessingSettled = vi.fn();
+    vi.mocked(processingJobApi.list)
+      .mockReturnValueOnce(initial.promise)
+      .mockResolvedValueOnce({ jobs: [activeJob] })
+      .mockResolvedValueOnce({ jobs: [terminalJob] });
+
+    const { result } = renderHook(() => useProcessingJobs(onProcessingSettled));
+    expect(processingJobApi.list).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      void result.current.refresh();
+      initial.resolve({ jobs: [] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(processingJobApi.list).toHaveBeenCalledTimes(2);
+    expect(result.current.jobs).toEqual([activeJob]);
+    expect(onProcessingSettled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+
+    expect(processingJobApi.list).toHaveBeenCalledTimes(3);
+    expect(result.current.jobs).toEqual([terminalJob]);
+    expect(onProcessingSettled).toHaveBeenCalledOnce();
+  });
+
   it("polls active current jobs and stops polling after a terminal result", async () => {
     vi.mocked(processingJobApi.list)
       .mockResolvedValueOnce({ jobs: [activeJob] })
