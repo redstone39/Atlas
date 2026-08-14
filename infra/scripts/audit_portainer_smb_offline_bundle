@@ -23,6 +23,8 @@ REQUIRED = {
     "ATLAS_SMB_GENERATION": "7",
     "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
     "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
+    "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": "audit-notes-transport-secret",
+    "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": "audit-distinct-ticket-sealing-secret",
 }
 AUDIT_PLATFORM = "linux/arm64"
 AUDIT_PLATFORM_TAG = "linux-arm64"
@@ -33,7 +35,7 @@ ALL_PROXY_INPUTS = OPERATOR_PROXY_INPUTS | LOWERCASE_PROXY_INPUTS
 PROXY_CONSUMERS = {"api", "celery-processing"}
 INTERNAL_NO_PROXY = (
     "::1,127.0.0.1,localhost,postgres,redis,qdrant,"
-    "plugin-runner,office-renderer,api,web"
+    "plugin-runner,office-renderer,notes-collaboration,api,web"
 )
 LEGACY_PROXY_ENVIRONMENT = "ATLAS_AZURE_PROXY_URL"
 
@@ -134,6 +136,47 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     if model.get("name") != "infra":
         fail("offline Compose project identity is not infra")
     services = model["services"]
+    api = services.get("api", {})
+    carrier = services.get("notes-collaboration", {})
+    if not carrier:
+        fail("generated Compose omits the Notes collaboration carrier")
+    api_environment = api.get("environment", {})
+    carrier_environment = carrier.get("environment", {})
+    transport_consumers = {
+        name
+        for name, service in services.items()
+        if "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"
+        in service.get("environment", {})
+    }
+    if transport_consumers != {"api", "notes-collaboration"}:
+        fail("offline Notes transport secret reachability drifted")
+    ticket_consumers = {
+        name
+        for name, service in services.items()
+        if "ATLAS_NOTES_COLLABORATION_TICKET_SECRET"
+        in service.get("environment", {})
+    }
+    if ticket_consumers != {"api"}:
+        fail("offline API-only ticket secret reachability drifted")
+    if (
+        api_environment["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"]
+        == api_environment["ATLAS_NOTES_COLLABORATION_TICKET_SECRET"]
+    ):
+        fail("offline Notes secrets are not distinct")
+    if carrier.get("volumes"):
+        fail("offline Notes carrier has a durable volume")
+    if carrier.get("depends_on", {}).get("api", {}).get("condition") != (
+        "service_healthy"
+    ):
+        fail("offline Notes carrier does not wait for API health")
+    if "notes-collaboration" in api.get("depends_on", {}):
+        fail("offline API depends on the carrier")
+    carrier_ports = carrier.get("ports", [])
+    if len(carrier_ports) != 1 or carrier_ports[0].get("host_ip") != "127.0.0.1":
+        fail("offline Notes WebSocket port is not loopback-only")
+    health_test = " ".join(carrier.get("healthcheck", {}).get("test", []))
+    if "/ready" not in health_test or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test:
+        fail("offline Notes carrier readiness healthcheck drifted")
     for name, service in services.items():
         service_environment = service.get("environment", {})
         if LEGACY_PROXY_ENVIRONMENT in service_environment:
@@ -262,10 +305,11 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         f"atlas-offline/web:audit-1-{AUDIT_PLATFORM_TAG}",
         f"atlas-offline/postgres:audit-1-{AUDIT_PLATFORM_TAG}",
         f"atlas-offline/redis:audit-1-{AUDIT_PLATFORM_TAG}",
+        f"atlas-offline/notes-collaboration:audit-1-{AUDIT_PLATFORM_TAG}",
         f"atlas-offline/qdrant:audit-1-{AUDIT_PLATFORM_TAG}",
     }
     if {service["image"] for service in services.values()} != expected_images:
-        fail("offline eight-image set drifted")
+        fail("offline nine-image set drifted")
 
     compose_text = (output / "docker-compose.yml").read_text(encoding="utf-8")
     if "${ATLAS_SMB_PASSWORD:?set SMB password}" not in compose_text:
@@ -329,13 +373,13 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
         fail("compose-only audit unexpectedly created an image archive")
     if set(manifest["images"]) != expected_images:
         fail("manifest image set drifted")
-    if len(manifest["images"]) != 8 or model_image not in manifest["images"]:
-        fail("manifest does not contain the distinct embedding model reference")
+    if len(manifest["images"]) != 9 or model_image not in manifest["images"]:
+        fail("manifest does not contain the nine-image set")
     record_references = {
         record.get("reference") for record in manifest["image_records"]
     }
-    if len(record_references) != 8 or model_image not in record_references:
-        fail("manifest image records omit the distinct embedding model reference")
+    if len(record_references) != 9 or model_image not in record_references:
+        fail("manifest image records omit the nine-image set")
     if manifest["platform"] != AUDIT_PLATFORM:
         fail("manifest target platform drifted")
     if any(record["platform"] != AUDIT_PLATFORM for record in manifest["image_records"]):

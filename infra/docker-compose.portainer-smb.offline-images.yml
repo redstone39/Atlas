@@ -19,6 +19,10 @@ services:
   celery-beat:
     <<: *atlas-api-image
 
+  notes-collaboration:
+    image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/notes-collaboration:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
+    platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
+
   plugin-runner:
     image: ${ATLAS_OFFLINE_IMAGE_PREFIX:?set offline image prefix}/plugin-runner:${ATLAS_OFFLINE_VERSION:?set offline version}-${ATLAS_OFFLINE_PLATFORM_TAG:?set offline platform tag}
     platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}

@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import runpy
+
+runpy.run_path(
+    str(Path(__file__).resolve().with_name("audit_portainer_smb_offline_bundle")),
+    run_name="__main__",
+)

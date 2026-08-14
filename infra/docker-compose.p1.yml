@@ -117,6 +117,10 @@ services:
       ATLAS_REDIS_URL: redis://redis:6379/0
       ATLAS_QDRANT_URL: http://qdrant:6333
       ATLAS_PROCESSING_PLUGIN_ARTIFACT_ROOT: /var/lib/atlas/plugins
+      ATLAS_NOTES_COLLABORATION_INTERNAL_URL: http://notes-collaboration:8015
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:?set the Notes collaboration transport secret}
+      ATLAS_NOTES_COLLABORATION_TICKET_SECRET: ${ATLAS_NOTES_COLLABORATION_TICKET_SECRET:?set a distinct API-only Notes ticket-sealing secret}
+      ATLAS_NOTES_COLLABORATION_PUBLIC_URL: ${ATLAS_NOTES_COLLABORATION_PUBLIC_URL:-ws://127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}/collaboration}
       ATLAS_PLUGIN_TRUSTED_KEYS_JSON: ${ATLAS_PLUGIN_TRUSTED_KEYS_JSON:-}
       ATLAS_ALLOW_UNSIGNED_PLUGINS: "false"
       ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
@@ -152,6 +156,38 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  notes-collaboration:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.notes-collaboration
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ATLAS_NOTES_COLLABORATION_INTERNAL_URL: http://api:8002
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:?set the Notes collaboration transport secret}
+      ATLAS_NOTES_COLLABORATION_HOST: 0.0.0.0
+      ATLAS_NOTES_COLLABORATION_PORT: "8015"
+    ports:
+      - "127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}:8015"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8015/ready',{headers:{'X-Atlas-Notes-Internal-Secret':process.env.ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 24
 
   plugin-runner:
     build:
@@ -277,7 +313,7 @@ services:
       qdrant:
         condition: service_healthy
     command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.indexing", "--loglevel=INFO", "--concurrency=1"]
-    mem_limit: 2g
+    mem_limit: 3g
 
   celery-maintenance:
     <<: *atlas-worker

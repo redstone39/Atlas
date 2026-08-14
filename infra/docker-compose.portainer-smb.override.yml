@@ -19,7 +19,7 @@ services:
     environment:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
-      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web,${NO_PROXY:-}
+      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,notes-collaboration,api,web,${NO_PROXY:-}
     depends_on:
       artifact-storage-init:
         condition: service_completed_successfully
@@ -28,7 +28,7 @@ services:
     environment:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
-      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web,${NO_PROXY:-}
+      NO_PROXY: ::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,notes-collaboration,api,web,${NO_PROXY:-}
     depends_on:
       artifact-storage-init:
         condition: service_completed_successfully

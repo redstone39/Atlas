@@ -26,6 +26,17 @@
         ".test-support.ts",
         ".test-agent-fixtures.ts"
       ]
+    },
+    "collaboration": {
+      "path": "collaboration-server/src",
+      "extensions": [
+        ".ts"
+      ],
+      "exclude_path_prefixes": [],
+      "exclude_filename_suffixes": [
+        ".d.ts",
+        ".test.ts"
+      ]
     }
   },
   "owners": [
@@ -319,6 +330,16 @@
         "web/src/server"
       ],
       "public_contracts": []
+    },
+    {
+      "id": "notes_collaboration_carrier",
+      "role": "infrastructure",
+      "path_prefixes": [
+        "collaboration-server/src"
+      ],
+      "public_contracts": [
+        "collaboration-server/src/public.ts"
+      ]
     },
     {
       "id": "frontend_features",

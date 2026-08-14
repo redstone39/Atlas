@@ -23,6 +23,7 @@ IMAGE_OVERRIDE = (
     REPOSITORY / "infra" / "docker-compose.portainer-smb.offline-images.yml"
 )
 IMAGE_LOCK = REPOSITORY / "infra" / "portainer-offline-image-lock.json"
+NODE_LICENSE_AUDIT = REPOSITORY / "infra" / "scripts" / "audit_node_licenses"
 EMBEDDING_MODEL_CONTRACT = (
     REPOSITORY
     / "api"
@@ -41,6 +42,7 @@ BUILD_SERVICES = (
     "embedding-model-init",
     "plugin-runner",
     "office-renderer",
+    "notes-collaboration",
     "web",
 )
 VARIABLE_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)")
@@ -149,6 +151,7 @@ def compose_environment(
     numeric_variables = {
         "ATLAS_PRODUCTION_API_PORT",
         "ATLAS_PRODUCTION_POSTGRES_PORT",
+        "ATLAS_PRODUCTION_COLLABORATION_PORT",
         "ATLAS_PRODUCTION_WEB_PORT",
     }
     for index, (name, expression) in enumerate(sorted(contract.items()), start=1):
@@ -378,6 +381,7 @@ def write_bundle(
     compose_only: bool,
 ) -> None:
     prepare_output(output)
+    run([str(NODE_LICENSE_AUDIT)], environment=dict(os.environ))
     image_lock()
     environment, replacements = compose_environment(
         version=version,

@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[2]
+LOCKS = {
+    "collaboration": ROOT / "collaboration-server" / "package-lock.json",
+    "web": ROOT / "web" / "package-lock.json",
+}
+NOTICES = ROOT / "THIRD_PARTY_NOTICES.md"
+CARRIER_DOCKERFILE = ROOT / "infra" / "Dockerfile.notes-collaboration"
+ALLOWED_LICENSES = {
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 AND LGPL-3.0-or-later",
+    "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC-BY-4.0",
+    "ISC",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MIT AND ISC",
+}
+FORBIDDEN_MARKERS = (
+    "@tiptap-pro/",
+    "registry.tiptap.dev",
+    "cloud.tiptap.com",
+    "api.tiptap.dev",
+)
+REQUIRED_CARRIER_PACKAGES = {
+    "@dmsnell/diff-match-patch": ("1.1.0", "Apache-2.0"),
+    "@hocuspocus/server": ("4.6.0", "MIT"),
+    "@hocuspocus/transformer": ("4.6.0", "MIT"),
+    "jsondiffpatch": ("0.7.6", "MIT"),
+    "y-prosemirror": ("1.3.7", "MIT"),
+    "yjs": ("13.6.31", "MIT"),
+}
+PROVIDED_LICENSES = {
+    ("collaboration", "@dmsnell/diff-match-patch"): (
+        ROOT
+        / "infra"
+        / "licenses"
+        / "notes-collaboration"
+        / "diff-match-patch.LICENSE"
+    ),
+    ("collaboration", "jsondiffpatch"): (
+        ROOT
+        / "infra"
+        / "licenses"
+        / "notes-collaboration"
+        / "jsondiffpatch.LICENSE"
+    ),
+}
+LICENSE_PREFIXES = ("license", "licence", "copying", "notice")
+
+
+def fail(message: str) -> None:
+    print(f"Node license audit failed: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def package_name(lock_path: str) -> str:
+    marker = "node_modules/"
+    if marker not in lock_path:
+        return lock_path
+    return lock_path.rsplit(marker, 1)[1]
+
+
+def audit_lock(label: str, path: Path) -> dict[str, dict[str, object]]:
+    raw = path.read_text(encoding="utf-8")
+    lowered = raw.lower()
+    for marker in FORBIDDEN_MARKERS:
+        if marker.lower() in lowered:
+            fail(f"{label} lock contains forbidden Tiptap Pro/Cloud marker {marker}")
+    model = json.loads(raw)
+    packages = model.get("packages")
+    if not isinstance(packages, dict):
+        fail(f"{label} lock has no package inventory")
+    for lock_path, metadata in packages.items():
+        if not lock_path or not isinstance(metadata, dict) or metadata.get("dev") is True:
+            continue
+        license_id = metadata.get("license")
+        if license_id not in ALLOWED_LICENSES:
+            fail(
+                f"{label} production package {package_name(lock_path)} has "
+                f"missing or unapproved license {license_id!r}"
+            )
+        if label == "collaboration":
+            installed = path.parent / lock_path
+            if installed.is_dir() and not any(
+                child.is_file() and child.name.lower().startswith(LICENSE_PREFIXES)
+                for child in installed.iterdir()
+            ):
+                supplied = PROVIDED_LICENSES.get((label, package_name(lock_path)))
+                if supplied is None or not supplied.is_file() or not supplied.read_text(
+                    encoding="utf-8"
+                ).strip():
+                    fail(
+                        f"{label} installed production package {package_name(lock_path)} "
+                        "does not retain a license/notice file"
+                    )
+    return packages
+
+
+inventories = {label: audit_lock(label, path) for label, path in LOCKS.items()}
+carrier = inventories["collaboration"]
+for name, (version, license_id) in REQUIRED_CARRIER_PACKAGES.items():
+    metadata = carrier.get(f"node_modules/{name}")
+    if not isinstance(metadata, dict):
+        fail(f"carrier lock omits required direct runtime package {name}")
+    if metadata.get("version") != version or metadata.get("license") != license_id:
+        fail(f"carrier package pin or license drifted for {name}")
+for lock_path, metadata in carrier.items():
+    if (
+        lock_path.startswith("node_modules/@tiptap/")
+        and lock_path != "node_modules/@tiptap/y-tiptap"
+        and metadata.get("version") != "3.30.0"
+    ):
+        fail(f"carrier Tiptap OSS package is not pinned to 3.30.0: {lock_path}")
+
+web = inventories["web"]
+web_root = web.get("")
+web_dependencies = web_root.get("dependencies", {}) if isinstance(web_root, dict) else {}
+web_notes_enabled = (
+    isinstance(web_dependencies, dict)
+    and "@hocuspocus/provider" in web_dependencies
+    and "yjs" in web_dependencies
+)
+if web_notes_enabled:
+    for name, (version, license_id) in {
+        "@hocuspocus/provider": ("4.6.0", "MIT"),
+        "yjs": ("13.6.31", "MIT"),
+    }.items():
+        metadata = web.get(f"node_modules/{name}")
+        if not isinstance(metadata, dict):
+            fail(f"Web lock omits required Notes runtime package {name}")
+        if metadata.get("version") != version or metadata.get("license") != license_id:
+            fail(f"Web Notes package pin or license drifted for {name}")
+    y_tiptap = web.get("node_modules/@tiptap/y-tiptap")
+    if not isinstance(y_tiptap, dict):
+        fail("Web lock omits required @tiptap/y-tiptap collaboration binding")
+    if y_tiptap.get("version") != "3.0.8" or y_tiptap.get("license") != "MIT":
+        fail("Web @tiptap/y-tiptap package pin or license drifted")
+notice_text = NOTICES.read_text(encoding="utf-8")
+for marker in (
+    "@hocuspocus/server 4.6.0",
+    "@hocuspocus/transformer 4.6.0",
+    "yjs 13.6.31",
+    "y-prosemirror 1.3.7",
+    "jsondiffpatch 0.7.6",
+    "@dmsnell/diff-match-patch 1.1.0",
+    "@tiptap/* 3.30.0",
+    "@tiptap/y-tiptap 3.0.8",
+    "@hocuspocus/provider 4.6.0",
+):
+    if marker not in notice_text:
+        fail(f"production notices omit {marker}")
+
+dockerfile_text = CARRIER_DOCKERFILE.read_text(encoding="utf-8")
+for marker in (
+    "npm prune --omit=dev",
+    "/app/node_modules ./node_modules",
+    "infra/licenses/notes-collaboration ./licenses/notes-collaboration",
+    "THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md",
+    "USER node",
+):
+    if marker not in dockerfile_text:
+        fail(f"carrier image does not preserve the audited runtime contract: {marker}")
+
+print("Node license audit passed")

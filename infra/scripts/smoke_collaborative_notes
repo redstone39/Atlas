@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+project_name="${ATLAS_PRODUCTION_COMPOSE_PROJECT:-atlas-notes-smoke}"
+free_port() {
+  python3 -c 'import socket
+s=socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+export ATLAS_PRODUCTION_POSTGRES_PORT="${ATLAS_PRODUCTION_POSTGRES_PORT:-$(free_port)}"
+export ATLAS_PRODUCTION_API_PORT="${ATLAS_PRODUCTION_API_PORT:-$(free_port)}"
+export ATLAS_PRODUCTION_WEB_PORT="${ATLAS_PRODUCTION_WEB_PORT:-$(free_port)}"
+export ATLAS_PRODUCTION_COLLABORATION_PORT="${ATLAS_PRODUCTION_COLLABORATION_PORT:-$(free_port)}"
+api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT}"
+web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT}"
+export ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET="${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:-notes-smoke-transport-secret}"
+export ATLAS_NOTES_COLLABORATION_TICKET_SECRET="${ATLAS_NOTES_COLLABORATION_TICKET_SECRET:-notes-smoke-distinct-ticket-sealing-secret}"
+export ATLAS_CREDENTIAL_MASTER_KEY="${ATLAS_CREDENTIAL_MASTER_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
+export ATLAS_CREDENTIAL_MASTER_KEY_ID="${ATLAS_CREDENTIAL_MASTER_KEY_ID:-notes-smoke-key}"
+admin_cookie="$(mktemp)"
+member_cookie="$(mktemp)"
+revoked_member_cookie="$(mktemp)"
+accept_cookie="$(mktemp)"
+image_file="$(mktemp)"
+downloaded_image="$(mktemp)"
+image_headers="$(mktemp)"
+provider_dir="$(mktemp -d collaboration-server/.notes-smoke.XXXXXX)"
+provider_script="${provider_dir}/run.mjs"
+suffix="$(date +%s)"
+parent_team_id="team-notes-parent-${suffix}"
+child_team_id="team-notes-child-${suffix}"
+member_email="notes-smoke-${suffix}@example.test"
+project_id="project-notes-${suffix}"
+project_note_id="note-project-smoke-${suffix}"
+project_category_id="note-category-project-${suffix}"
+note_id="note-smoke-${suffix}"
+category_id="note-category-smoke-${suffix}"
+
+compose() {
+  docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
+}
+
+cleanup() {
+  rm -f "$admin_cookie" "$member_cookie" "$accept_cookie" "$revoked_member_cookie" "$image_file" "$downloaded_image" "$image_headers"
+  rm -rf "$provider_dir"
+}
+trap cleanup EXIT
+
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  shift 2
+  for _ in {1..120}; do
+    if curl -fsS "$@" "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for ${name} at ${url}" >&2
+  compose logs >&2 || true
+  return 1
+}
+
+json_field() {
+  python3 -c 'import json,sys
+value=json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    value=value[int(key)] if key.isdigit() else value[key]
+print(value)' "$1"
+}
+
+assert_json() {
+  local expression="$1"
+  python3 -c 'import json,sys
+value=json.load(sys.stdin)
+scope={"data": value, "all": all, "any": any, "len": len, "str": str}
+if not eval(sys.argv[1], {"__builtins__": {}}, scope):
+    raise SystemExit("JSON assertion failed: " + sys.argv[1])' "$expression"
+}
+
+request() {
+  local cookie="$1"
+  local method="$2"
+  local path="$3"
+  local body="${4:-}"
+  local args=(-sS --fail-with-body -b "$cookie" -c "$cookie" -X "$method")
+  if [[ -n "$body" ]]; then
+    args+=(-H "Content-Type: application/json" --data "$body")
+  fi
+  curl "${args[@]}" "${api_url}${path}"
+}
+
+admin_post() { request "$admin_cookie" POST "$1" "$2"; }
+admin_patch() { request "$admin_cookie" PATCH "$1" "$2"; }
+member_post() { request "$member_cookie" POST "$1" "$2"; }
+member_patch() { request "$member_cookie" PATCH "$1" "$2"; }
+admin_get() { request "$admin_cookie" GET "$1"; }
+member_get() { request "$member_cookie" GET "$1"; }
+admin_delete() { request "$admin_cookie" DELETE "$1"; }
+
+compose down -v --remove-orphans >/dev/null 2>&1 || true
+
+if [[ "${ATLAS_NOTES_SMOKE_SKIP_BUILD:-false}" == "true" ]]; then
+  compose up -d
+else
+  compose up --build -d
+fi
+wait_for_url "production API" "${api_url}/api/v1/ops/health"
+wait_for_url "Notes collaboration readiness" "http://127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}/ready" -H "X-Atlas-Notes-Internal-Secret: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET}"
+wait_for_url "production Web" "${web_url}/login"
+
+admin_session="$(admin_post "/api/v1/auth/sessions" '{"identifier":"admin@example.test","password":"AtlasLocalAdmin!01"}')"
+admin_actor_id="$(printf '%s' "$admin_session" | json_field actor.actor_id)"
+invite="$(admin_post "/api/v1/admin/user-invites" "{\"display_name\":\"Notes Smoke Member\",\"email\":\"${member_email}\",\"system_role\":\"user\",\"idempotency_key\":\"invite-${suffix}\"}")"
+member_actor_id="$(printf '%s' "$invite" | json_field invite.actor_id)"
+invite_token="$(printf '%s' "$invite" | json_field local_pilot_acceptance.acceptance_token)"
+request "$accept_cookie" POST "/api/v1/auth/invitations/accept" "{\"invite_token\":\"${invite_token}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"accept-${suffix}\"}" >/dev/null
+member_post "/api/v1/auth/sessions" "{\"identifier\":\"${member_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
+admin_post "/api/v1/admin/projects" "{\"project_id\":\"${project_id}\",\"name\":\"Notes Project ${suffix}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}" >/dev/null
+admin_post "/api/v1/admin/projects/${project_id}/members" "{\"subject_type\":\"user\",\"subject_id\":\"${member_actor_id}\",\"role\":\"viewer\",\"effect\":\"allow\",\"idempotency_key\":\"project-member-${suffix}\"}" >/dev/null
+member_get "/api/v1/notes/scopes" | assert_json "any(item['scope_type']=='project' and item['scope_id']=='${project_id}' for item in data['items'])"
+member_post "/api/v1/note-categories" "{\"category_id\":\"${project_category_id}\",\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"name\":\"Project Smoke Category\",\"idempotency_key\":\"project-category-${suffix}\"}" >/dev/null
+member_post "/api/v1/notes" "{\"note_id\":\"${project_note_id}\",\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"category_id\":\"${project_category_id}\",\"title\":\"Project two-user smoke\",\"idempotency_key\":\"project-note-${suffix}\"}" >/dev/null
+admin_get "/api/v1/notes/${project_note_id}" | assert_json "data['scope']['scope_type']=='project' and data['scope']['scope_id']=='${project_id}' and data['title']=='Project two-user smoke'"
+
+
+admin_post "/api/v1/admin/teams" "{\"team_id\":\"${parent_team_id}\",\"name\":\"Notes Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}" >/dev/null
+admin_post "/api/v1/admin/teams" "{\"team_id\":\"${child_team_id}\",\"name\":\"Notes Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}" >/dev/null
+admin_post "/api/v1/admin/teams/${child_team_id}/members" "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${admin_actor_id}\",\"role\":\"admin\",\"idempotency_key\":\"team-admin-${suffix}\"}" >/dev/null
+admin_post "/api/v1/admin/teams/${child_team_id}/members" "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${member_actor_id}\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
+member_membership_id="$(admin_get "/api/v1/admin/teams/${child_team_id}/members" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(item["membership_id"] for item in data["members"] if item["subject_id"]==sys.argv[1]))' "$member_actor_id")"
+member_get "/api/v1/notes/scopes" | assert_json "any(item['scope_type']=='team' and item['scope_id']=='${parent_team_id}' for item in data['items'])"
+
+settings="$(admin_get "/api/v1/admin/notes/settings")"
+settings_revision="$(printf '%s' "$settings" | json_field settings_revision)"
+printf '%s' "$settings" | assert_json "data['checkpoint_interval_seconds']==30"
+member_settings_status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$member_cookie" "${api_url}/api/v1/admin/notes/settings")"
+[[ "$member_settings_status" == "403" ]]
+
+category="$(admin_post "/api/v1/note-categories" "{\"category_id\":\"${category_id}\",\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"name\":\"Smoke Category\",\"idempotency_key\":\"category-${suffix}\"}")"
+category_revision="$(printf '%s' "$category" | json_field metadata_revision)"
+category="$(admin_post "/api/v1/note-categories/${category_id}/trash" "{\"expected_metadata_revision\":${category_revision},\"idempotency_key\":\"category-trash-${suffix}\"}")"
+category_revision="$(printf '%s' "$category" | json_field metadata_revision)"
+admin_post "/api/v1/note-categories/${category_id}/restore" "{\"expected_metadata_revision\":${category_revision},\"idempotency_key\":\"category-restore-${suffix}\"}" >/dev/null
+
+admin_post "/api/v1/notes" "{\"note_id\":\"${note_id}\",\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"category_id\":\"${category_id}\",\"title\":\"Collaborative smoke\",\"idempotency_key\":\"note-${suffix}\"}" >/dev/null
+collaboration_epoch="$(admin_get "/api/v1/notes/${note_id}" | json_field collaboration_epoch)"
+python3 -c 'import base64,sys; open(sys.argv[1],"wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))' "$image_file"
+attachment_key="note-image-smoke-${suffix}"
+attachment="$(curl -sS --fail-with-body -b "$member_cookie" -c "$member_cookie" -X POST \
+  -H "Idempotency-Key: ${attachment_key}" \
+  -F "file=@${image_file};type=image/png" \
+  -F "expected_collaboration_epoch=${collaboration_epoch}" \
+  -F "idempotency_key=${attachment_key}" \
+  "${api_url}/api/v1/notes/${note_id}/attachments")"
+attachment_ref="$(printf '%s' "$attachment" | json_field attachment_ref)"
+printf '%s' "$attachment" | assert_json "data['mime_type']=='image/png' and data['state']=='ready' and data['byte_size']>0 and data['width']==1 and data['height']==1 and len(data['sha256'])==64"
+curl -sS --fail-with-body -b "$member_cookie" -D "$image_headers" -o "$downloaded_image" "${api_url}/api/v1/notes/${note_id}/attachments/${attachment_ref}/content"
+cmp "$image_file" "$downloaded_image"
+grep -qi '^Cache-Control: private, no-store' "$image_headers"
+grep -qi '^X-Content-Type-Options: nosniff' "$image_headers"
+admin_ticket="$(admin_post "/api/v1/notes/${note_id}/collaboration-ticket" '{}')"
+member_ticket="$(member_post "/api/v1/notes/${note_id}/collaboration-ticket" '{}')"
+printf '%s' "$admin_ticket" | assert_json "data['read_only'] is False"
+printf '%s' "$member_ticket" | assert_json "data['read_only'] is False"
+[[ "$(printf '%s' "$admin_ticket" | json_field room_name)" == "$(printf '%s' "$member_ticket" | json_field room_name)" ]]
+
+cat >"$provider_script" <<'JS'
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import { TiptapTransformer } from "@hocuspocus/transformer";
+import { NOTE_EXTENSIONS } from "../dist/note-extensions.js";
+import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import WebSocket from "ws";
+import * as Y from "yjs";
+
+const adminTicket = JSON.parse(process.env.ADMIN_TICKET);
+const memberTicket = JSON.parse(process.env.MEMBER_TICKET);
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const waitUntil = async (label, predicate, timeout = 15000) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(50);
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+};
+const textOf = document => JSON.stringify(TiptapTransformer.fromYdoc(document, "default"));
+const makeProvider = (ticket, document) => new HocuspocusProvider({
+  url: ticket.websocket_url,
+  name: ticket.room_name,
+  token: ticket.ticket,
+  document,
+  WebSocketPolyfill: WebSocket,
+});
+const adminDocument = new Y.Doc({ gc: false });
+const memberDocument = new Y.Doc({ gc: false });
+const adminProvider = makeProvider(adminTicket, adminDocument);
+const memberProvider = makeProvider(memberTicket, memberDocument);
+try {
+  await waitUntil("both providers to synchronize", () => adminProvider.synced && memberProvider.synced);
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.setAttribute("block_id", "block-admin-first");
+  const text = new Y.XmlText();
+  text.insert(0, "first collaborative body");
+  paragraph.insert(0, [text]);
+  adminDocument.getXmlFragment("default").insert(0, [paragraph]);
+  await waitUntil("member provider to receive first body", () => textOf(memberDocument).includes("first collaborative body"));
+  const richDocument = TiptapTransformer.toYdoc({
+    type: "doc",
+    content: [
+      { type: "bulletList", attrs: { block_id: "block-member-list" }, content: [{ type: "listItem", content: [{
+        type: "paragraph",
+        content: [{ type: "text", text: "member rich update", marks: [
+          { type: "bold" },
+          { type: "link", attrs: { href: "https://atlas.example" } },
+        ] }],
+      }] }] },
+      { type: "table", attrs: { block_id: "block-member-table" }, content: [
+        { type: "tableRow", content: [
+          { type: "tableHeader", attrs: { colspan: 1, rowspan: 1, colwidth: [120] }, content: [{ type: "paragraph", content: [{ type: "text", text: "Header A" }] }] },
+          { type: "tableHeader", attrs: { colspan: 1, rowspan: 1, colwidth: [140] }, content: [{ type: "paragraph", content: [{ type: "text", text: "Header B" }] }] },
+        ] },
+        { type: "tableRow", content: [
+          { type: "tableCell", attrs: { colspan: 1, rowspan: 1, colwidth: [120] }, content: [{ type: "paragraph", content: [{ type: "text", text: "Cell A" }] }] },
+          { type: "tableCell", attrs: { colspan: 1, rowspan: 1, colwidth: [140] }, content: [{ type: "paragraph", content: [{ type: "text", text: "Cell B" }] }] },
+        ] },
+      ] },
+      { type: "noteImage", attrs: { block_id: "block-member-image", attachment_ref: process.env.ATTACHMENT_REF, alt: "", caption: "Smoke image", width: 1, height: 1 } },
+    ],
+  }, "default", NOTE_EXTENSIONS);
+  richDocument.gc = false;
+  Y.applyUpdate(memberDocument, Y.encodeStateAsUpdate(richDocument));
+  await waitUntil("admin provider to receive member rich update", () => {
+    const body = textOf(adminDocument);
+    return body.includes("member rich update") && body.includes("bulletList") && body.includes("bold") && body.includes("https://atlas.example") && body.includes("block-member-table") && body.includes("block-member-image") && body.includes(process.env.ATTACHMENT_REF);
+  });
+  await writeFile(process.env.READY_FILE, "ready");
+  await waitUntil("live settings update", () => existsSync(process.env.GO_FILE));
+  await sleep(1800);
+  await writeFile(process.env.CHECK_FILE, "check");
+  await waitUntil("live timer assertion", () => existsSync(process.env.RELEASE_FILE));
+  console.log(JSON.stringify({ admin: textOf(adminDocument), member: textOf(memberDocument) }));
+  richDocument.destroy();
+} finally {
+  adminProvider.destroy();
+  memberProvider.destroy();
+  adminDocument.destroy();
+  memberDocument.destroy();
+}
+JS
+
+live_settings_ready="${provider_dir}/live-settings-ready"
+live_settings_go="${provider_dir}/live-settings-go"
+live_settings_check="${provider_dir}/live-settings-check"
+live_settings_release="${provider_dir}/live-settings-release"
+ADMIN_TICKET="$admin_ticket" MEMBER_TICKET="$member_ticket" ATTACHMENT_REF="$attachment_ref" READY_FILE="$live_settings_ready" GO_FILE="$live_settings_go" CHECK_FILE="$live_settings_check" RELEASE_FILE="$live_settings_release" node "$provider_script" >/dev/null &
+provider_pid=$!
+for _ in {1..150}; do [[ -f "$live_settings_ready" ]] && break; sleep 0.1; done
+[[ -f "$live_settings_ready" ]]
+admin_patch "/api/v1/admin/notes/settings" "{\"checkpoint_interval_seconds\":1,\"expected_settings_revision\":${settings_revision},\"idempotency_key\":\"settings-${suffix}\"}" >/dev/null
+touch "$live_settings_go"
+for _ in {1..150}; do [[ -f "$live_settings_check" ]] && break; sleep 0.1; done
+[[ -f "$live_settings_check" ]]
+savepoints="$(member_get "/api/v1/notes/${note_id}/savepoints")"
+printf '%s' "$savepoints" | assert_json "len(data['items']) == 2 and 'encoded_yjs_state' not in str(data['items'])"
+touch "$live_settings_release"
+wait "$provider_pid"
+revisions="$(member_get "/api/v1/notes/${note_id}/revisions?limit=100")"
+
+printf '%s' "$revisions" | assert_json "len(data['items']) >= 3 and any(item['actor_id']=='${admin_actor_id}' for item in data['items']) and any(item['actor_id']=='${member_actor_id}' for item in data['items']) and all(item['server_timestamp'] for item in data['items']) and 'member rich update' in str(data['items']) and 'bold' in str(data['items']) and 'https://atlas.example' in str(data['items']) and 'bulletList' in str(data['items']) and 'block-member-table' in str(data['items']) and 'block-member-image' in str(data['items']) and 'raw_yjs_update' not in str(data['items'])"
+savepoints="$(member_get "/api/v1/notes/${note_id}/savepoints")"
+printf '%s' "$savepoints" | assert_json "len(data['items']) == 2 and 'encoded_yjs_state' not in str(data['items'])"
+savepoint_count="$(printf '%s' "$savepoints" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))')"
+sleep 2
+member_get "/api/v1/notes/${note_id}/savepoints" | assert_json "len(data['items'])==${savepoint_count}"
+first_savepoint_id="$(printf '%s' "$savepoints" | json_field items.0.savepoint_id)"
+preview="$(member_get "/api/v1/notes/${note_id}/savepoints/${first_savepoint_id}")"
+printf '%s' "$preview" | assert_json "data['canonical_body']['type']=='doc' and 'encoded_yjs_state' not in data"
+note="$(member_get "/api/v1/notes/${note_id}")"
+revision_head="$(printf '%s' "$note" | json_field accepted_update_head)"
+collaboration_epoch="$(printf '%s' "$note" | json_field collaboration_epoch)"
+restore="$(member_post "/api/v1/notes/${note_id}/savepoints/${first_savepoint_id}/restore-body" "{\"savepoint_id\":\"${first_savepoint_id}\",\"expected_revision_head\":${revision_head},\"expected_collaboration_epoch\":${collaboration_epoch},\"idempotency_key\":\"restore-body-${suffix}\"}")"
+printf '%s' "$restore" | assert_json "data['revision']['event_kind']=='body_restore' and data['revision']['actor_id']=='${member_actor_id}' and data['revision']['server_timestamp'] and data['revision']['restore_source_savepoint_id']=='${first_savepoint_id}'"
+PREVIEW="$preview" RESTORE="$restore" python3 -c 'import json,os; assert json.loads(os.environ["RESTORE"])["savepoint"]["canonical_body"] == json.loads(os.environ["PREVIEW"])["canonical_body"]'
+curl -sS --fail-with-body -b "$member_cookie" -o "$downloaded_image" "${api_url}/api/v1/notes/${note_id}/attachments/${attachment_ref}/content"
+cmp "$image_file" "$downloaded_image"
+after_restore_note="$(member_get "/api/v1/notes/${note_id}")"
+after_restore_revisions="$(member_get "/api/v1/notes/${note_id}/revisions?limit=100")"
+after_restore_savepoints="$(member_get "/api/v1/notes/${note_id}/savepoints")"
+BEFORE_NOTE="$note" BEFORE_REVISIONS="$revisions" BEFORE_SAVEPOINTS="$savepoints" AFTER_NOTE="$after_restore_note" AFTER_REVISIONS="$after_restore_revisions" AFTER_SAVEPOINTS="$after_restore_savepoints" python3 -c 'import json,os
+before_note=json.loads(os.environ["BEFORE_NOTE"]); after_note=json.loads(os.environ["AFTER_NOTE"])
+for key in ("title","category_id","lifecycle_status","metadata_revision"):
+    assert before_note[key] == after_note[key], key
+before_revisions=json.loads(os.environ["BEFORE_REVISIONS"])["items"]; after_revisions=json.loads(os.environ["AFTER_REVISIONS"])["items"]
+before_savepoints=json.loads(os.environ["BEFORE_SAVEPOINTS"])["items"]; after_savepoints=json.loads(os.environ["AFTER_SAVEPOINTS"])["items"]
+assert len(after_revisions) == len(before_revisions) + 1
+assert len(after_savepoints) == len(before_savepoints) + 1
+assert {(item["revision_id"],item["after_digest"]) for item in before_revisions}.issubset({(item["revision_id"],item["after_digest"]) for item in after_revisions})
+assert {(item["savepoint_id"],item["body_digest"]) for item in before_savepoints}.issubset({(item["savepoint_id"],item["body_digest"]) for item in after_savepoints})'
+metadata_revision="$(printf '%s' "$note" | json_field metadata_revision)"
+trashed="$(member_post "/api/v1/notes/${note_id}/trash" "{\"expected_metadata_revision\":${metadata_revision},\"idempotency_key\":\"trash-${suffix}\"}")"
+trashed_revision="$(printf '%s' "$trashed" | json_field metadata_revision)"
+readonly_ticket="$(member_post "/api/v1/notes/${note_id}/collaboration-ticket" '{}')"
+printf '%s' "$readonly_ticket" | assert_json "data['read_only'] is True"
+trashed_revision_head="$(printf '%s' "$trashed" | json_field accepted_update_head)"
+cat >"$provider_script" <<'JS'
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import WebSocket from "ws";
+import * as Y from "yjs";
+const ticket = JSON.parse(process.env.READONLY_TICKET);
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const document = new Y.Doc({ gc: false });
+const provider = new HocuspocusProvider({ url: ticket.websocket_url, name: ticket.room_name, token: ticket.ticket, document, WebSocketPolyfill: WebSocket });
+const deadline = Date.now() + 15000;
+while (!provider.synced && Date.now() < deadline) await sleep(50);
+if (!provider.synced) throw new Error("Read-only provider did not synchronize");
+const paragraph = new Y.XmlElement("paragraph");
+paragraph.setAttribute("block_id", "block-forbidden-trash");
+const text = new Y.XmlText();
+text.insert(0, "forbidden trashed write");
+paragraph.insert(0, [text]);
+document.getXmlFragment("default").insert(0, [paragraph]);
+await sleep(1500);
+provider.destroy();
+document.destroy();
+JS
+READONLY_TICKET="$readonly_ticket" node "$provider_script"
+member_get "/api/v1/notes/${note_id}" | assert_json "data['accepted_update_head']==${trashed_revision_head}"
+member_post "/api/v1/notes/${note_id}/restore" "{\"expected_metadata_revision\":${trashed_revision},\"idempotency_key\":\"restore-${suffix}\"}" >/dev/null
+member_get "/api/v1/notes/${note_id}/revisions?limit=100" | assert_json "any(item['event_kind']=='body_restore' for item in data['items'])"
+
+curl -fsS "${web_url}/projects/${project_id}/notes" >/dev/null
+curl -fsS "${web_url}/workspace/projects/${project_id}/notes" >/dev/null
+curl -fsS "${web_url}/teams/${parent_team_id}/notes" >/dev/null
+curl -fsS "${api_url}/openapi.json" | assert_json "'delete' not in data['paths']['/api/v1/notes/{note_id}'] and 'delete' not in data['paths']['/api/v1/note-categories/{category_id}']"
+member_get "/api/v1/library/documents" | assert_json "'${note_id}' not in str(data) and '${project_note_id}' not in str(data) and 'member rich update' not in str(data)"
+
+compose restart api notes-collaboration >/dev/null
+wait_for_url "restarted production API" "${api_url}/api/v1/ops/health"
+wait_for_url "restarted Notes collaboration readiness" "http://127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}/ready" -H "X-Atlas-Notes-Internal-Secret: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET}"
+member_post "/api/v1/auth/sessions" "{\"identifier\":\"${member_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
+member_get "/api/v1/notes/${note_id}" | assert_json "data['note_id']=='${note_id}' and data['lifecycle_status']=='active'"
+member_get "/api/v1/notes/${note_id}/revisions?limit=100" | assert_json "len(data['items']) >= 4 and any(item['event_kind']=='body_restore' for item in data['items'])"
+
+admin_ticket="$(admin_post "/api/v1/notes/${note_id}/collaboration-ticket" '{}')"
+member_ticket="$(member_post "/api/v1/notes/${note_id}/collaboration-ticket" '{}')"
+expected_body="$(printf '%s' "$preview" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["canonical_body"],separators=(",",":")))' )"
+ready_file="${provider_dir}/revocation-ready"
+go_file="${provider_dir}/revocation-go"
+cat >"$provider_script" <<'JS'
+import { HocuspocusProvider } from "@hocuspocus/provider";
+import { TiptapTransformer } from "@hocuspocus/transformer";
+import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import WebSocket from "ws";
+import * as Y from "yjs";
+const adminTicket = JSON.parse(process.env.ADMIN_TICKET);
+const memberTicket = JSON.parse(process.env.MEMBER_TICKET);
+const expected = JSON.parse(process.env.EXPECTED_BODY);
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const waitUntil = async (label, predicate, timeout = 15000) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(50);
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+};
+const canonical = document => TiptapTransformer.fromYdoc(document, "default");
+const adminDocument = new Y.Doc({ gc: false });
+const memberDocument = new Y.Doc({ gc: false });
+let memberClosed = false;
+const adminProvider = new HocuspocusProvider({ url: adminTicket.websocket_url, name: adminTicket.room_name, token: adminTicket.ticket, document: adminDocument, WebSocketPolyfill: WebSocket });
+const memberProvider = new HocuspocusProvider({ url: memberTicket.websocket_url, name: memberTicket.room_name, token: memberTicket.ticket, document: memberDocument, WebSocketPolyfill: WebSocket, onClose: () => { memberClosed = true; } });
+try {
+  await waitUntil("providers to rebuild persisted body", () => adminProvider.synced && memberProvider.synced);
+  if (JSON.stringify(canonical(adminDocument)) !== JSON.stringify(expected) || JSON.stringify(canonical(memberDocument)) !== JSON.stringify(expected)) {
+    throw new Error("Restarted providers did not reconstruct the restored durable body");
+  }
+  await writeFile(process.env.READY_FILE, "ready");
+  await waitUntil("membership revocation trigger", () => existsSync(process.env.GO_FILE));
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.setAttribute("block_id", "block-forbidden-revoked");
+  const text = new Y.XmlText();
+  text.insert(0, "revoked member forbidden update");
+  paragraph.insert(0, [text]);
+  memberDocument.getXmlFragment("default").insert(0, [paragraph]);
+  await waitUntil("revoked provider to close", () => memberClosed);
+  if (JSON.stringify(canonical(adminDocument)).includes("revoked member forbidden update")) {
+    throw new Error("Revoked update reached the authorized peer");
+  }
+} finally {
+  adminProvider.destroy();
+  memberProvider.destroy();
+  adminDocument.destroy();
+  memberDocument.destroy();
+}
+JS
+ADMIN_TICKET="$admin_ticket" MEMBER_TICKET="$member_ticket" EXPECTED_BODY="$expected_body" READY_FILE="$ready_file" GO_FILE="$go_file" node "$provider_script" &
+provider_pid=$!
+for _ in {1..150}; do [[ -f "$ready_file" ]] && break; sleep 0.1; done
+[[ -f "$ready_file" ]]
+admin_delete "/api/v1/admin/teams/${child_team_id}/members/${member_membership_id}" >/dev/null
+touch "$go_file"
+wait "$provider_pid"
+revoked_status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$member_cookie" "${api_url}/api/v1/notes/${note_id}")"
+[[ "$revoked_status" == "403" ]]
+admin_get "/api/v1/notes/${note_id}" | assert_json "'revoked member forbidden update' not in str(data)"
+
+echo "Collaborative Notes fresh-stack smoke passed: schema-v2 block IDs, table/image convergence, protected immutable attachment bytes, two-user Project and inherited Team access, exact attributable history, dirty-only live-rescheduled savepoints, immutable previewed body restore, trash write rejection, revocation fencing, knowledge isolation, Web routes, and provider reconstruction after crash."

@@ -18,7 +18,7 @@ IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 TYPESCRIPT_DEPENDENCY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_@.-]+$")
 OWNER_ROLES = {"module", "composition", "transport", "shared", "infrastructure", "compatibility"}
 LANGUAGES = {"python", "typescript"}
-ROOT_KEYS = {"backend", "frontend"}
+ROOT_KEYS = {"backend", "frontend", "collaboration"}
 
 
 class AuditError(Exception):
@@ -205,7 +205,8 @@ def validate_registry(raw: dict[str, Any], repo_root: Path) -> tuple[dict[str, A
 
     runtime_repo_paths = {
         path.relative_to(repo_root).as_posix()
-        for path in scanned["backend"] + scanned["frontend"]
+        for paths in scanned.values()
+        for path in paths
     }
     owners = raw["owners"]
     if not isinstance(owners, list) or not owners:
@@ -232,7 +233,7 @@ def validate_registry(raw: dict[str, Any], repo_root: Path) -> tuple[dict[str, A
         for contract in owner["public_contracts"]:
             declared_public_contracts.append((owner_id, contract))
 
-    all_runtime = sorted(scanned["backend"] + scanned["frontend"])
+    all_runtime = sorted(path for paths in scanned.values() for path in paths)
     owner_for_path: dict[str, str] = {}
     for path in all_runtime:
         repo_path = path.relative_to(repo_root).as_posix()
@@ -978,9 +979,10 @@ def scan_typescript_dependencies(
     repo_root: Path,
     files: list[Path],
     source_root: Path,
+    tsconfig: Path,
 ) -> set[Dependency]:
     helper = Path(__file__).with_name("typescript_dependency_graph.mjs")
-    tsconfig = repo_root / "web/tsconfig.json"
+    tsconfig = repo_root / tsconfig
     if not helper.is_file():
         fail(f"TypeScript dependency helper not found: {helper}")
     if not tsconfig.is_file():
@@ -1107,8 +1109,24 @@ def run(repo_root: Path, registry_path: Path, baseline_path: Path) -> None:
     baseline = validate_baseline(load_json(baseline_path, "baseline"), rule_ids)
     backend_root = repo_root / registry["source_roots"]["backend"]["path"]
     frontend_root = repo_root / registry["source_roots"]["frontend"]["path"]
+    collaboration_root = repo_root / registry["source_roots"]["collaboration"]["path"]
     dependencies = scan_python_dependencies(scanned["backend"], backend_root)
-    dependencies.update(scan_typescript_dependencies(repo_root, scanned["frontend"], frontend_root))
+    dependencies.update(
+        scan_typescript_dependencies(
+            repo_root,
+            scanned["frontend"],
+            frontend_root,
+            Path("web/tsconfig.json"),
+        )
+    )
+    dependencies.update(
+        scan_typescript_dependencies(
+            repo_root,
+            scanned["collaboration"],
+            collaboration_root,
+            Path("collaboration-server/tsconfig.json"),
+        )
+    )
     observed = apply_rules(dependencies, registry["dependency_rules"])
     new = observed - baseline
     stale = baseline - observed

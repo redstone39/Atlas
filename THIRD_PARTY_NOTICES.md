@@ -6,9 +6,10 @@ inventory, not legal advice and not a replacement for license texts shipped in
 Python wheels, npm packages, models, operating-system packages, or container
 images.
 
-Resolved versions are pinned by the committed `uv.lock` and
-`web/package-lock.json` files. Distributions must preserve the corresponding
-upstream license and attribution files.
+Resolved versions are pinned by the committed `uv.lock`,
+`web/package-lock.json`, and `collaboration-server/package-lock.json` files.
+Distributions must preserve the corresponding upstream license and attribution
+files.
 
 ## Python runtime dependencies
 
@@ -57,6 +58,22 @@ Other direct selections:
 
 The npm package tarballs and `web/node_modules/<package>/LICENSE*` files are the
 authoritative copies for installed versions.
+
+## Notes collaboration runtime dependencies
+
+MIT-licensed direct selections:
+
+- `@hocuspocus/server 4.6.0` and `@hocuspocus/provider 4.6.0`.
+- `@hocuspocus/transformer 4.6.0`.
+- `yjs 13.6.31` and `y-prosemirror 1.3.7`.
+- `jsondiffpatch 0.7.6`.
+- The `@tiptap/* 3.30.0` OSS runtime family and `@tiptap/y-tiptap 3.0.8`.
+
+`@dmsnell/diff-match-patch 1.1.0` is Apache-2.0. The package tarballs and
+`collaboration-server/node_modules/<package>/LICENSE*` files are authoritative
+for installed versions. Distribution also preserves
+`infra/licenses/notes-collaboration/jsondiffpatch.LICENSE` and
+`infra/licenses/notes-collaboration/diff-match-patch.LICENSE`.
 
 ## Container and service selections
 
