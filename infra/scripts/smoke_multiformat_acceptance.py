@@ -166,18 +166,23 @@ def login_and_configure(client: httpx.Client) -> dict[str, int]:
         or not route["supports_vision"]
     ):
         raise RuntimeError("deterministic route did not pass its controlled test")
-    route = checked(
-        client.post(
-            f"/api/v1/admin/config/model-routes/{ROUTE_ID}/default",
-            json={
-                "expected_revision": route["revision"],
-                "idempotency_key": "default-route-multiformat-acceptance",
-            },
-        ),
-        200,
-    ).json()
-    if not route["is_default"]:
-        raise RuntimeError("deterministic route was not selected for Workspace")
+    for purpose in ("text", "vision"):
+        route = checked(
+            client.post(
+                f"/api/v1/admin/config/model-routes/{ROUTE_ID}/defaults/{purpose}",
+                json={
+                    "expected_revision": route["revision"],
+                    "idempotency_key": (
+                        f"default-{purpose}-route-multiformat-acceptance"
+                    ),
+                },
+            ),
+            200,
+        ).json()
+    if not route["is_text_default"] or not route["is_vision_default"]:
+        raise RuntimeError(
+            "deterministic route was not selected for text and vision"
+        )
 
     profiles = checked(
         client.get("/api/v1/admin/processing-profiles"), 200
@@ -262,7 +267,8 @@ def login_and_verify_existing_configuration(
         or route["status"] != "test_passed"
         or not route["enabled"]
         or not route["supports_vision"]
-        or not route["is_default"]
+        or not route["is_text_default"]
+        or not route["is_vision_default"]
     ):
         raise RuntimeError("acceptance model route is not ready")
     profiles = checked(
