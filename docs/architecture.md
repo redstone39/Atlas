@@ -1,26 +1,34 @@
 # Architecture and trust boundaries
 
 Atlas is a single-deployment, self-hosted document knowledge workspace. The
-supported topology contains Web, API, workers, PostgreSQL, Redis, Qdrant,
-processing plugins, an Office renderer, governed artifact storage, and a
-one-shot embedding-model cache initializer.
+supported topology contains Web, API, a request/event-only Notes collaboration
+carrier, workers, PostgreSQL, Redis, Qdrant, processing plugins, an Office
+renderer, governed artifact storage, and a one-shot embedding-model cache
+initializer.
 
 ## User journey
 
 1. A local or imported directory user authenticates; Atlas remains authoritative
    for account activity, roles, grants, ACLs, and sessions.
-2. An administrator uploads a document and assigns its access scope.
-3. Document intake and processing create a current, traceable generation.
-4. A user creates a Workspace conversation with default-all knowledge or an
+2. An authorized Project or Team uploader assigns a scope and uploads one or
+   more documents.
+3. Document intake and processing create a current, traceable generation; the
+   Web consumer refreshes active jobs until terminal state.
+4. A scope-authorized member enters the canonical Project/Team Knowledge or
+   Notes route. Direct routes check current server scope before content fetch.
+5. Notes clients obtain a short-lived API ticket and connect to the collaboration
+   carrier. The carrier revalidates access and persists every accepted revision,
+   savepoint, restore, and attachment decision through the API/PostgreSQL owner.
+6. A user creates a Workspace conversation with default-all knowledge or an
    immutable Team/Project scope selection, then submits a `standard` or `deep`
    turn.
-5. The runtime intersects the frozen selection with current authorization,
+7. The runtime intersects the frozen selection with current authorization,
    builds immutable context references, and invokes retrieval and answer tools
    under bounded budgets. Deep turns additionally run bounded planning,
    evaluation, and revision.
-6. A terminal transaction publishes the answer, runtime events, safe reasoning
+8. A terminal transaction publishes the answer, runtime events, safe reasoning
    progress, evidence review status, and protected evidence references.
-7. Every later protected read recomputes current authorization and checks exact
+9. Every later protected read recomputes current authorization and checks exact
    artifact lineage.
 
 ## Authority
@@ -28,6 +36,10 @@ one-shot embedding-model cache initializer.
 - PostgreSQL owner repositories are authoritative for local and imported
   identities, directory configuration, projects, grants, documents, processing,
   conversations, turns, routing, audit, and terminal state.
+- PostgreSQL is also authoritative for scope-bound Notes, immutable revisions
+  and savepoints, collaboration epochs, restore commits, settings, and
+  attachment metadata. The WebSocket carrier keeps only reconstructible
+  in-memory room/timer state and has no durable volume or ACL authority.
 - Local or SMB storage owns artifact bytes, but it does not grant access or
   define business state.
 - Qdrant supplies semantic candidates. It is not an authorization or lineage
@@ -55,6 +67,10 @@ Architecture ownership and dependency direction are executable in
 - Direct Team Admin or exact-scope Project Admin authority may bypass a
   document's member-download flag only for that document's exact owner scope,
   and the same capability is rechecked at terminal byte I/O.
+- Knowledge and Notes direct routes preflight the exact current Project/Team
+  scope. Notes connection tickets are short-lived; every accepted sync,
+  reconnect, restore, and attachment read rechecks current authorization and
+  the collaboration epoch.
 - Evidence preview requires current authorization and exact immutable lineage.
 - An answer's `evidence_aligned` or `questionable` status is a soft comparison
   with model-declared evidence, not a truth guarantee or formal citation
@@ -77,12 +93,13 @@ attempt: transport failure, disabled directory principal, invalid password,
 alias conflict, inactive Atlas account, or concurrent deactivation fails closed
 without trying another source.
 
-Directory connection metadata and external identities are durable PostgreSQL
-state. Bind passwords and optional custom CA material use the existing
-AES-256-GCM credential keyring with kind-specific authenticated data. Secret
-values are write-only and never returned. Missing or unreadable key material
-makes directory secret operations unavailable; there is no plaintext fallback
-or scheduled directory sync.
+Directory transport is an explicit `ldaps|start_tls|plain` setting. Plaintext is
+never inferred from port or TLS failure. Connection metadata and external
+identities are durable PostgreSQL state. Bind passwords and optional TLS custom
+CA material use the existing AES-256-GCM credential keyring with kind-specific
+authenticated data. Secret values are write-only and never returned. Missing or
+unreadable key material makes directory secret operations unavailable; there is
+no per-connection environment fallback or scheduled directory sync.
 
 ## Provider and model routing
 
@@ -132,13 +149,17 @@ unless the persisted explicit default is currently eligible.
 
 ## Product surfaces
 
-- Document Library: upload, scope, processing control, status, and authorized
-  original content.
+- Knowledge: canonical Project/Team and Workspace routes, authorized multi-file
+  upload, current processing status, and authorized original content.
+- Notes: scope-bound directories, categories, collaborative block editing,
+  activity/revisions, savepoints, body-only restore, settings, and protected
+  attachments.
 - Workspace: conversation routes, durable execution status, answers, soft
   evidence review, and protected page evidence.
-- System Admin: users, teams, projects, Provider/model routes, LDAP/Active
-  Directory connections and imported profiles, plugins, agents/tokens, safe
-  audit events, and conversation runtime inspection.
+- System Admin: users, teams, projects, Provider/model routes with independent
+  text/vision defaults, explicit LDAP/Active Directory transport and scoped
+  imports, Notes settings, plugins, agents/tokens, safe audit events, and
+  conversation runtime inspection.
 - Agent query management exists, but `POST /api/v1/agent/queries` currently
   returns `501 feature_deferred`.
 

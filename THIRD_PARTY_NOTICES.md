@@ -50,6 +50,15 @@ MIT-licensed direct selections:
 `react-resizable-panels`, `recharts`, `remark-gfm`, `sonner`,
 `tailwind-merge`, `vaul`, and `zod`.
 
+The scoped Notes editor additionally selects the following MIT-licensed Web
+runtime packages: `@hocuspocus/provider` 4.6.0, `yjs` 13.6.31,
+`@tiptap/core`, `@tiptap/extension-collaboration`,
+`@tiptap/extension-drag-handle-react`, `@tiptap/extension-file-handler`,
+`@tiptap/extension-link`, `@tiptap/extension-table`,
+`@tiptap/extension-task-item`, `@tiptap/extension-task-list`,
+`@tiptap/extension-underline`, `@tiptap/extension-unique-id`, `@tiptap/pm`,
+`@tiptap/react`, and `@tiptap/starter-kit` (all Tiptap packages 3.30.0).
+
 Other direct selections:
 
 - `class-variance-authority`: Apache-2.0.

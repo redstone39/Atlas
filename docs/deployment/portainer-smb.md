@@ -32,6 +32,11 @@ Git build context.
 - `ATLAS_ARTIFACT_SWITCH_ACK=I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT`
 - `ATLAS_CREDENTIAL_MASTER_KEY` and `ATLAS_CREDENTIAL_MASTER_KEY_ID` before
   storing Provider or LDAP/Active Directory bind and custom-CA credentials
+- `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` and
+  `ATLAS_NOTES_COLLABORATION_TICKET_SECRET`, generated independently and kept
+  distinct
+- `ATLAS_NOTES_COLLABORATION_PUBLIC_URL`, set to the separately secured
+  browser-reachable `ws://` or `wss://` endpoint for this remote deployment
 
 Optional SMB variables are `ATLAS_SMB_DOMAIN` and
 `ATLAS_SMB_VERSION` (`3.1.1` by default; `3.0` is also supported).

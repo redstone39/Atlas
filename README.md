@@ -43,6 +43,8 @@ source material outside disposable volumes when it must be loaded again.
 - `web/`: React, TypeScript, and Next.js App Router user interface.
 - `api/`: FastAPI application, owner use cases, PostgreSQL repositories, and
   migrations.
+- `collaboration-server/`: request/event-only WebSocket carrier for scoped Notes;
+  PostgreSQL and the API remain authoritative for access and durable content.
 - `plugin-sdk/` and `plugin-runner/`: controlled processing plugin contracts and
   execution.
 - `office-renderer/`: isolated Office document page rendering.
@@ -88,13 +90,20 @@ Every fresh or retried turn intersects that selection with the caller's current
 access; revoked scopes remain unavailable and an empty intersection never
 expands back to all accessible knowledge.
 
+Project and Team members use the same canonical content routes for Knowledge
+and Notes. Authorized uploaders may select multiple files; active processing
+jobs refresh until terminal state. Notes provide scope-bound categories,
+collaborative block editing, activity, savepoints, body-only restore, and
+protected attachments. Every direct route first checks the caller's current
+scope; Web and the collaboration carrier do not merge or cache ACL authority.
+
 ## Local quick start
 
 Requirements:
 
 - Docker Engine with Docker Compose v2;
 - enough memory and disk for PostgreSQL, Redis, Qdrant, the API, four workers,
-  the plugin runner, Office renderer, and Web UI;
+  the Notes collaboration carrier, plugin runner, Office renderer, and Web UI;
 - a fresh evaluation environment.
 
 Create local configuration:
@@ -103,17 +112,21 @@ Create local configuration:
 cp infra/.env.example infra/.env
 ```
 
-Set at least:
+Set the bootstrap credentials and two independent Notes secrets:
 
 ```dotenv
 ATLAS_BOOTSTRAP_ADMIN_EMAIL=you@example.com
 ATLAS_BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-unique-password
+ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET=replace-with-random-value-one
+ATLAS_NOTES_COLLABORATION_TICKET_SECRET=replace-with-random-value-two
 ```
 
-The password must contain at least 12 characters. These values are used only
-when the Identity database is empty. After the first successful initialization,
-the initializer does not rotate or overwrite any existing user. You may remove
-the bootstrap values from `infra/.env` before later restarts.
+Generate each Notes secret separately with `openssl rand -base64 32`; the two
+values must differ. The bootstrap password must contain at least 12 characters.
+Bootstrap values are used only when the Identity database is empty. After the
+first successful initialization, the initializer does not rotate or overwrite
+an existing user. You may remove only the bootstrap values from `infra/.env`
+before later restarts; retain both Notes secrets while the stack is running.
 
 Start the stack:
 
@@ -166,20 +179,36 @@ the resource-root endpoint and an API protocol version; Anthropic uses
 invokes LiteLLM in-process with the stored credential. Route-less execution
 uses only the eligible route explicitly marked as default and never falls back
 to another route.
+System Admin selects text and vision defaults independently. A vision default
+must be a tested, enabled route whose selected model declares vision capability;
+changing either default never silently changes the other.
 
 ## LDAP and Active Directory
 
 System Admin can configure and test an `ldap` or `active_directory` connection,
-search and import directory users, and refresh one imported profile. Atlas
-remains authoritative for account activity, system role, grants, ACLs, and
-sessions. Local email authentication is checked first; once an imported
-directory source is selected, unavailable transport, disabled principals,
-invalid credentials, alias conflicts, or a concurrent Atlas deactivation fail
-closed without falling through to another source.
+search candidates, and import users directly into a selected Project or Team.
+Transport is explicit: `ldaps`, `start_tls`, or plaintext `plain`. Plaintext
+mode is for a deliberately selected trusted evaluation network, displays a
+destructive warning, and never acts as a fallback when TLS fails. Atlas remains
+authoritative for account activity, system role, grants, ACLs, and sessions.
+Local email authentication is checked first; once an imported directory source
+is selected, unavailable transport, disabled principals, invalid credentials,
+alias conflicts, or a concurrent Atlas deactivation fail closed without trying
+another source.
 
 The public snapshot ships unconfigured. It contains no directory endpoint,
 bind credential, custom CA, or imported identity. Live LDAP/Active Directory
 interoperability is not verified by this repository.
+
+## Collaborative Notes
+
+Compose binds the Notes WebSocket carrier to loopback port `8015` by default.
+For a browser on another host, set
+`ATLAS_NOTES_COLLABORATION_PUBLIC_URL` to a separately secured, browser-reachable
+`ws://` or `wss://` endpoint and configure its reverse proxy/TLS outside Atlas.
+The API owns collaboration tickets, current authorization, epochs, revisions,
+savepoints, restore commits, settings, and attachments. The carrier has no
+durable volume and reconstructs rooms from the API after restart.
 
 See [Configuration](docs/configuration.md) for generation and recovery
 requirements.

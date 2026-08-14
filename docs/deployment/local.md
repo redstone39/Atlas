@@ -6,14 +6,17 @@ This path is for a fresh, loopback-only technical evaluation.
 
 ```sh
 cp infra/.env.example infra/.env
-# Edit infra/.env and set the two bootstrap administrator values.
+# Set the two bootstrap values and two independently generated Notes secrets.
+# Generate each Notes secret separately with: openssl rand -base64 32
 cd infra
 docker compose -f docker-compose.p1.yml up --build -d
 ```
 
-The stack starts PostgreSQL, Redis, Qdrant, artifact initialization, API,
-plugin runner, Office renderer, four Celery workers, Celery beat, and Web.
-Services that depend on initialization remain gated when it fails.
+The Notes transport and ticket secrets must both be non-empty and must differ.
+The stack starts PostgreSQL, Redis, Qdrant, artifact initialization, API, the
+Notes collaboration carrier, plugin runner, Office renderer, four Celery
+workers, Celery beat, and Web. Services that depend on initialization or
+authenticated Notes readiness remain gated when it fails.
 
 ## Observe
 
@@ -24,8 +27,10 @@ curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
 ```
 
-Use <http://127.0.0.1:5184/login>. A running container alone is not proof that
-Atlas is ready; use the initializer result, health, readiness, and a real login.
+Use <http://127.0.0.1:5184/login>. The Notes carrier is published only on
+`127.0.0.1:8015` by default, and API readiness includes its authenticated
+settings probe. A running container alone is not proof that Atlas is ready; use
+the initializer result, health, readiness, and a real login.
 
 ## Restart
 
@@ -76,3 +81,8 @@ The base ports bind to `127.0.0.1`. This repository does not configure TLS,
 reverse-proxy authentication, firewall rules, backups, monitoring, or abuse
 controls. Do not change the bind addresses for public exposure without a
 separate security and operations design.
+
+For a browser on another host, `ATLAS_NOTES_COLLABORATION_PUBLIC_URL` must name
+the separately secured browser-reachable `ws://` or `wss://` endpoint. Changing
+the host bind or adding TLS/reverse proxy exposure is outside this local
+loopback-only path.

@@ -21,6 +21,23 @@ returned in JSON or written to application tables as plaintext. Docker
 administrators can inspect container configuration, so use unique temporary
 values and remove them from `.env` after the first successful initialization.
 
+## Notes collaboration
+
+| Variable | Required | Meaning |
+|---|---:|---|
+| `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` | Yes | API-to-carrier transport authentication |
+| `ATLAS_NOTES_COLLABORATION_TICKET_SECRET` | Yes | API-only collaboration-ticket signing |
+| `ATLAS_NOTES_COLLABORATION_PUBLIC_URL` | No | Browser-reachable WebSocket URL; defaults to loopback |
+| `ATLAS_PRODUCTION_COLLABORATION_PORT` | No | Loopback host port; defaults to `8015` |
+
+Generate the two required values independently with `openssl rand -base64 32`.
+They must differ. The ticket secret is passed only to the API; the transport
+secret is shared only by the API and collaboration carrier. Retain both across
+normal restarts. Changing either value invalidates current connections; restart
+the API and carrier together. For a browser on another host, provide a secured
+reachable `ws://` or `wss://` public URL and operate its TLS/reverse proxy
+outside this repository.
+
 ## Provider credential encryption
 
 | Variable | Meaning |
@@ -43,18 +60,21 @@ Provider- or directory-specific credentials to `.env`.
 
 ## LDAP and Active Directory connections
 
-System Admin may create `ldap` or `active_directory` connections with `ldaps`
-or `start_tls`, a bind identity, search bases/filters, attribute mappings, and a
-priority. Bind passwords and optional custom CA material are encrypted with the
+System Admin may create `ldap` or `active_directory` connections with an
+explicit `ldaps`, `start_tls`, or `plain` transport, a bind identity, search
+bases/filters, attribute mappings, and a priority. `plain` is a deliberately
+selected plaintext mode for a trusted evaluation network; the UI warns before
+save, custom CA input is unavailable, and TLS failure never falls back to it.
+Bind passwords and optional TLS custom CA material are encrypted with the
 credential master key using secret-kind-specific authenticated data. They are
-write-only: list, create, update, test, search, import, and profile-refresh
-responses never return plaintext or ciphertext.
+write-only: list, create, update, test, search, scoped import, and
+profile-refresh responses never return plaintext or ciphertext.
 
 Configure a readable `ATLAS_CREDENTIAL_MASTER_KEY`, its key ID, and any retained
 keyring entries before enabling a directory connection. Missing or unreadable
 key material makes directory secret use unavailable and login through the
-selected source fails closed. Atlas provides no plaintext, per-connection
-environment, or automatic fallback credential path.
+selected source fails closed. Atlas provides no per-connection environment or
+automatic fallback credential path.
 
 Directory integration is unconfigured by default. Local login remains
 available. Imported identities must be created through the System Admin search
@@ -77,6 +97,12 @@ attempt passes these values directly to the in-process LiteLLM carrier; no
 Provider-specific environment credential or global LiteLLM setting is used.
 Route-less execution uses only the eligible route explicitly marked as default.
 Changing or recovering a connection does not implicitly select another route.
+
+Text and vision defaults are independent persisted selections. Setting the
+vision default requires an enabled, successfully tested route whose selected
+model advertises vision capability. Disabling a connection or route fails
+closed until the affected default is changed explicitly; Atlas does not choose
+another eligible route automatically.
 
 ## Reasoning route policy
 
@@ -138,13 +164,17 @@ usage with the current route.
   `ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS`
 - Plugin trust: `ATLAS_PLUGIN_TRUSTED_KEYS_JSON`,
   `ATLAS_ALLOW_UNSIGNED_PLUGINS`
+- Notes collaboration: `ATLAS_NOTES_COLLABORATION_INTERNAL_URL`,
+  `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET`,
+  `ATLAS_NOTES_COLLABORATION_TICKET_SECRET`,
+  `ATLAS_NOTES_COLLABORATION_PUBLIC_URL`
 - Offline caches: `ATLAS_FASTEMBED_CACHE`, `TIKTOKEN_CACHE_DIR`,
   `ATLAS_EMBEDDING_OFFLINE`. Compose initializes the pinned embedding cache from
   the separate model image before API and processing/indexing consumers start;
   runtime network download fallback is unsupported.
 - Process proxy for API and `celery-processing`: uppercase `HTTP_PROXY`,
   `HTTPS_PROXY`, and `NO_PROXY`. The Portainer compositions prepend
-  `::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,api,web`
+  `::1,127.0.0.1,localhost,postgres,redis,qdrant,plugin-runner,office-renderer,notes-collaboration,api,web`
   to `NO_PROXY`; lowercase proxy inputs are ignored.
 
 The Compose files provide local defaults for internal service addresses.

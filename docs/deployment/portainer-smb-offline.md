@@ -1,8 +1,9 @@
 # Offline Portainer bundle
 
 `infra/scripts/build_portainer_smb_offline_bundle` builds a platform-specific,
-eight-image delivery directory for `linux/amd64` or `linux/arm64`. The eighth
-reference is the separate content-digest-tagged embedding-model image.
+nine-image delivery directory for `linux/amd64` or `linux/arm64`. The eighth
+reference is the separate content-digest-tagged embedding-model image; the
+ninth is the locked Notes collaboration carrier.
 
 The packaging workstation needs Docker, network access for base images and
 locked build assets, and enough disk space. The target Portainer environment
@@ -28,6 +29,13 @@ The output contains:
 
 The output directory must be empty. Build `linux/amd64` and `linux/arm64`
 separately; do not retag an archive for another architecture.
+
+Before deployment, provide two independently generated, distinct
+`ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` and
+`ATLAS_NOTES_COLLABORATION_TICKET_SECRET` values. Set
+`ATLAS_NOTES_COLLABORATION_PUBLIC_URL` to the separately secured WebSocket URL
+reachable by operators' browsers; the Compose-internal API/carrier URL remains
+unchanged.
 
 Before import, verify every `SHA256SUMS` entry and confirm the manifest platform
 matches the Docker host. If an image is missing, re-import the same verified
