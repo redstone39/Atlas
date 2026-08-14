@@ -93,9 +93,28 @@ it("/admin/models manages provider connections, encrypted-key entry, and models"
     expect(screen.getByLabelText("Custom guidance")).toHaveValue("");
     fireEvent.mouseDown(connectionsTab, { button: 0 });
     fireEvent.click(connectionsTab);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit connection" })[0]!);
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Connection name"), {
+      target: { value: "OpenAI production renamed" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save connection/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const metadataPatch = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) ===
+          "/api/v1/admin/config/provider-connections/connection-openai-primary" &&
+        init?.method === "PATCH",
+    );
+    expect(JSON.parse(String(metadataPatch![1]!.body))).toEqual({
+      display_name: "OpenAI production renamed",
+      expected_revision: 2,
+      idempotency_key: expect.any(String),
+    });
+    expect(await screen.findByText("OpenAI production renamed")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /set api key/i }));
-    let dialog = await screen.findByRole("dialog");
+    dialog = await screen.findByRole("dialog");
     const keyInput = within(dialog).getByLabelText("API key");
     expect(keyInput).toHaveAttribute("type", "password");
     expect(keyInput).toHaveValue("");

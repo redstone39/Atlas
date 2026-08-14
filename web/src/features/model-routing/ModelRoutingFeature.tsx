@@ -353,16 +353,28 @@ export function ModelRoutingFeature({
   function submitConnection() {
     const connectionId = editingConnection?.connection_id ??
       generatedId("connection", connectionName);
+    const displayName = connectionName.trim();
+    const normalizedEndpointUrl = endpointUrl.trim();
+    const normalizedApiVersion = apiVersion.trim();
     void runAction(
       "save-connection",
       () => editingConnection
         ? modelRoutingApi.updateProviderConnection({
             connectionId,
-            displayName: connectionName.trim(),
-            endpointUrl: endpointUrl.trim(),
-            apiVersion: providerType === "azure_openai" ? apiVersion.trim() : undefined,
+            displayName: displayName !== editingConnection.display_name
+              ? displayName
+              : undefined,
+            endpointUrl: normalizedEndpointUrl !== editingConnection.endpoint_url
+              ? normalizedEndpointUrl
+              : undefined,
+            apiVersion: providerType === "azure_openai" &&
+              normalizedApiVersion !== (editingConnection.api_version ?? "")
+              ? normalizedApiVersion
+              : undefined,
             apiKey: apiKey.trim() || undefined,
-            enabled: connectionEnabled,
+            enabled: connectionEnabled !== editingConnection.enabled
+              ? connectionEnabled
+              : undefined,
             expectedRevision: editingConnection.revision,
           })
         : modelRoutingApi.createProviderConnection({
