@@ -572,45 +572,6 @@ it("/workspace freezes selected project and team refs on conversation create", a
     expect(screen.queryByLabelText("Knowledge scope")).not.toBeInTheDocument();
   });
 
-it("/workspace restores the selected knowledge scope after a page reload", async () => {
-    window.history.pushState({}, "", "/workspace");
-    mockApi(memberSession, readyReadiness);
-    const firstRender = render(<App />);
-
-    const scopeTrigger = await screen.findByRole("button", {
-      name: "Knowledge scope",
-    });
-    await waitFor(() => expect(scopeTrigger).toBeEnabled());
-    fireEvent.click(scopeTrigger);
-    const scopeDialog = screen.getByRole("dialog", {
-      name: "Select knowledge scope",
-    });
-    fireEvent.click(
-      within(scopeDialog).getByRole("checkbox", {
-        name: /Signal Integrity Alpha/,
-      }),
-    );
-    fireEvent.click(within(scopeDialog).getByRole("button", { name: "Apply" }));
-    expect(scopeTrigger).toHaveTextContent("1 scopes selected");
-
-    firstRender.unmount();
-    mockApi(memberSession, readyReadiness);
-    render(<App />);
-
-    const restoredScopeTrigger = await screen.findByRole("button", {
-      name: "Knowledge scope",
-    });
-    await waitFor(() => expect(restoredScopeTrigger).toBeEnabled());
-    expect(restoredScopeTrigger).toHaveTextContent("1 scopes selected");
-    fireEvent.click(restoredScopeTrigger);
-    expect(
-      within(screen.getByRole("dialog", {
-        name: "Select knowledge scope",
-      })).getByRole("checkbox", {
-        name: /Signal Integrity Alpha/,
-      }),
-    ).toBeChecked();
-  });
 
 it("/workspace keeps default-all create available when scope options fail", async () => {
     window.history.pushState({}, "", "/workspace");

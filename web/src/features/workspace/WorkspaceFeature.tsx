@@ -57,12 +57,6 @@ import {
 import { workspaceApi, type DeclaredEvidencePreview } from "./api";
 import { ConversationThread } from "./WorkspaceConversationViews";
 import {
-  readStoredScopeSelection,
-  scopeTagKey,
-  storeScopeSelection,
-  workspaceScopeStorageKey,
-} from "./scopePersistence";
-import {
   mergeReasoningProgress,
   mergeStreamingSegment,
   projectRuntimeStreamEvent,
@@ -101,6 +95,10 @@ type WorkspaceSurface =
       scopeId: string | null;
     };
 
+function scopeTagKey(ref: DocumentTagRef) {
+  return `${ref.tag_type}:${ref.tag_id}`;
+}
+
 export function WorkspaceFeature({
   conversationId,
   initialKnowledgeSurface,
@@ -121,8 +119,6 @@ export function WorkspaceFeature({
   const [scopeLoading, setScopeLoading] = useState(false);
   const [scopeLoadError, setScopeLoadError] = useState(false);
   const [scopeReloadKey, setScopeReloadKey] = useState(0);
-  const [restoredScopeSelectionKey, setRestoredScopeSelectionKey] =
-    useState<string | null>(null);
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [retryContext, setRetryContext] = useState<TurnContext | null>(null);
   const [loading, setLoading] = useState(false);
@@ -161,7 +157,6 @@ export function WorkspaceFeature({
       : null;
   const newConversationActive =
     activeSection === "conversation" && activeConversation === null;
-  const pendingStoredScopeTagsRef = useRef<DocumentTagSummary[]>([]);
   const composerCompositionRef = useRef(false);
   const compositionEndTimerRef = useRef<number | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -171,9 +166,6 @@ export function WorkspaceFeature({
   currentConversationIdRef.current = conversationId;
   const newConversationScopeVisible =
     conversationId === null && activeConversation === null;
-  const scopeSelectionStorageKey = session.actor
-    ? workspaceScopeStorageKey(session.actor.actor_id)
-    : null;
   const scopeItems = useMemo(() => {
     const byKey = new Map<string, DocumentTagSummary>();
     for (const item of [...selectedScopeTags, ...scopeOptions]) {
@@ -182,16 +174,11 @@ export function WorkspaceFeature({
     return [...byKey.values()];
   }, [scopeOptions, selectedScopeTags]);
   const initialLoading = historyLoading || conversationLoading;
-  const scopeSelectionValidated =
-    activeConversation !== null ||
-    scopeSelectionStorageKey === null ||
-    restoredScopeSelectionKey === scopeSelectionStorageKey;
   const canAsk = Boolean(
     query.trim() &&
       !loading &&
       !initialLoading &&
       !reconnectingExecutionId &&
-      scopeSelectionValidated &&
       (selectedScopeTags.length === 0 || (!scopeLoading && !scopeLoadError)),
   );
 
@@ -235,34 +222,6 @@ export function WorkspaceFeature({
     }
   };
 
-  useEffect(() => {
-    if (conversationId !== null || scopeSelectionStorageKey === null) {
-      pendingStoredScopeTagsRef.current = [];
-      setSelectedScopeTags([]);
-      setRestoredScopeSelectionKey(null);
-      return;
-    }
-    pendingStoredScopeTagsRef.current =
-      readStoredScopeSelection(scopeSelectionStorageKey);
-    setSelectedScopeTags([]);
-    setRestoredScopeSelectionKey(null);
-  }, [conversationId, scopeSelectionStorageKey]);
-
-
-
-  useEffect(() => {
-    if (
-      conversationId !== null ||
-      scopeSelectionStorageKey === null ||
-      restoredScopeSelectionKey !== scopeSelectionStorageKey
-    ) return;
-    storeScopeSelection(scopeSelectionStorageKey, selectedScopeTags);
-  }, [
-    conversationId,
-    restoredScopeSelectionKey,
-    scopeSelectionStorageKey,
-    selectedScopeTags,
-  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,24 +256,11 @@ export function WorkspaceFeature({
       .then((result) => {
         if (cancelled) return;
         setScopeOptions(result.tags);
-        const availableTags = new Map(
-          result.tags.map((tag) => [scopeTagKey(tag), tag]),
-        );
-        const restoredSelection = pendingStoredScopeTagsRef.current.flatMap(
-          (tag) => {
-            const availableTag = availableTags.get(scopeTagKey(tag));
-            return availableTag ? [availableTag] : [];
-          },
-        );
-        pendingStoredScopeTagsRef.current = [];
-        setSelectedScopeTags(restoredSelection);
-        setRestoredScopeSelectionKey(scopeSelectionStorageKey);
+        setSelectedScopeTags([]);
       })
       .catch(() => {
         if (!cancelled) {
-          pendingStoredScopeTagsRef.current = [];
           setSelectedScopeTags([]);
-          setRestoredScopeSelectionKey(scopeSelectionStorageKey);
           setScopeLoadError(true);
         }
       })
@@ -324,7 +270,7 @@ export function WorkspaceFeature({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, scopeReloadKey, scopeSelectionStorageKey]);
+  }, [conversationId, scopeReloadKey, session.actor?.actor_id]);
 
   useEffect(() => () => {
     conversationRequestRef.current?.abort();
@@ -514,9 +460,6 @@ export function WorkspaceFeature({
     setTurns([]);
     if (clearScopeSelection) {
       setSelectedScopeTags([]);
-      if (scopeSelectionStorageKey !== null) {
-        storeScopeSelection(scopeSelectionStorageKey, []);
-      }
     }
     setQuery("");
     setQueryError("");

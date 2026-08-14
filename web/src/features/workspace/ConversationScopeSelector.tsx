@@ -21,8 +21,11 @@ import {
 } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
-import { scopeTagKey } from "./scopePersistence";
 import type { DocumentTagSummary } from "./types";
+
+function scopeTagKey(item: DocumentTagSummary) {
+  return `${item.tag_type}:${item.tag_id}`;
+}
 
 export function ConversationScopeSelector({
   items,
