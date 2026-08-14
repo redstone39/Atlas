@@ -768,12 +768,16 @@ class _AclSession:
         self.memberships = memberships if memberships is not None else [self.membership]
         self.teams = teams if teams is not None else [self.team]
         self.projects = projects if projects is not None else [self.project]
+        self.connection_options: list[dict[str, str]] = []
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
         return None
+
+    def connection(self, *, execution_options):
+        self.connection_options.append(execution_options)
 
     def get(self, row_type, key):
         if row_type is AtlasUserRow and key == self.actor.actor_id:
@@ -786,6 +790,7 @@ class _AclSession:
 
     def scalars(self, statement):
         entity = statement.column_descriptions[0].get("entity")
+        selected_name = statement.column_descriptions[0].get("name")
         if entity is AtlasPermissionGrantRow:
             return _Rows(self.grants)
         if entity is AtlasTeamMembershipRow:
@@ -793,6 +798,8 @@ class _AclSession:
         if entity is AtlasProjectRow:
             return _Rows(self.projects)
         if entity is AtlasTeamRow:
+            if selected_name == "team_id":
+                return _Rows(team.team_id for team in self.teams)
             return _Rows(self.teams)
         raise AssertionError(f"unexpected scalar entity: {entity}")
 
@@ -1129,6 +1136,35 @@ def test_team_document_inheritance_off_excludes_parent_scope() -> None:
     assert authority.effective_document_scope(
         actor_type="user", actor_id="user-unit", action="read_original",
     ) == {("team", "team-child")}
+
+
+def test_workspace_scope_labels_include_empty_admin_projects_and_teams() -> None:
+    project = AtlasProjectRow(
+        project_id="project-empty",
+        name="New Project",
+        policy_profile_id="policy-default",
+    )
+    team = _team("team-empty", None)
+    session = _AclSession(
+        actor=_actor(system_role="admin"),
+        teams=[team],
+        memberships=[],
+        grants=[],
+        projects=[project],
+    )
+    authority = ActionAwareAclAuthority(lambda: session)
+
+    assert authority.effective_document_scope_labels(
+        actor_type="user",
+        actor_id="user-unit",
+        action="workspace_query",
+    ) == [
+        ("project", "project-empty", "New Project"),
+        ("team", "team-empty", team.name),
+    ]
+    assert session.connection_options == [
+        {"isolation_level": "REPEATABLE READ"}
+    ]
 
 
 def _resolved_owner_scope(

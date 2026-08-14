@@ -56,6 +56,9 @@ from atlas_production.infrastructure.postgres_identity_adapter import (
 from atlas_production.infrastructure.postgres_model_routing_adapter import PostgresModelRoutingAdapter
 from atlas_production.infrastructure.postgres_ops_adapter import PostgresOpsAdapter
 from atlas_production.infrastructure.postgres_owner.ops import PostgresOpsReadinessRepository
+from atlas_production.infrastructure.postgres_owner.project import (
+    ActionAwareAclAuthority,
+)
 from atlas_production.infrastructure.postgres_processing_adapter import PostgresProcessingAdapter
 from atlas_production.infrastructure.postgres_project_adapter import build_postgres_project_governance
 from atlas_production.infrastructure.postgres_authorization_v1_adapter import (
@@ -206,6 +209,7 @@ class ApiComposition:
     agent_runtime: AgentRuntimeApplication
     team_access: TeamAccessService
     project_governance: ProjectGovernanceService
+    workspace_scope_authority: ActionAwareAclAuthority
     processing_registry: ProcessingRegistryService
     document_intake: PostgresDocumentIntakeAdapter
     document_processing: PostgresDocumentProcessingAdapter
@@ -387,6 +391,7 @@ def build_api_composition(
         session_factory,
         directory_identity,
         identity_repository,
+        identity_repository.acl_authority,
     )
     notes_notifier = HttpNotesCollaborationClient.from_environment()
     notes_artifact_writer = BoundedArtifactWriter(selected.engine)
@@ -582,6 +587,7 @@ def build_api_composition(
         agent_runtime=agent_runtime,
         team_access=team_access,
         project_governance=project_governance,
+        workspace_scope_authority=identity_repository.acl_authority,
         processing_registry=processing_registry,
         document_intake=document_intake,
         document_processing=document_processing,

@@ -53,6 +53,25 @@ class _Identity:
         return None
 
 
+class _WorkspaceScopeAuthority:
+    def effective_document_scope_labels(
+        self,
+        *,
+        actor_type: str,
+        actor_id: str,
+        action: str,
+    ):
+        assert (actor_type, actor_id, action) == (
+            "user",
+            "user-1",
+            "workspace_query",
+        )
+        return [
+            ("project", "project-empty", "New Project"),
+            ("team", "team-empty", "New Team"),
+        ]
+
+
 class _ProtectedOriginals:
     def build(self, **facts):
         return SimpleNamespace(
@@ -103,6 +122,35 @@ def test_runtime_app_preserves_auth_cookie_and_correlation_header() -> None:
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=lax" in response.headers["set-cookie"]
     assert response.headers["x-atlas-correlation-id"]
+
+
+def test_workspace_scope_lists_authorized_scopes_without_documents() -> None:
+    client = TestClient(
+        create_app(
+            _composition(
+                current_principal=_Principal(),
+                workspace_scope_authority=_WorkspaceScopeAuthority(),
+            )
+        )
+    )
+
+    response = client.get("/api/v1/workspace/tag-scope")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tags": [
+            {
+                "tag_type": "project",
+                "tag_id": "project-empty",
+                "label": "New Project",
+            },
+            {
+                "tag_type": "team",
+                "tag_id": "team-empty",
+                "label": "New Team",
+            },
+        ]
+    }
 
 
 def test_runtime_original_content_preserves_head_range_and_etag() -> None:

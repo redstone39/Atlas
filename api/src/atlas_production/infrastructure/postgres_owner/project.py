@@ -481,6 +481,62 @@ class ActionAwareAclAuthority:
                 )
             }
 
+    def effective_document_scope_labels(
+        self,
+        *,
+        actor_type: str,
+        actor_id: str,
+        action: str,
+    ) -> list[tuple[str, str, str]]:
+        if action not in ACTION_REQUIRED_ROLE:
+            raise ValueError(f"unknown ACL action: {action}")
+        with self.session_factory() as session:
+            session.connection(
+                execution_options={"isolation_level": "REPEATABLE READ"}
+            )
+            actor = session.get(AtlasUserRow, actor_id)
+            if (
+                actor is None
+                or actor.actor_type != actor_type
+                or not actor.active
+            ):
+                return []
+            project_rows = session.scalars(
+                select(AtlasProjectRow).order_by(AtlasProjectRow.project_id)
+            ).all()
+            project_labels = [
+                ("project", project.project_id, project.name)
+                for project in project_rows
+                if self.resolve_in_session(
+                    session,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    project_id=project.project_id,
+                    action=action,
+                ).allowed
+            ]
+            team_ids = self._effective_team_tag_ids(
+                session,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                system_admin=actor.system_role == "admin",
+            )
+            team_rows = session.scalars(
+                select(AtlasTeamRow).where(
+                    AtlasTeamRow.team_id.in_(team_ids or {""})
+                )
+            ).all()
+            return sorted(
+                [
+                    *project_labels,
+                    *[
+                        ("team", team.team_id, team.name)
+                        for team in team_rows
+                        if team.team_id in team_ids
+                    ],
+                ]
+            )
+
     @classmethod
     def resolve_in_session(
         cls,
