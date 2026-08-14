@@ -19,10 +19,7 @@ from atlas_production.infrastructure.persistence.notes import (
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
-from atlas_production.infrastructure.postgres_locks import (
-    acquire_mixed_owner_locks,
-    acquire_owner_locks,
-)
+from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.project import (
     ActionAwareAclAuthority,
     PostgresNotesMembershipAuthority,
@@ -305,34 +302,14 @@ class PostgresNotesOwner:
 
     def authorize_attachment_open(
         self, *, actor_id: str, note_id: str, attachment_ref: str
-    ) -> tuple[NoteAttachmentV1, str, str]:
+    ) -> tuple[NoteAttachmentV1, str]:
         def run(session: Session):
-            acquire_mixed_owner_locks(
-                session, shared_domain_keys=("artifact:control",)
-            )
             self._note_scope(session, actor_id, note_id, write=True)
             note = session.get(AtlasNoteRow, note_id)
             row = session.get(AtlasNoteAttachmentRow, attachment_ref)
             if note is None or row is None or row.note_id != note_id:
                 raise _error("note_not_found", "Attachment was not found", 404)
-            if self.artifact_reader is None:
-                raise _error("storage_unavailable", "Notes attachment storage is unavailable", 503)
-            try:
-                lease_id = self.artifact_reader.stage_active_read(  # type: ignore[attr-defined]
-                    session,
-                    artifact_id=row.artifact_id,
-                    expected_artifact_class="note_image",
-                    expected_parent_resource_id=note_id,
-                    expected_owner_scope_type=note.scope_type,
-                    expected_owner_scope_id=note.scope_id,
-                    expected_content_type=row.mime_type,
-                    expected_byte_size=row.byte_size,
-                    expected_sha256=row.sha256,
-                    lease_owner=f"notes:{actor_id}",
-                )
-            except (RuntimeError, ValueError) as exc:
-                raise _error("integrity_failure", "Attachment storage graph is invalid", 503) from exc
-            return self._attachment(row), row.artifact_id, lease_id
+            return self._attachment(row), row.artifact_id
 
         return self._tx(run)
 

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime
-import time
 
 import pytest
 from PIL import Image
@@ -19,7 +17,6 @@ from atlas_production.infrastructure.bounded_artifact_writer import BoundedArtif
 from atlas_production.infrastructure.persistence.artifact_storage import (
     AtlasArtifactStorageControlRow,
     AtlasArtifactStorageTargetRow,
-    AtlasStorageRequestLeaseRow,
 )
 from atlas_production.infrastructure.persistence.identity_access import (
     AtlasPermissionGrantRow,
@@ -142,7 +139,7 @@ def _seed(runtime: PostgresRuntime, tmp_path: Path) -> PostgresNotesAttachmentPr
 
 
 def test_notes_attachment_upload_replay_open_trash_and_exact_note_binding(
-    postgres_runtime: PostgresRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_runtime: PostgresRuntime, tmp_path: Path
 ) -> None:
     provider = _seed(postgres_runtime, tmp_path)
     owner = provider.owner
@@ -186,46 +183,11 @@ def test_notes_attachment_upload_replay_open_trash_and_exact_note_binding(
         content=content,
     )
     assert replay == attachment
-    provider.artifact_writer.read_heartbeat_seconds = 0.01
-    provider.artifact_writer.read_lease_seconds = 0.1
-    heartbeat_calls: list[str] = []
-    original_heartbeat = provider.artifact_writer.heartbeat_read_lease
-    original_verify = LocalArtifactFilesystemAdapter.verify_full
-
-    def delayed_verify(self, *args: object, **kwargs: object) -> None:
-        time.sleep(0.04)
-        original_verify(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    def observed_heartbeat(read_lease_id: str) -> None:
-        heartbeat_calls.append(read_lease_id)
-        original_heartbeat(read_lease_id)
-
-    monkeypatch.setattr(LocalArtifactFilesystemAdapter, "verify_full", delayed_verify)
-    monkeypatch.setattr(provider.artifact_writer, "heartbeat_read_lease", observed_heartbeat)
     assert provider.open(
         actor_id="user-notes-attachment",
         note_id=first.note_id,
         attachment_ref=attachment.attachment_ref,
     ).content == content
-    assert heartbeat_calls
-    with postgres_runtime.session_factory() as session:
-        assert session.query(AtlasStorageRequestLeaseRow).count() == 0
-
-    _attachment, _artifact_id, lease_id = owner.authorize_attachment_open(
-        actor_id="user-notes-attachment",
-        note_id=first.note_id,
-        attachment_ref=attachment.attachment_ref,
-    )
-    with postgres_runtime.session_factory() as session:
-        before = session.get(AtlasStorageRequestLeaseRow, lease_id)
-        assert before is not None
-        prior_expiry = datetime.fromisoformat(before.expires_at)
-    provider.artifact_writer.heartbeat_read_lease(lease_id)
-    with postgres_runtime.session_factory() as session:
-        after = session.get(AtlasStorageRequestLeaseRow, lease_id)
-        assert after is not None
-        assert datetime.fromisoformat(after.expires_at) > prior_expiry
-    provider.artifact_writer.complete_read_lease(lease_id)
 
     with pytest.raises(NotesError) as cross_note:
         provider.open(

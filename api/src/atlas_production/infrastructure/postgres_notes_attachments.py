@@ -115,7 +115,7 @@ class PostgresNotesAttachmentProvider:
     def open(
         self, *, actor_id: str, note_id: str, attachment_ref: str
     ) -> NoteAttachmentContent:
-        attachment, artifact_id, read_lease_id = self.owner.authorize_attachment_open(
+        attachment, artifact_id = self.owner.authorize_attachment_open(
             actor_id=actor_id,
             note_id=note_id,
             attachment_ref=attachment_ref,
@@ -123,7 +123,6 @@ class PostgresNotesAttachmentProvider:
         try:
             content = self.artifact_writer.read_active_artifact(
                 artifact_id,
-                read_lease_id=read_lease_id,
                 expected_artifact_class="note_image",
                 expected_parent_resource_id=note_id,
                 expected_content_type=attachment.mime_type,
@@ -151,8 +150,6 @@ class PostgresNotesAttachmentProvider:
             raise NotesError(
                 "storage_unavailable", "Notes attachment storage is unavailable", 503
             ) from exc
-        finally:
-            self.artifact_writer.complete_read_lease(read_lease_id)
         return NoteAttachmentContent(content=content, mime_type=attachment.mime_type)
 
 
