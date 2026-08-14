@@ -97,6 +97,7 @@ class TeamGovernanceChangeSet:
     protect_hierarchy: bool = False
     protected_admin_team_ids: tuple[str, ...] = ()
     authorization_actor_ids: tuple[str, ...] = ()
+    current_actor_ids: tuple[str, ...] = ()
     authorization_team_id: str | None = None
     authorization_requires_system_admin: bool = False
 
@@ -134,7 +135,10 @@ class TeamRepository:
                     identity_keys=(
                         *(
                             identity_actor_owner_key(actor_id)
-                            for actor_id in change_set.authorization_actor_ids
+                            for actor_id in (
+                                *change_set.authorization_actor_ids,
+                                *change_set.current_actor_ids,
+                            )
                         ),
                         *(
                             f"team:admin-control:{team_id}"
@@ -163,6 +167,7 @@ class TeamRepository:
                     ),
                 )
                 self._validate_currentness(session, change_set)
+                self._validate_actor_currentness(session, change_set)
                 if change_set.protect_hierarchy:
                     self._validate_hierarchy(session, change_set.teams)
                 self._validate_authorization(session, change_set)
@@ -232,6 +237,16 @@ class TeamRepository:
                 if depth > _MAX_TEAM_DEPTH:
                     raise TeamInvariantViolation("Team hierarchy exceeds maximum depth")
                 cursor = parents.get(cursor)
+
+    @staticmethod
+    def _validate_actor_currentness(
+        session: Session,
+        change_set: TeamGovernanceChangeSet,
+    ) -> None:
+        for actor_id in change_set.current_actor_ids:
+            actor = session.get(AtlasUserRow, actor_id)
+            if actor is None or not actor.active:
+                raise TeamCurrentnessConflict("Team actor currentness changed")
 
     @staticmethod
     def _validate_authorization(

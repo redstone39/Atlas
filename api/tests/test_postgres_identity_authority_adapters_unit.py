@@ -35,6 +35,7 @@ from atlas_production.infrastructure.postgres_owner.project import (
 )
 from atlas_production.infrastructure.postgres_owner.team import (
     TeamAuthorizationConflict,
+    TeamCurrentnessConflict,
     TeamGovernanceChangeSet,
     TeamInvariantViolation,
     TeamRepository,
@@ -641,7 +642,42 @@ def test_team_adapter_commits_hierarchy_mutation_and_audit_together() -> None:
     assert owner.change_sets[0].audit_events == (event,)
     assert owner.change_sets[0].protect_hierarchy is True
     assert owner.change_sets[0].authorization_actor_ids == ("user-admin",)
+    assert owner.change_sets[0].current_actor_ids == ("user-admin",)
     assert owner.change_sets[0].authorization_requires_system_admin is True
+
+
+def test_team_adapter_separates_authorizing_actor_from_current_target() -> None:
+    repository = PostgresTeamAccessRepository(lambda: None)
+    owner = _TeamOwnerCapture()
+    repository.owner = owner
+    membership = TeamMembershipRecord(
+        "tm-target",
+        "team-unit",
+        "user",
+        "user-target",
+        "active",
+        NOW,
+    )
+    with repository.team_mutation(
+        "team-unit",
+        actor_ids=("user-admin", "user-target"),
+    ):
+        repository.put_membership(membership)
+        repository.append_audit(
+            TeamAuditCommand(
+                "team_member_added",
+                "user-admin",
+                "team-membership:tm-target",
+                "team.is_ready",
+                {},
+            )
+        )
+
+    assert owner.change_sets[0].authorization_actor_ids == ("user-admin",)
+    assert owner.change_sets[0].current_actor_ids == (
+        "user-admin",
+        "user-target",
+    )
 
 
 class _ProjectOwnerCapture:
@@ -1114,6 +1150,18 @@ def test_owner_commit_revalidates_revoked_system_admin_authority() -> None:
             ProjectAclChangeSet(
                 authorization_actor_id="user-unit",
                 authorization_requires_system_admin=True,
+            ),
+        )
+
+
+def test_team_owner_rejects_inactive_current_target() -> None:
+    session = _AclSession(actor=_actor(active=False))
+
+    with pytest.raises(TeamCurrentnessConflict, match="actor currentness"):
+        TeamRepository._validate_actor_currentness(
+            session,
+            TeamGovernanceChangeSet(
+                current_actor_ids=("user-unit",),
             ),
         )
 

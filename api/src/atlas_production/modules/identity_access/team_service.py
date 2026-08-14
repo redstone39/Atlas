@@ -499,7 +499,14 @@ class TeamAccessService:
         return self._run_mutation(
             self._team_mutation_context(
                 team_id,
-                actor_ids=(actor.actor_id,),
+                actor_ids=tuple(
+                    actor_id
+                    for actor_id in (
+                        actor.actor_id if actor else None,
+                        payload.member_actor_id,
+                    )
+                    if actor_id
+                ),
             ),
             lambda: self._add_member_locked(actor, team_id, payload),
         )

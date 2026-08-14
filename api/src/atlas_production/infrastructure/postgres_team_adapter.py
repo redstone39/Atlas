@@ -268,7 +268,8 @@ class PostgresTeamAccessRepository(TeamAccessRepository):
                     protected_admin_team_ids=(
                         (buffer.team_id,) if buffer.memberships else ()
                     ),
-                    authorization_actor_ids=buffer.actor_ids,
+                    authorization_actor_ids=buffer.actor_ids[:1],
+                    current_actor_ids=buffer.actor_ids,
                     authorization_team_id=(
                         None if buffer.include_hierarchy else buffer.team_id
                     ),
