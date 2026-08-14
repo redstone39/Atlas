@@ -74,6 +74,9 @@ vi.mock("@tiptap/react", () => ({
     });
   },
 }));
+vi.mock("@tiptap/react/menus", () => ({
+  BubbleMenu: () => null,
+}));
 vi.mock("@tiptap/extension-drag-handle-react", () => ({
   default: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));

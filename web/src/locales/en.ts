@@ -1759,6 +1759,8 @@ export const en = {
 "notes.blocksAndLists": "Blocks and lists",
 "notes.insert": "Insert",
 "notes.table": "Table",
+"notes.tableActions": "Table actions",
+"notes.openTableActions": "Open table actions",
 "notes.tableRows": "Table rows",
 "notes.tableColumns": "Table columns",
 "notes.tableCells": "Table cells",

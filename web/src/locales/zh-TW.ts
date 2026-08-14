@@ -1736,6 +1736,8 @@ export const zhTW = {
 "notes.blocksAndLists": "區塊與清單",
 "notes.insert": "插入",
 "notes.table": "表格",
+"notes.tableActions": "表格操作",
+"notes.openTableActions": "開啟表格操作",
 "notes.tableRows": "表格列",
 "notes.tableColumns": "表格欄",
 "notes.tableCells": "儲存格",

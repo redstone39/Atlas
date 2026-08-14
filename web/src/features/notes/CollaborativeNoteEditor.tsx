@@ -18,6 +18,7 @@ import { notesApi } from "./api";
 import { NoteBlockControls } from "./NoteBlockControls";
 import { NoteEditorToolbar } from "./NoteEditorToolbar";
 import { NoteImageControls } from "./NoteImageControls";
+import { NoteTableControls } from "./NoteTableControls";
 import {
   addImageUploadPlaceholder,
   ensureTopLevelBlockIds,
@@ -372,6 +373,7 @@ export function CollaborativeNoteEditor({ note }: { note: NoteDetail }) {
         <NoteImageControls editor={editor} noteId={note.note_id} editable={editable} />
       </div>
       <div className="relative">
+        {editor && <NoteTableControls editor={editor} editable={editable} />}
         {editor && connectionState === "synced" && (
           <DragHandle editor={editor}>
             <Button asChild size="icon-sm" variant="outline">

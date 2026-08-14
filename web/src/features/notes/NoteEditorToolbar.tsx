@@ -1,8 +1,7 @@
 import type { Editor } from "@tiptap/react";
-import { Bold, ChevronDown, Code, CodeXml, Columns3, CornerDownLeft, ImagePlus, Italic, List, ListChecks, ListOrdered, Merge, Minus, Pilcrow, Plus, Quote, Redo2, Rows3, Split, Strikethrough, Table2, Underline as UnderlineIcon, Undo2 } from "lucide-react";
+import { Bold, ChevronDown, Code, CodeXml, CornerDownLeft, ImagePlus, Italic, List, ListChecks, ListOrdered, Minus, Pilcrow, Plus, Quote, Redo2, Strikethrough, Table2, Underline as UnderlineIcon, Undo2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
 
 import { Button } from "../../components/ui/button";
 import {
@@ -14,16 +13,9 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../components/ui/tooltip";
-import {
-  clearCurrentTableCell,
-  currentTableCellText,
-  resetCurrentTableColumnWidths,
-  selectCurrentTablePart,
-} from "./note-editor-commands";
 import { NoteFindReplace } from "./NoteFindReplace";
 import { NoteLinkPopover } from "./NoteLinkPopover";
 
@@ -72,16 +64,6 @@ export function NoteEditorToolbar({
   onPickImage: () => void;
 }) {
   const { t } = useTranslation();
-
-  async function copyCell() {
-    if (!editor) return;
-    try {
-      await navigator.clipboard.writeText(currentTableCellText(editor));
-      toast.success(t("notes.cellCopied"));
-    } catch {
-      toast.error(t("notes.clipboardFailed"));
-    }
-  }
 
   return (
     <TooltipProvider delayDuration={400}>
@@ -188,52 +170,6 @@ export function NoteEditorToolbar({
               </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-          {editor?.isActive("table") && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="secondary" size="sm" className="h-11 sm:h-8" disabled={!editable}>
-                  <Table2 data-icon="inline-start" />{t("notes.table")}<ChevronDown data-icon="inline-end" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>{t("notes.tableRows")}</DropdownMenuLabel>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().addRowBefore().run()}><Rows3 />{t("notes.addRowBefore")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().addRowAfter().run()}><Rows3 />{t("notes.addRowAfter")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => selectCurrentTablePart(editor, "row")}><Rows3 />{t("notes.selectRow")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().deleteRow().run()}><Rows3 />{t("notes.deleteRow")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().toggleHeaderRow().run()}><Rows3 />{t("notes.toggleHeaderRow")}</DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>{t("notes.tableColumns")}</DropdownMenuLabel>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().addColumnBefore().run()}><Columns3 />{t("notes.addColumnBefore")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().addColumnAfter().run()}><Columns3 />{t("notes.addColumnAfter")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => selectCurrentTablePart(editor, "column")}><Columns3 />{t("notes.selectColumn")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().deleteColumn().run()}><Columns3 />{t("notes.deleteColumn")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().toggleHeaderColumn().run()}><Columns3 />{t("notes.toggleHeaderColumn")}</DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>{t("notes.tableCells")}</DropdownMenuLabel>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().mergeCells().run()}><Merge />{t("notes.mergeCells")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().splitCell().run()}><Split />{t("notes.splitCell")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => editor.chain().focus().toggleHeaderCell().run()}><Table2 />{t("notes.toggleHeaderCell")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => void copyCell()}><Table2 />{t("notes.copyCell")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => clearCurrentTableCell(editor)}><Table2 />{t("notes.clearCell")}</DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>{t("notes.tableLayout")}</DropdownMenuLabel>
-                  <DropdownMenuItem onSelect={() => selectCurrentTablePart(editor, "table")}><Table2 />{t("notes.selectTable")}</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => resetCurrentTableColumnWidths(editor)}><Columns3 />{t("notes.resetColumnWidths")}</DropdownMenuItem>
-                  <DropdownMenuItem disabled>{t("notes.tableKeyboardHint")}</DropdownMenuItem>
-                  <DropdownMenuItem disabled>{t("notes.tableScrollHint")}</DropdownMenuItem>
-                  <DropdownMenuItem variant="destructive" onSelect={() => editor.chain().focus().deleteTable().run()}><Table2 />{t("notes.deleteTable")}</DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
         </div>
 
         <div className="flex gap-2 sm:gap-1" role="group" aria-label={t("notes.historyControls")}>
