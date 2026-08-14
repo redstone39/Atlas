@@ -50,7 +50,7 @@ class AesGcmEnvelopeCipher:
             raise ValueError("credential master key is unavailable")
         try:
             key = base64.b64decode(encoded, validate=True)
-            raw_keyring = os.getenv("ATLAS_CREDENTIAL_MASTER_KEYRING", "{}")
+            raw_keyring = os.getenv("ATLAS_CREDENTIAL_MASTER_KEYRING") or "{}"
             keyring_payload = json.loads(raw_keyring)
             if not isinstance(keyring_payload, dict) or any(
                 not isinstance(identity, str) or not isinstance(value, str)
