@@ -39,6 +39,12 @@ def base_registry() -> dict:
                 "exclude_path_prefixes": [],
                 "exclude_filename_suffixes": [],
             },
+            "collaboration": {
+                "path": "collaboration-server/src",
+                "extensions": [".ts", ".tsx"],
+                "exclude_path_prefixes": [],
+                "exclude_filename_suffixes": [],
+            },
         },
         "owners": [
             {
@@ -57,6 +63,12 @@ def base_registry() -> dict:
                 "id": "frontend_composition",
                 "role": "composition",
                 "path_prefixes": ["web/src/app"],
+                "public_contracts": [],
+            },
+            {
+                "id": "collaboration_carrier",
+                "role": "infrastructure",
+                "path_prefixes": ["collaboration-server/src"],
                 "public_contracts": [],
             },
         ],
@@ -116,6 +128,19 @@ def fixture_repo(tmp_path: Path) -> tuple[Path, dict, dict]:
                 "baseUrl": ".",
                 "paths": {"@/*": ["./src/*"]},
                 "jsx": "react-jsx",
+            },
+            "include": ["src"],
+        },
+    )
+    write(repo / "collaboration-server/src/index.ts", "export {};\n")
+    write_json(
+        repo / "collaboration-server/tsconfig.json",
+        {
+            "compilerOptions": {
+                "target": "ES2022",
+                "module": "ESNext",
+                "moduleResolution": "Bundler",
+                "baseUrl": ".",
             },
             "include": ["src"],
         },
