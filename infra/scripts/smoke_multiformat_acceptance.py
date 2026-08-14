@@ -400,7 +400,6 @@ def create_conversation(client: httpx.Client, suffix: str) -> str:
         client.post(
             "/api/v1/workspace/conversations",
             json={
-                "scope_mode": "selected_tags",
                 "tag_refs": [{"tag_type": "project", "tag_id": PROJECT_ID}],
                 "title": f"Multiformat acceptance {suffix}",
                 "idempotency_key": f"conversation-multiformat-{suffix}",
