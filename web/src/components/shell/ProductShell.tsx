@@ -1,4 +1,11 @@
-import { MessageSquareText, PanelLeft, PanelLeftClose, Settings } from "lucide-react";
+import {
+  FolderKanban,
+  MessageSquareText,
+  PanelLeft,
+  PanelLeftClose,
+  Settings,
+  UsersRound,
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -15,8 +22,13 @@ import {
   ManagementNav,
   type ManagementNavGroup,
 } from "../../shared/navigation";
-import { managementRouteFamily, type AppRoute } from "../../shared/routes";
+import {
+  managementRouteFamily,
+  productRouteFamily,
+  type AppRoute,
+} from "../../shared/routes";
 import { AccountMenu } from "./AccountMenu";
+import { ProductContentFrame } from "./ProductContentFrame";
 
 export function SidebarHeader({
   onNavigate,
@@ -86,10 +98,7 @@ export function ProductShell({
 }) {
   const { t } = useTranslation();
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
-  const isWorkspaceSurface =
-    route === "/workspace" ||
-    route === "/library" ||
-    route.startsWith("/workspace/conversations/");
+  const isWorkspaceSurface = route === "/workspace" || route.startsWith("/workspace/");
   const managementRoute = managementRouteFamily(route);
   const currentManagementRouteIsVisible = managementGroups.some((group) =>
     group.items.some((item) => item.route === managementRoute),
@@ -194,9 +203,9 @@ export function ProductShell({
                     />
                   </ContextualSidebarFooter>
                 </aside>
-                <div className="min-w-0 flex-1 overflow-y-auto px-3 pb-4 pt-16 md:px-6 md:py-4">
+                <ProductContentFrame mobileNavigationOffset>
                   {children}
-                </div>
+                </ProductContentFrame>
               </div>
             </>
           )}
@@ -213,8 +222,11 @@ function ProductNav({
   onNavigate: (route: AppRoute) => void;
 }) {
   const { t } = useTranslation();
+  const activeRoute = productRouteFamily(route);
   const items = [
     { route: "/workspace" as const, label: t("nav.workspace"), icon: MessageSquareText },
+    { route: "/projects" as const, label: t("nav.projects"), icon: FolderKanban },
+    { route: "/teams" as const, label: t("nav.teams"), icon: UsersRound },
     { route: "/settings" as const, label: t("nav.settings"), icon: Settings },
   ];
 
@@ -223,7 +235,7 @@ function ProductNav({
       <div className="flex flex-col gap-1">
         {items.map((item) => {
           const Icon = item.icon;
-          const isActive = route === item.route;
+          const isActive = activeRoute === item.route;
           return (
             <Button
               key={item.route}

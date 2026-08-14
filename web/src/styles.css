@@ -178,3 +178,122 @@ select {
   --sidebar-border: 30 7% 25%;
   --sidebar-ring: 168 38% 58%;
 }
+
+.notes-editor .ProseMirror {
+  min-height: inherit;
+  outline: none;
+}
+
+.notes-editor .ProseMirror > * + * {
+  margin-top: 0.75rem;
+}
+
+.notes-editor .ProseMirror h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.notes-editor .ProseMirror h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.notes-editor .ProseMirror h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.notes-editor .ProseMirror ul,
+.notes-editor .ProseMirror ol {
+  padding-inline-start: 1.5rem;
+}
+
+.notes-editor .ProseMirror ul {
+  list-style: disc;
+}
+
+.notes-editor .ProseMirror ol {
+  list-style: decimal;
+}
+
+.notes-editor .ProseMirror blockquote {
+  border-inline-start: 3px solid hsl(var(--border));
+  padding-inline-start: 1rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.notes-editor .ProseMirror a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.notes-editor .tableWrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  touch-action: pan-x pan-y;
+}
+
+.notes-editor table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.notes-editor th,
+.notes-editor td {
+  position: relative;
+  min-width: 5rem;
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem;
+  vertical-align: top;
+}
+
+.notes-editor .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: hsl(var(--primary) / 0.12);
+}
+
+.notes-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: hsl(var(--primary));
+  pointer-events: none;
+}
+
+.notes-editor .note-image {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.notes-editor .note-image img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: calc(var(--radius) - 2px);
+}
+
+.notes-editor .note-image figcaption {
+  margin-top: 0.375rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+}
+
+.notes-editor .note-image-upload-placeholder {
+  display: inline-block;
+  width: min(16rem, 70vw);
+  height: 5rem;
+  border: 1px dashed hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--muted));
+  vertical-align: middle;
+  animation: pulse 1.5s ease-in-out infinite;
+}

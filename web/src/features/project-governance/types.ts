@@ -1,6 +1,11 @@
 import type { MessageReference } from "../../shared/user-messages";
 import type { SessionState } from "../identity-session/index";
 import type { AppDestination, AppRouteMatch } from "../../shared/routes";
+import type {
+  ScopedDirectoryConnectionListResult,
+  ScopedDirectoryMemberImportResult,
+  ScopedDirectoryUserSearchResult,
+} from "../directory-administration";
 
 export type ProjectRole = "viewer" | "contributor" | "admin";
 export type ProjectMemberRole = ProjectRole;
@@ -46,6 +51,10 @@ export interface ProjectMemberCandidatesResult {
   teams: ProjectMemberCandidate[];
   service_accounts: ProjectMemberCandidate[];
 }
+
+export type ProjectDirectoryConnectionListResult = ScopedDirectoryConnectionListResult;
+export type ProjectDirectoryUserSearchResult = ScopedDirectoryUserSearchResult;
+export type ProjectDirectoryMemberImportResult = ScopedDirectoryMemberImportResult;
 
 export interface ProjectInviteResult extends MessageReference {
   local_pilot_acceptance: { acceptance_url: string } | null;

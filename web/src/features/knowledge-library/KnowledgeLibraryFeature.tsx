@@ -1,12 +1,26 @@
 import { BookOpen, Download, RefreshCw, ShieldOff } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
-import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../../components/ui/empty";
+import {
+  CardAction,
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "../../components/ui/card";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../../components/ui/empty";
 import {
   Table,
   TableBody,
@@ -15,36 +29,78 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table";
-import { LoadErrorState, LoadingState, PageHeader, serverMessage } from "../../shared/product-ui";
+import { useIsMobile } from "../../hooks/use-mobile";
+import type { DocumentTagSummary } from "../../shared/document-contracts";
+import {
+  LoadErrorState,
+  LoadingState,
+  PageHeader,
+  serverMessage,
+} from "../../shared/product-ui";
 import { knowledgeLibraryApi } from "./api";
 import type { KnowledgeDocumentSummary } from "./types";
 
-export function KnowledgeLibraryFeature() {
+export function KnowledgeLibraryFeature({
+  scope,
+}: {
+  scope: DocumentTagSummary;
+}): ReactNode {
   const { t } = useTranslation();
+  const isMobile = useIsMobile();
   const [documents, setDocuments] = useState<KnowledgeDocumentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
   const [downloadingId, setDownloadingId] = useState("");
+  const documentRequestGeneration = useRef(0);
+  const mounted = useRef(true);
+  const scopeKey = `${scope.tag_type}:${scope.tag_id}`;
+  const currentScopeKey = useRef(scopeKey);
+  currentScopeKey.current = scopeKey;
 
-  useEffect(() => {
-    void refresh();
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
-  async function refresh() {
+  useEffect(() => {
+    void refresh(scope);
+    return () => {
+      documentRequestGeneration.current += 1;
+    };
+  }, [scope.tag_id, scope.tag_type]);
+
+  async function refresh(requestedScope = scope) {
+    const generation = ++documentRequestGeneration.current;
+    setDocuments([]);
     setLoading(true);
     setLoadError("");
     try {
       const result = await knowledgeLibraryApi.listKnowledgeDocuments();
-      setDocuments(result.documents);
+      if (generation !== documentRequestGeneration.current) return;
+      setDocuments(
+        result.documents.filter((document) =>
+          document.authorized_scopes.some(
+            ({ scope_type, scope_id }) =>
+              scope_type === requestedScope.tag_type &&
+              scope_id === requestedScope.tag_id,
+          ),
+        ),
+      );
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : t("admin.listLoadFailed"));
+      if (generation !== documentRequestGeneration.current) return;
+      setLoadError(
+        error instanceof Error ? error.message : t("admin.listLoadFailed"),
+      );
     } finally {
-      setLoading(false);
+      if (generation === documentRequestGeneration.current) setLoading(false);
     }
   }
 
   async function download(document: KnowledgeDocumentSummary) {
+    const requestedScopeKey = scopeKey;
     setDownloadingId(document.document_id);
     setActionError("");
     try {
@@ -52,22 +108,28 @@ export function KnowledgeLibraryFeature() {
         document.document_id,
         document.source_filename ?? document.title,
       );
-      toast.success(t("knowledgeLibrary.downloadStarted"));
+      if (mounted.current && currentScopeKey.current === requestedScopeKey) {
+        toast.success(t("knowledgeLibrary.downloadStarted"));
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : t("admin.actionFailed");
+      if (!mounted.current || currentScopeKey.current !== requestedScopeKey) return;
+      const message =
+        error instanceof Error ? error.message : t("admin.actionFailed");
       setActionError(message);
       toast.error(serverMessage(message, t));
-      await refresh();
+      await refresh(scope);
     } finally {
-      setDownloadingId("");
+      if (mounted.current && currentScopeKey.current === requestedScopeKey) {
+        setDownloadingId("");
+      }
     }
   }
 
   return (
-    <section className="mx-auto flex w-full max-w-6xl flex-col gap-5">
+    <div className="flex flex-col gap-5">
       <PageHeader
-        title={t("knowledgeLibrary.title")}
-        description={t("knowledgeLibrary.description")}
+        title={scope.label}
+        description={t("knowledgeScope.knowledgeDescription")}
       />
 
       {actionError && (
@@ -79,74 +141,63 @@ export function KnowledgeLibraryFeature() {
       )}
 
       {loading ? (
-        <LoadingState
-          title={t("knowledgeLibrary.loadingTitle")}
-        />
+        <LoadingState title={t("knowledgeScope.documentsLoadingTitle")} />
       ) : loadError ? (
         <LoadErrorState
-          title={t("admin.listLoadFailed")}
+          title={t("knowledgeScope.documentsLoadFailed")}
           description={serverMessage(loadError, t)}
           retryLabel={t("admin.retry")}
-          onRetry={() => void refresh()}
+          onRetry={() => void refresh(scope)}
         />
       ) : documents.length === 0 ? (
         <Empty className="border">
           <EmptyHeader>
-            <EmptyMedia variant="icon"><BookOpen /></EmptyMedia>
-            <EmptyTitle>{t("knowledgeLibrary.emptyTitle")}</EmptyTitle>
-            <EmptyDescription>{t("knowledgeLibrary.emptyDescription")}</EmptyDescription>
+            <EmptyMedia variant="icon">
+              <BookOpen />
+            </EmptyMedia>
+            <EmptyTitle>{t("knowledgeScope.documentsEmptyTitle")}</EmptyTitle>
+            <EmptyDescription>
+              {t("knowledgeScope.documentsEmptyDescription", { name: scope.label })}
+            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
-        <div className="overflow-hidden rounded-lg border bg-card">
-          <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
-            <div className="text-sm text-muted-foreground">
-              {t("knowledgeLibrary.documentCount", { count: documents.length })}
+        <Card>
+          <CardHeader>
+            <div className="flex flex-col gap-1.5">
+              <CardTitle>{t("knowledgeScope.knowledgeTitle")}</CardTitle>
+              <CardDescription>
+                {t("knowledgeLibrary.documentCount", { count: documents.length })}
+              </CardDescription>
             </div>
-            <Button variant="outline" size="sm" onClick={() => void refresh()}>
-              <RefreshCw data-icon="inline-start" />
-              {t("admin.retry")}
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("knowledgeLibrary.document")}</TableHead>
-                  <TableHead>{t("knowledgeLibrary.scope")}</TableHead>
-                  <TableHead>{t("knowledgeLibrary.file")}</TableHead>
-                  <TableHead className="text-right">{t("knowledgeLibrary.actions")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <CardAction>
+              <Button variant="outline" size="sm" onClick={() => void refresh(scope)}>
+                <RefreshCw data-icon="inline-start" />
+                {t("admin.retry")}
+              </Button>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            {isMobile ? (
+              <div className="grid gap-3">
                 {documents.map((document) => (
-                  <TableRow key={document.document_id}>
-                    <TableCell className="min-w-64 align-top">
-                      <div className="font-medium">{document.title}</div>
+                  <Card key={document.document_id}>
+                    <CardHeader>
+                      <CardTitle>{document.title}</CardTitle>
                       {document.description && (
-                        <div className="mt-1 max-w-xl text-sm text-muted-foreground">
-                          {document.description}
-                        </div>
+                        <CardDescription>{document.description}</CardDescription>
                       )}
-                    </TableCell>
-                    <TableCell className="min-w-48 align-top">
-                      <div className="flex flex-wrap gap-1.5">
-                        {document.authorized_scopes.map((scope) => (
-                          <Badge
-                            key={`${scope.scope_type}:${scope.scope_id}`}
-                            variant="secondary"
-                          >
-                            {scope.scope_label}
-                          </Badge>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap align-top text-sm text-muted-foreground">
-                      <div>{document.source_filename ?? document.title}</div>
-                      <div className="text-xs text-muted-foreground">{(document.document_format ?? "document").toUpperCase()}</div>
-                      <div>{formatFileSize(document.source_byte_size)}</div>
-                    </TableCell>
-                    <TableCell className="align-top text-right">
+                    </CardHeader>
+                    <CardContent className="flex flex-col gap-1 text-sm text-muted-foreground">
+                      <span>{document.source_filename ?? document.title}</span>
+                      <span>
+                        {(document.document_format ?? "document").toUpperCase()}
+                        {formatFileSize(document.source_byte_size)
+                          ? ` · ${formatFileSize(document.source_byte_size)}`
+                          : ""}
+                      </span>
+                    </CardContent>
+                    <CardFooter className="justify-end">
                       {document.download_available ? (
                         <Button
                           size="sm"
@@ -162,15 +213,65 @@ export function KnowledgeLibraryFeature() {
                           {t("knowledgeLibrary.readOnly")}
                         </span>
                       )}
-                    </TableCell>
-                  </TableRow>
+                    </CardFooter>
+                  </Card>
                 ))}
-              </TableBody>
-            </Table>
-          </div>
-        </div>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("knowledgeLibrary.document")}</TableHead>
+                    <TableHead>{t("knowledgeLibrary.file")}</TableHead>
+                    <TableHead className="text-right">
+                      {t("knowledgeLibrary.actions")}
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {documents.map((document) => (
+                    <TableRow key={document.document_id}>
+                      <TableCell className="min-w-64 align-top">
+                        <div className="font-medium">{document.title}</div>
+                        {document.description && (
+                          <div className="mt-1 max-w-xl text-sm text-muted-foreground">
+                            {document.description}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap align-top text-sm text-muted-foreground">
+                        <div>{document.source_filename ?? document.title}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {(document.document_format ?? "document").toUpperCase()}
+                        </div>
+                        <div>{formatFileSize(document.source_byte_size)}</div>
+                      </TableCell>
+                      <TableCell className="align-top text-right">
+                        {document.download_available ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void download(document)}
+                            disabled={downloadingId === document.document_id}
+                          >
+                            <Download data-icon="inline-start" />
+                            {t("knowledgeLibrary.download")}
+                          </Button>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            {t("knowledgeLibrary.readOnly")}
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
       )}
-    </section>
+    </div>
   );
 }
 

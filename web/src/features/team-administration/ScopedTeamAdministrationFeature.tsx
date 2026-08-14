@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../../components/ui/empty";
+import { Checkbox } from "../../components/ui/checkbox";
 import { Field, FieldGroup, FieldLabel } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { useIsMobile } from "../../hooks/use-mobile";
@@ -51,7 +52,15 @@ import type { TeamScopeRole } from "../../shared/identity-access-contracts";
 import type { MessageReference } from "../../shared/user-messages";
 import { userAdministrationApi } from "../user-administration/index";
 import { teamAdministrationApi } from "./api";
-import type { TeamMemberCandidate, TeamMemberSummary, TeamRecord } from "./types";
+import {
+  ScopedTeamDirectoryImportView,
+  useScopedTeamDirectoryImportController,
+} from "./ScopedTeamDirectoryImportController";
+import type {
+  TeamMemberCandidate,
+  TeamMemberSummary,
+  TeamRecord,
+} from "./types";
 
 const roleOptions: OptionSelectItem<TeamScopeRole>[] = [
   { value: "member", label: "member" },
@@ -113,10 +122,21 @@ export function ScopedTeamAdministrationFeature({
     () => members.filter((member) => member.subject_type === "user" && member.role === "admin"),
     [members],
   );
+  const directoryImport = useScopedTeamDirectoryImportController({
+    teamId: selectedTeamId,
+    role: candidateRole,
+    onNotice,
+    onRefresh,
+    onPostSuccess: async (teamId) => {
+      await Promise.all([refreshMembers(teamId), refreshCandidates(teamId)]);
+    },
+    onClose: closeAddMemberDialog,
+  });
 
   useEffect(() => {
     void refreshTeams();
   }, []);
+
 
   useEffect(() => {
     selectedTeamIdRef.current = selectedTeamId;
@@ -125,6 +145,8 @@ export function ScopedTeamAdministrationFeature({
     setMembers([]);
     setCandidates([]);
     setCandidateId("");
+    directoryImport.invalidateRequest();
+    setShowAddMember(false);
     if (selectedTeamId) {
       void refreshMembers(selectedTeamId);
       void refreshCandidates(selectedTeamId);
@@ -214,7 +236,18 @@ export function ScopedTeamAdministrationFeature({
       }
     }
   }
+  function openAddMemberDialog() {
+    directoryImport.reset();
+    setCandidateRole("member");
+    setActionError("");
+    setShowAddMember(true);
+  }
 
+  function closeAddMemberDialog() {
+    directoryImport.reset();
+    setCandidateRole("member");
+    setShowAddMember(false);
+  }
   async function runAction(
     actionName: string,
     action: () => Promise<MessageReference>,
@@ -522,13 +555,7 @@ export function ScopedTeamAdministrationFeature({
               </CardContent>
             </Card>
             <div className="flex flex-wrap gap-3">
-              <Button
-                onClick={() => {
-                  setCandidateRole("member");
-                  setActionError("");
-                  setShowAddMember(true);
-                }}
-              >
+              <Button onClick={() => void openAddMemberDialog()}>
                 <UserRoundPlus data-icon="inline-start" />
                 {t("teams.addMember")}
               </Button>
@@ -549,59 +576,88 @@ export function ScopedTeamAdministrationFeature({
             </div>
           </div>
         </>
-      <Dialog open={showAddMember} onOpenChange={setShowAddMember}>
-        <DialogContent>
+      <Dialog
+        open={showAddMember}
+        onOpenChange={(open) => (open ? void openAddMemberDialog() : closeAddMemberDialog())}
+      >
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("teams.addExistingMember")}</DialogTitle>
             <DialogDescription>
               {t("teams.membersForTeamDescription", { team: selectedTeam.name })}
             </DialogDescription>
           </DialogHeader>
-          {actionError && (
+          {(directoryImport.mode === "directory" ? directoryImport.actionError : actionError) && (
             <Alert variant="destructive">
               <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
-              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+              <AlertDescription>
+                {serverMessage(
+                  directoryImport.mode === "directory" ? directoryImport.actionError : actionError,
+                  t,
+                )}
+              </AlertDescription>
             </Alert>
           )}
-          {candidatesLoading ? (
-            <LoadingState title={t("teams.membersLoadingTitle")} />
-          ) : candidatesLoadError ? (
-            <LoadErrorState
-              title={t("admin.listLoadFailed")}
-              description={serverMessage(candidatesLoadError, t)}
-              retryLabel={t("admin.retry")}
-              onRetry={() => void refreshCandidates(selectedTeamId)}
-            />
-          ) : candidates.length === 0 ? (
-            <div className="text-sm text-muted-foreground">{t("teams.noCandidateHumans")}</div>
-          ) : (
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="team-member-candidate">{t("teams.member")}</FieldLabel>
-                <OptionSelect
-                  id="team-member-candidate"
-                  value={candidateId}
-                  options={candidateOptions}
-                  onValueChange={setCandidateId}
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="team-add-member-mode">{t("directory.memberSource")}</FieldLabel>
+              <OptionSelect
+                id="team-add-member-mode"
+                value={directoryImport.mode}
+                options={[
+                  { value: "atlas", label: t("directory.atlasUsers") },
+                  { value: "directory", label: t("directory.title") },
+                ]}
+                onValueChange={(value) => {
+                  setActionError("");
+                  directoryImport.setMode(value);
+                }}
+              />
+            </Field>
+            {directoryImport.mode === "atlas" ? (
+              candidatesLoading ? (
+                <LoadingState title={t("teams.membersLoadingTitle")} />
+              ) : candidatesLoadError ? (
+                <LoadErrorState
+                  title={t("admin.listLoadFailed")}
+                  description={serverMessage(candidatesLoadError, t)}
+                  retryLabel={t("admin.retry")}
+                  onRetry={() => void refreshCandidates(selectedTeamId)}
                 />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="team-member-role">{t("settings.role")}</FieldLabel>
-                <OptionSelect
-                  id="team-member-role"
-                  value={candidateRole}
-                  options={roleOptions}
-                  onValueChange={setCandidateRole}
-                />
-              </Field>
-            </FieldGroup>
-          )}
+              ) : candidates.length === 0 ? (
+                <div className="text-sm text-muted-foreground">{t("teams.noCandidateHumans")}</div>
+              ) : (
+                <Field>
+                  <FieldLabel htmlFor="team-member-candidate">{t("teams.member")}</FieldLabel>
+                  <OptionSelect
+                    id="team-member-candidate"
+                    value={candidateId}
+                    options={candidateOptions}
+                    onValueChange={setCandidateId}
+                  />
+                </Field>
+              )
+            ) : <ScopedTeamDirectoryImportView controller={directoryImport} />}
+            <Field>
+              <FieldLabel htmlFor="team-member-role">{t("settings.role")}</FieldLabel>
+              <OptionSelect
+                id="team-member-role"
+                value={candidateRole}
+                options={roleOptions}
+                onValueChange={setCandidateRole}
+              />
+            </Field>
+          </FieldGroup>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddMember(false)}>
+            <Button variant="outline" onClick={closeAddMemberDialog}>
               {t("admin.cancel")}
             </Button>
             <Button
-              onClick={() =>
+              onClick={() => {
+                if (directoryImport.mode === "directory") {
+                  void directoryImport.importMembers();
+                  return;
+                }
                 void runAction(
                   "add-member",
                   () =>
@@ -611,13 +667,21 @@ export function ScopedTeamAdministrationFeature({
                       candidateId,
                       candidateRole,
                     ),
-                  () => setShowAddMember(false),
-                )
+                  closeAddMemberDialog,
+                );
+              }}
+              disabled={
+                pendingAction === "add-member" ||
+                directoryImport.importPending ||
+                (directoryImport.mode === "atlas"
+                  ? !candidateId
+                  : directoryImport.selectedSubjects.length === 0)
               }
-              disabled={!candidateId || pendingAction === "add-member"}
             >
               <UserRoundPlus data-icon="inline-start" />
-              {t("teams.addMember")}
+              {directoryImport.mode === "directory"
+                ? t("directory.importSelected")
+                : t("teams.addMember")}
             </Button>
           </DialogFooter>
         </DialogContent>

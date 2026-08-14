@@ -1,7 +1,7 @@
 import type { MessageReference } from "../../shared/user-messages";
 
 export type DirectoryProviderType = "active_directory" | "ldap";
-export type DirectoryTlsMode = "ldaps" | "start_tls";
+export type DirectoryTlsMode = "ldaps" | "start_tls" | "plain";
 
 export interface DirectoryConnectionConfig {
   connection_id: string;
@@ -74,4 +74,32 @@ export interface DirectoryUserSearchResult {
 export interface DirectoryUserImportResult extends MessageReference {
   imported_actor_ids: string[];
   imported_count: number;
+}
+
+export interface ScopedDirectoryConnectionSummary {
+  connection_id: string;
+  display_name: string;
+}
+
+export interface ScopedDirectoryConnectionListResult {
+  connections: ScopedDirectoryConnectionSummary[];
+}
+
+export type ScopedDirectorySearchMode = "department" | "member";
+
+export interface ScopedDirectoryUserCandidate {
+  external_subject: string;
+  username: string;
+  display_name: string;
+  email: string | null;
+}
+
+export interface ScopedDirectoryUserSearchResult {
+  users: ScopedDirectoryUserCandidate[];
+  limit_reached: boolean;
+}
+
+export interface ScopedDirectoryMemberImportResult extends MessageReference {
+  actor_ids: string[];
+  applied_count: number;
 }

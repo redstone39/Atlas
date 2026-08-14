@@ -124,14 +124,18 @@ export const modelRoutingApi = {
         }),
       },
     ),
-  setDefaultModelRoute: (routeId: string, expectedRevision: number) =>
+  setDefaultModelRoute: (
+    routeId: string,
+    purpose: "text" | "vision",
+    expectedRevision: number,
+  ) =>
     requestJson<ModelRouteStatus>(
-      `/api/v1/admin/config/model-routes/${routeId}/default`,
+      `/api/v1/admin/config/model-routes/${routeId}/defaults/${purpose}`,
       {
         method: "POST",
         body: JSON.stringify({
           expected_revision: expectedRevision,
-          idempotency_key: idempotencyKey(`model-default-${routeId}`),
+          idempotency_key: idempotencyKey(`model-default-${purpose}-${routeId}`),
         }),
       },
     ),

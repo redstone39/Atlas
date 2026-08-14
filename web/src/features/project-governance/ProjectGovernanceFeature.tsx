@@ -14,6 +14,7 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../../components/ui/empty";
+import { Checkbox } from "../../components/ui/checkbox";
 import {
   Field,
   FieldGroup,
@@ -63,6 +64,10 @@ import {
   documentLibraryDestination,
 } from "../../shared/routes";
 import { projectGovernanceApi } from "./api";
+import {
+  ProjectDirectoryImportView,
+  useProjectDirectoryImportController,
+} from "./ProjectDirectoryImportController";
 import type {
   ProjectGovernanceFeatureProps,
   ProjectAccessGrant,
@@ -133,6 +138,19 @@ export function ProjectGovernanceFeature({
       ? projects.find((project) => project.project_id === selectedProjectId) ?? null
       : null;
   const isSystemAdmin = session.system_role === "admin";
+  const directoryImport = useProjectDirectoryImportController({
+    projectId: selectedProject?.project_id ?? "",
+    role: newUserRole,
+    onNotice,
+    onRefresh,
+    onPostSuccess: async (projectId) => {
+      await Promise.all([
+        refreshProjectMembers(projectId),
+        refreshProjectCandidates(projectId),
+      ]);
+    },
+    onClose: closeAddAccessDialog,
+  });
   const memberRoleOptions: OptionSelectItem<ProjectMemberRole>[] = [
     { value: "viewer", label: "viewer" },
     { value: "contributor", label: "contributor" },
@@ -149,6 +167,7 @@ export function ProjectGovernanceFeature({
   useEffect(() => {
     void refreshProjects();
   }, []);
+
 
   useEffect(() => {
     if (projects.length === 0 || !detail) {
@@ -237,6 +256,8 @@ export function ProjectGovernanceFeature({
   function selectProject(project: ProjectAdminSummary) {
     setSelectedProjectId(project.project_id);
     setEditProjectName(project.name);
+    directoryImport.invalidateRequest();
+    setShowAddAccess(false);
   }
 
   function resetProjectMemberDraft() {
@@ -253,6 +274,19 @@ export function ProjectGovernanceFeature({
     setInviteEmail("");
     setInviteRole("viewer");
     setInviteLink("");
+  }
+  function openAddAccessDialog() {
+    if (!selectedProject) return;
+    directoryImport.reset();
+    setNewUserRole("viewer");
+    setActionError("");
+    setShowAddAccess(true);
+  }
+
+  function closeAddAccessDialog() {
+    directoryImport.reset();
+    setNewUserRole("viewer");
+    setShowAddAccess(false);
   }
 
   function openProjectEditor(project: ProjectAdminSummary) {
@@ -689,10 +723,7 @@ export function ProjectGovernanceFeature({
                 onRetry={() => void refreshProjectCandidates(selectedProject.project_id)}
               />
             )}
-            <Button
-              onClick={() => setShowAddAccess(true)}
-              disabled={candidatesLoading || Boolean(candidatesLoadError)}
-            >
+            <Button onClick={() => void openAddAccessDialog()}>
               <Plus data-icon="inline-start" />
               {t("admin.addAccess")}
             </Button>
@@ -1041,96 +1072,138 @@ export function ProjectGovernanceFeature({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showAddAccess} onOpenChange={setShowAddAccess}>
+      <Dialog
+        open={showAddAccess}
+        onOpenChange={(open) => (open ? void openAddAccessDialog() : closeAddAccessDialog())}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("admin.addAccess")}</DialogTitle>
             <DialogDescription>{t("projects.membersLoadingDescription")}</DialogDescription>
           </DialogHeader>
-          {actionError && (
+          {(directoryImport.mode === "directory" ? directoryImport.actionError : actionError) && (
             <Alert variant="destructive">
               <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
-              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+              <AlertDescription>
+                {serverMessage(
+                  directoryImport.mode === "directory" ? directoryImport.actionError : actionError,
+                  t,
+                )}
+              </AlertDescription>
             </Alert>
           )}
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="project-access-subject-type">
-                {t("admin.subjectType")}
-              </FieldLabel>
+              <FieldLabel htmlFor="project-add-access-mode">{t("directory.memberSource")}</FieldLabel>
               <OptionSelect
-                id="project-access-subject-type"
-                value={accessSubjectType}
+                id="project-add-access-mode"
+                value={directoryImport.mode}
                 options={[
-                  { value: "user", label: t("projects.memberType.user") },
-                  { value: "team", label: t("projects.memberType.team") },
-                  { value: "service_account", label: t("users.serviceAccount") },
+                  { value: "atlas", label: t("directory.atlasUsers") },
+                  { value: "directory", label: t("directory.title") },
                 ]}
-                onValueChange={setAccessSubjectType}
-              />
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="project-access-subject">
-                {t("projects.projectMember")}
-              </FieldLabel>
-              <SearchSelect
-                id="project-access-subject"
-                value={accessCandidateId}
-                options={accessCandidateOptions}
-                placeholder={t("admin.chooseSubjectType")}
-                emptyText={t("projects.noUserCandidates")}
                 onValueChange={(value) => {
-                  if (accessSubjectType === "user") setSelectedUserCandidateId(value);
-                  else if (accessSubjectType === "team") setSelectedTeamCandidateId(value);
-                  else setSelectedServiceAccountCandidateId(value);
+                  setActionError("");
+                  directoryImport.setMode(value);
                 }}
               />
             </Field>
+            {directoryImport.mode === "atlas" ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="project-access-subject-type">
+                    {t("admin.subjectType")}
+                  </FieldLabel>
+                  <OptionSelect
+                    id="project-access-subject-type"
+                    value={accessSubjectType}
+                    options={[
+                      { value: "user", label: t("projects.memberType.user") },
+                      { value: "team", label: t("projects.memberType.team") },
+                      { value: "service_account", label: t("users.serviceAccount") },
+                    ]}
+                    onValueChange={setAccessSubjectType}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="project-access-subject">
+                    {t("projects.projectMember")}
+                  </FieldLabel>
+                  <SearchSelect
+                    id="project-access-subject"
+                    value={accessCandidateId}
+                    options={accessCandidateOptions}
+                    placeholder={t("admin.chooseSubjectType")}
+                    emptyText={t("projects.noUserCandidates")}
+                    onValueChange={(value) => {
+                      if (accessSubjectType === "user") setSelectedUserCandidateId(value);
+                      else if (accessSubjectType === "team") setSelectedTeamCandidateId(value);
+                      else setSelectedServiceAccountCandidateId(value);
+                    }}
+                  />
+                </Field>
+              </>
+            ) : <ProjectDirectoryImportView controller={directoryImport} />}
             <Field>
               <FieldLabel htmlFor="project-access-role">{t("permissions.role")}</FieldLabel>
               <OptionSelect
                 id="project-access-role"
-                value={accessRole}
+                value={directoryImport.mode === "directory" ? newUserRole : accessRole}
                 options={memberRoleOptions}
                 onValueChange={(value) => {
-                  if (accessSubjectType === "user") setNewUserRole(value);
-                  else if (accessSubjectType === "team") setNewTeamRole(value);
+                  if (directoryImport.mode === "directory" || accessSubjectType === "user") {
+                    setNewUserRole(value);
+                  } else if (accessSubjectType === "team") setNewTeamRole(value);
                   else setNewServiceAccountRole(value);
                 }}
               />
             </Field>
-            <Field>
-              <FieldLabel htmlFor="project-access-effect">{t("permissions.effect")}</FieldLabel>
-              <OptionSelect
-                id="project-access-effect"
-                value={accessEffect}
-                options={memberEffectOptions}
-                onValueChange={(value) => {
-                  if (accessSubjectType === "user") setNewUserEffect(value);
-                  else if (accessSubjectType === "team") setNewTeamEffect(value);
-                  else setNewServiceAccountEffect(value);
-                }}
-              />
-            </Field>
+            {directoryImport.mode === "atlas" && (
+              <Field>
+                <FieldLabel htmlFor="project-access-effect">{t("permissions.effect")}</FieldLabel>
+                <OptionSelect
+                  id="project-access-effect"
+                  value={accessEffect}
+                  options={memberEffectOptions}
+                  onValueChange={(value) => {
+                    if (accessSubjectType === "user") setNewUserEffect(value);
+                    else if (accessSubjectType === "team") setNewTeamEffect(value);
+                    else setNewServiceAccountEffect(value);
+                  }}
+                />
+              </Field>
+            )}
           </FieldGroup>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddAccess(false)}>
+            <Button variant="outline" onClick={closeAddAccessDialog}>
               {t("admin.cancel")}
             </Button>
             <Button
-              disabled={!accessCandidateId || pendingAction === `project-member-add-${accessSubjectType}`}
+              disabled={
+                directoryImport.importPending ||
+                pendingAction === `project-member-add-${accessSubjectType}` ||
+                (directoryImport.mode === "directory"
+                  ? directoryImport.selectedSubjects.length === 0
+                  : !accessCandidateId)
+              }
               onClick={async () => {
+                if (directoryImport.mode === "directory") {
+                  await directoryImport.importMembers();
+                  return;
+                }
                 const succeeded = await addProjectMember(
                   accessSubjectType,
                   accessCandidateId,
                   accessRole,
                   accessEffect,
                 );
-                if (succeeded) setShowAddAccess(false);
+                if (succeeded) closeAddAccessDialog();
               }}
             >
               <Plus data-icon="inline-start" />
-              {t("admin.addAccess")}
+              {directoryImport.mode === "directory"
+                ? t("directory.importSelected")
+                : t("admin.addAccess")}
             </Button>
           </DialogFooter>
         </DialogContent>

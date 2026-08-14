@@ -11,21 +11,29 @@ import type { AppRoute } from "../../shared/routes";
 export type { DocumentTagRef, DocumentTagSummary };
 
 export interface WorkspaceFeatureProps {
-  activeView: "/workspace" | "/library";
   conversationId: string | null;
+  initialKnowledgeSurface:
+    | { scopeType: "project" | "team"; scopeId: string | null }
+    | null;
   session: SessionState;
   onNotice: (message: string) => void;
   onNavigate: (route: AppRoute) => void;
   onReplace: (route: AppRoute) => void;
-  libraryContent: ReactNode;
   renderSidebarHeader: (options: WorkspaceSidebarHeaderOptions) => ReactNode;
   renderAccountMenu: (options: WorkspaceAccountMenuOptions) => ReactNode;
+  renderKnowledgeScope: (options: WorkspaceKnowledgeScopeOptions) => ReactNode;
 }
 
 export interface WorkspaceSidebarHeaderOptions {
   presentation: "full" | "compact";
   onOpenWorkspace: () => void;
   onCollapseSidebar?: () => void;
+}
+
+export interface WorkspaceKnowledgeScopeOptions {
+  scopeType: "project" | "team";
+  scopeId: string | null;
+  onNavigate: (route: AppRoute) => void;
 }
 
 export interface WorkspaceAccountMenuOptions {

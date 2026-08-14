@@ -4,6 +4,9 @@ import type {
   ProjectAccessGrant,
   ProjectAccessGrantListResult,
   ProjectAdminListResult,
+  ProjectDirectoryConnectionListResult,
+  ProjectDirectoryMemberImportResult,
+  ProjectDirectoryUserSearchResult,
   ProjectMemberCandidatesResult,
   ProjectMemberEffect,
   ProjectMemberRole,
@@ -38,6 +41,41 @@ export const projectGovernanceApi = {
   listProjectMemberCandidates: (projectId: string) =>
     requestJson<ProjectMemberCandidatesResult>(
       `/api/v1/admin/projects/${projectId}/member-candidates`,
+    ),
+  listDirectoryConnections: (projectId: string) =>
+    requestJson<ProjectDirectoryConnectionListResult>(
+      `/api/v1/admin/projects/${projectId}/directory-connections`,
+    ),
+  searchDirectoryUsers: (
+    projectId: string,
+    connectionId: string,
+    searchMode: "department" | "member",
+    query: string,
+  ) =>
+    requestJson<ProjectDirectoryUserSearchResult>(
+      `/api/v1/admin/projects/${projectId}/directory-connections/${encodeURIComponent(connectionId)}/users/search`,
+      {
+        method: "POST",
+        body: JSON.stringify({ search_mode: searchMode, query, limit: 100 }),
+      },
+    ),
+  importDirectoryMembers: (
+    projectId: string,
+    connectionId: string,
+    externalSubjects: string[],
+    role: ProjectMemberRole,
+    idempotencyKey: string,
+  ) =>
+    requestJson<ProjectDirectoryMemberImportResult>(
+      `/api/v1/admin/projects/${projectId}/directory-connections/${encodeURIComponent(connectionId)}/users/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          external_subjects: externalSubjects,
+          role,
+          idempotency_key: idempotencyKey,
+        }),
+      },
     ),
   addProjectMember: (
     projectId: string,

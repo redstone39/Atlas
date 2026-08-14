@@ -195,8 +195,6 @@ export function DirectoryAdministrationFeature({
     setDraft({
       ...draft,
       provider_type: providerType,
-      port: defaults.port,
-      tls_mode: defaults.tls_mode,
       user_object_filter: defaults.user_object_filter,
       login_attribute: defaults.login_attribute,
       stable_id_attribute: defaults.stable_id_attribute,
@@ -239,6 +237,14 @@ export function DirectoryAdministrationFeature({
 
   function updateDraft<K extends keyof Draft>(key: K, value: Draft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function changeTlsMode(tlsMode: Draft["tls_mode"]) {
+    updateDraft("tls_mode", tlsMode);
+    if (tlsMode === "plain") {
+      setCustomCaPem("");
+      setClearCustomCa(false);
+    }
   }
 
   const canSave = Boolean(
@@ -459,10 +465,11 @@ export function DirectoryAdministrationFeature({
                 <FieldGroup className="grid gap-4 sm:grid-cols-2">
                   <TextField id="directory-host" label={t("directory.host")} value={draft.host} onChange={(value) => updateDraft("host", value)} />
                   <TextField id="directory-port" label={t("directory.port")} type="number" value={String(draft.port)} onChange={(value) => updateDraft("port", Number(value))} />
-                  <Field><FieldLabel htmlFor="directory-tls">{t("directory.tlsMode")}</FieldLabel><Select value={draft.tls_mode} onValueChange={(value) => updateDraft("tls_mode", value as Draft["tls_mode"])}><SelectTrigger id="directory-tls" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="ldaps">{t("directory.tls.ldaps")}</SelectItem><SelectItem value="start_tls">{t("directory.tls.startTls")}</SelectItem></SelectGroup></SelectContent></Select></Field>
+                  <Field><FieldLabel htmlFor="directory-tls">{t("directory.tlsMode")}</FieldLabel><Select value={draft.tls_mode} onValueChange={(value) => changeTlsMode(value as Draft["tls_mode"])}><SelectTrigger id="directory-tls" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="ldaps">{t("directory.tls.ldaps")}</SelectItem><SelectItem value="start_tls">{t("directory.tls.startTls")}</SelectItem><SelectItem value="plain">{t("directory.tls.plain")}</SelectItem></SelectGroup></SelectContent></Select></Field>
                   <TextField id="directory-connect-timeout" label={t("directory.connectTimeout")} type="number" value={String(draft.connect_timeout_seconds)} onChange={(value) => updateDraft("connect_timeout_seconds", Number(value))} />
                   <TextField id="directory-operation-timeout" label={t("directory.operationTimeout")} type="number" value={String(draft.operation_timeout_seconds)} onChange={(value) => updateDraft("operation_timeout_seconds", Number(value))} />
-                  <Field className="sm:col-span-2"><FieldLabel htmlFor="directory-ca">{t("directory.customCaPem")}</FieldLabel><Textarea id="directory-ca" value={customCaPem} onChange={(event) => { setCustomCaPem(event.target.value); if (event.target.value) setClearCustomCa(false); }} placeholder={editing ? t("directory.blankPreserves") : t("directory.systemCaDescription")} className="min-h-28 font-mono text-xs" /><FieldDescription>{t("directory.caNeverShown")}</FieldDescription>{editing?.custom_ca_configured ? <Field orientation="horizontal"><Checkbox id="directory-clear-ca" checked={clearCustomCa} onCheckedChange={(checked) => { setClearCustomCa(checked === true); if (checked) setCustomCaPem(""); }} /><FieldLabel htmlFor="directory-clear-ca" className="font-normal">{t("directory.clearCustomCa")}</FieldLabel></Field> : null}</Field>
+                  {draft.tls_mode === "plain" ? <Alert variant="destructive" className="sm:col-span-2"><AlertTitle>{t("directory.tls.plain")}</AlertTitle><AlertDescription>{t("directory.plainWarning")}</AlertDescription></Alert> : null}
+                  <Field className="sm:col-span-2"><FieldLabel htmlFor="directory-ca">{t("directory.customCaPem")}</FieldLabel><Textarea id="directory-ca" value={customCaPem} disabled={draft.tls_mode === "plain"} onChange={(event) => { setCustomCaPem(event.target.value); if (event.target.value) setClearCustomCa(false); }} placeholder={editing ? t("directory.blankPreserves") : t("directory.systemCaDescription")} className="min-h-28 font-mono text-xs" /><FieldDescription>{draft.tls_mode === "plain" ? t("directory.plainCaUnused") : t("directory.caNeverShown")}</FieldDescription>{editing?.custom_ca_configured && draft.tls_mode !== "plain" ? <Field orientation="horizontal"><Checkbox id="directory-clear-ca" checked={clearCustomCa} onCheckedChange={(checked) => { setClearCustomCa(checked === true); if (checked) setCustomCaPem(""); }} /><FieldLabel htmlFor="directory-clear-ca" className="font-normal">{t("directory.clearCustomCa")}</FieldLabel></Field> : null}</Field>
                 </FieldGroup>
               </FieldSet>
               <FieldSet>
@@ -496,7 +503,12 @@ export function DirectoryAdministrationFeature({
                   () => editing
                     ? directoryAdministrationApi.updateConnection({ connectionId, config: draft, bindPassword: bindPassword || undefined, clearBindPassword, customCaPem: customCaPem || undefined, clearCustomCa })
                     : directoryAdministrationApi.createConnection({ connection_id: connectionId, ...draft, bind_password: bindPassword, custom_ca_pem: customCaPem || undefined }),
-                  closeDialog,
+                  () => {
+                    setCandidates([]);
+                    setSelectedSubjects(new Set());
+                    setSearchCompleted(false);
+                    closeDialog();
+                  },
                 );
               }}
             >

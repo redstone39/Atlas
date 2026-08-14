@@ -10,6 +10,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const readBlobBytes = (blob: Blob) => new Promise<Uint8Array>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(reader.error ?? new Error("Failed to read Blob bytes"));
+  reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+  reader.readAsArrayBuffer(blob);
+});
+
 
 const conversation = {
   conversation_id: "conv-a",
@@ -202,9 +209,10 @@ describe("workspace execution API contract", () => {
     expect(preview.kind).toBe("page");
     if (preview.kind === "page") {
       expect(preview.mediaType).toBe(mediaType);
-      const reader = new FileReader();
-      reader.readAsText(preview.blob);
-      await vi.waitFor(() => expect(reader.result).toBe("page bytes"));
+      expect(preview.blob).toBeInstanceOf(Blob);
+      expect(Array.from(await readBlobBytes(preview.blob))).toEqual(
+        Array.from(new TextEncoder().encode("page bytes")),
+      );
     }
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/workspace/conversations/conv-a/turns/turn-a/declared-evidence/declared-evidence-open-a",

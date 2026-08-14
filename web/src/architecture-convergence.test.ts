@@ -60,10 +60,20 @@ describe("frontend compatibility convergence", () => {
       resolve(webRoot, "src/shared/navigation.tsx"),
       "utf8",
     );
-    const testHandlers = readFileSync(
-      resolve(webRoot, "src/App.test-support.ts"),
-      "utf8",
-    );
+    const testHandlers = [
+      "src/App.test-support.ts",
+      "src/App.test-support/protocol.ts",
+      "src/App.test-support/sessions.ts",
+      "src/App.test-support/workspace.ts",
+      "src/App.test-support/model-routing.ts",
+      "src/App.test-support/identity-governance.ts",
+      "src/App.test-support/documents.ts",
+      "src/App.test-support/notes.ts",
+      "src/App.test-support/audit.ts",
+      "src/App.test-support/mock-api.ts",
+    ]
+      .map((relative) => readFileSync(resolve(webRoot, relative), "utf8"))
+      .join("\n");
     for (const retiredPath of ["/admin/ingestion", "/admin/permissions"]) {
       expect(routeSource).not.toContain(retiredPath);
       expect(navigationSource).not.toContain(retiredPath);
@@ -274,16 +284,20 @@ describe("frontend compatibility convergence", () => {
     expect(workspaceScreenSource).toContain('from "@/components/shell/AccountMenu"');
     expect(workspaceScreenSource).toContain("renderAccountMenu={(options)");
     expect(workspaceSource).toContain("renderAccountMenu({");
-    expect(workspaceSource).toContain('t("nav.knowledgeLibrary")');
-    expect(workspaceSource).toContain('activeView === "/library"');
+    expect(workspaceSource).toContain('t("nav.projects")');
+    expect(workspaceSource).toContain('t("nav.teams")');
+    expect(workspaceSource).not.toContain('t("nav.knowledgeLibrary")');
+    expect(workspaceSource).not.toContain("activeView");
+    expect(workspaceSource).not.toContain("libraryContent");
     expect(workspaceSource).toContain("onCollapseSidebar");
     expect(workspaceSource).toContain('data-slot="workspace-conversation-controls"');
     expect(workspaceSource).toContain('data-slot="workspace-composer"');
     expect(workspaceSource).not.toContain('from "../../app');
     expect(productShellSource).not.toMatch(/<header\b/);
     expect(productShellSource).toContain("export function SidebarHeader");
-    expect(productShellSource).toContain('route.startsWith("/workspace/conversations/")');
-    expect(productShellSource).not.toContain('{ route: "/library" as const');
+    expect(productShellSource).toContain('route.startsWith("/workspace/")');
+    expect(productShellSource).toContain("productRouteFamily(route)");
+    expect(productShellSource).not.toContain('route === "/library"');
     expect(accountMenuSource).not.toContain('onNavigate("/library")');
     expect(workspaceScreenSource).toContain("renderSidebarHeader={(options)");
 
@@ -305,6 +319,7 @@ describe("frontend compatibility convergence", () => {
     for (const relative of [
       "src/features/workspace/WorkspaceFeature.tsx",
       "src/features/knowledge-library/KnowledgeLibraryFeature.tsx",
+      "src/features/knowledge-library/KnowledgeScopeFeature.tsx",
       "src/features/document-library/DocumentLibraryFeature.tsx",
       "src/features/user-administration/UserAdministrationFeature.tsx",
       "src/features/team-administration/TeamAdministrationFeature.tsx",
@@ -313,7 +328,7 @@ describe("frontend compatibility convergence", () => {
       "src/features/model-routing/ModelRoutingFeature.tsx",
       "src/features/processing-plugins/ProcessingPluginsFeature.tsx",
       "src/features/agent-access/AgentStatusList.tsx",
-      "src/features/conversation-audit/ConversationAuditFeature.tsx",
+      "src/features/conversation-audit/ConversationAuditPresentation.tsx",
       "src/components/pages/OpsPage.tsx",
     ]) {
       expect(readFileSync(resolve(webRoot, relative), "utf8"), relative)
@@ -349,6 +364,47 @@ describe("frontend compatibility convergence", () => {
     expect(opsPageSource).toContain("loadError");
   });
 
+  it("keeps Project and Team knowledge as an authority-preserving consumer", () => {
+    const routesSource = readFileSync(
+      resolve(webRoot, "src/shared/routes.ts"),
+      "utf8",
+    );
+    const testRouterSource = readFileSync(
+      resolve(webRoot, "src/app/atlas-app.test-support.tsx"),
+      "utf8",
+    );
+    const scopeSource = readFileSync(
+      resolve(webRoot, "src/features/knowledge-library/KnowledgeScopeFeature.tsx"),
+      "utf8",
+    );
+    const knowledgeSource = readFileSync(
+      resolve(webRoot, "src/features/knowledge-library/KnowledgeLibraryFeature.tsx"),
+      "utf8",
+    );
+    const knowledgeApiSource = readFileSync(
+      resolve(webRoot, "src/features/knowledge-library/api.ts"),
+      "utf8",
+    );
+
+    expect(routesSource).toContain('`/projects/${string}/knowledge`');
+    expect(routesSource).toContain('`/teams/${string}/knowledge`');
+    expect(routesSource).not.toContain('| "/library"');
+    expect(testRouterSource)
+      .not.toContain('from "./(authenticated)/library/screen"');
+    expect(testRouterSource).not.toContain('case "/library"');
+    expect(scopeSource).toContain("workspaceApi");
+    expect(scopeSource).toContain(".workspaceTagScope()");
+    expect(scopeSource).toContain("scope.tag_type === scopeType");
+    expect(scopeSource).not.toContain("/api/v1/admin/");
+    expect(knowledgeSource).toContain("knowledgeLibraryApi.listKnowledgeDocuments()");
+    expect(knowledgeSource).toContain("document.authorized_scopes.some");
+    expect(knowledgeSource).toContain("scope_type === requestedScope.tag_type");
+    expect(knowledgeSource).toContain("scope_id === requestedScope.tag_id");
+    expect(knowledgeSource).not.toContain("authorized_scopes.map");
+    expect(knowledgeApiSource).toContain("downloadDocumentContent");
+    expect(knowledgeApiSource).not.toContain("/api/v1/admin/");
+  });
+
   it("keeps Next App Router as the only production route owner", () => {
     for (const relative of [
       "src/app/layout.tsx",
@@ -358,6 +414,10 @@ describe("frontend compatibility convergence", () => {
       "src/app/(authenticated)/layout.tsx",
       "src/app/(authenticated)/workspace/page.tsx",
       "src/app/(authenticated)/workspace/conversations/[conversationId]/page.tsx",
+      "src/app/(authenticated)/projects/page.tsx",
+      "src/app/(authenticated)/projects/[projectId]/knowledge/page.tsx",
+      "src/app/(authenticated)/teams/page.tsx",
+      "src/app/(authenticated)/teams/[teamId]/knowledge/page.tsx",
       "src/app/(authenticated)/admin/users/[actorId]/page.tsx",
       "src/app/(authenticated)/admin/teams/[teamId]/members/page.tsx",
       "src/app/(authenticated)/admin/projects/[projectId]/access/page.tsx",
@@ -367,6 +427,8 @@ describe("frontend compatibility convergence", () => {
     ]) {
       expect(existsSync(resolve(webRoot, relative)), relative).toBe(true);
     }
+    expect(existsSync(resolve(webRoot, "src/app/(authenticated)/library/page.tsx")))
+      .toBe(false);
     for (const relative of [
       "index.html",
       "vite.config.ts",

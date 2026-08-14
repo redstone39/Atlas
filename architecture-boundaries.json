@@ -357,6 +357,7 @@
         "web/src/features/invite-acceptance/index.ts",
         "web/src/features/knowledge-library/index.ts",
         "web/src/features/model-routing/index.ts",
+        "web/src/features/notes/index.ts",
         "web/src/features/ops/index.ts",
         "web/src/features/processing-plugins/index.ts",
         "web/src/features/project-governance/index.ts",

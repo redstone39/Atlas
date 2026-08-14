@@ -118,7 +118,8 @@ describe("provider connection and model routing API boundary", () => {
       expectedRevision: 2,
     });
     await modelRoutingApi.testModelRoute("route-a", 3);
-    await modelRoutingApi.setDefaultModelRoute("route-a", 4);
+    await modelRoutingApi.setDefaultModelRoute("route-a", "text", 4);
+    await modelRoutingApi.setDefaultModelRoute("route-a", "vision", 5);
 
     const requests = fetchMock.mock.calls.map(([path, init = {}]) => ({
       path,
@@ -198,11 +199,19 @@ describe("provider connection and model routing API boundary", () => {
         },
       },
       {
-        path: "/api/v1/admin/config/model-routes/route-a/default",
+        path: "/api/v1/admin/config/model-routes/route-a/defaults/text",
         method: "POST",
         body: {
           expected_revision: 4,
-          idempotency_key: expect.stringMatching(/^model-default-route-a-/),
+          idempotency_key: expect.stringMatching(/^model-default-text-route-a-/),
+        },
+      },
+      {
+        path: "/api/v1/admin/config/model-routes/route-a/defaults/vision",
+        method: "POST",
+        body: {
+          expected_revision: 5,
+          idempotency_key: expect.stringMatching(/^model-default-vision-route-a-/),
         },
       },
     ]);
@@ -244,8 +253,12 @@ describe("provider connection and model routing API boundary", () => {
     expect(feature).not.toContain('from "../../api"');
     expect(feature).not.toContain('from "../../types"');
     expect(feature).not.toContain("secretRef");
-    expect(feature).toContain("sm:flex-row");
-    expect(feature).toContain("overflow-x-auto");
+    expect(
+      readFileSync("src/features/model-routing/ConnectionsTab.tsx", "utf8"),
+    ).toContain("sm:flex-row");
+    expect(
+      readFileSync("src/features/model-routing/ModelsTab.tsx", "utf8"),
+    ).toContain("overflow-x-auto");
     expect(feature).not.toContain("deleteProviderConnection");
     expect(feature).not.toContain("deleteModelRoute");
     const page = readFileSync("src/components/pages/AdminModelsPage.tsx", "utf8");

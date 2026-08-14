@@ -97,12 +97,14 @@ export interface ModelRouteStatus extends MessageReference {
   revision: number;
   runtime_policy: ModelRouteRuntimePolicy;
   audit_event_ref: string;
-  is_default: boolean;
+  is_text_default: boolean;
+  is_vision_default: boolean;
 }
 
 export interface ModelRouteListResult {
   routes: ModelRouteStatus[];
-  default_route_id: string | null;
+  text_default_route_id: string | null;
+  vision_default_route_id: string | null;
 }
 
 export interface ModelRouteConfigInput {

@@ -6,4 +6,10 @@ export type {
   DirectoryProviderType,
   DirectoryTlsMode,
   DirectoryUserCandidate,
+  ScopedDirectoryConnectionListResult,
+  ScopedDirectoryConnectionSummary,
+  ScopedDirectoryMemberImportResult,
+  ScopedDirectorySearchMode,
+  ScopedDirectoryUserCandidate,
+  ScopedDirectoryUserSearchResult,
 } from "./types";

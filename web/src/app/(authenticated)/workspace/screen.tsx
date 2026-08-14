@@ -1,32 +1,36 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { AccountMenu } from "@/components/shell/AccountMenu";
 import { SidebarHeader } from "@/components/shell/ProductShell";
+import { KnowledgeScopePage } from "@/components/pages/KnowledgeScopePage";
 import { WorkspacePage } from "@/components/pages/WorkspacePage";
-import type { ReactNode } from "react";
 import { useAuthenticatedShell } from "../layout";
 
 export function WorkspaceScreen({
-  activeView = "/workspace",
   conversationId = null,
-  libraryContent = null,
+  initialKnowledgeSurface = null,
+  children,
 }: {
-  activeView?: "/workspace" | "/library";
   conversationId?: string | null;
-  libraryContent?: ReactNode;
+  initialKnowledgeSurface?: {
+    scopeType: "project" | "team";
+    scopeId: string | null;
+  } | null;
+  children?: ReactNode;
 }) {
   const { session, navigate, replace, setNotice, logout } =
     useAuthenticatedShell();
 
   return (
     <WorkspacePage
-      activeView={activeView}
       conversationId={conversationId}
+      initialKnowledgeSurface={initialKnowledgeSurface}
       session={session}
       onNotice={setNotice}
       onNavigate={navigate}
       onReplace={replace}
-      libraryContent={libraryContent}
       renderSidebarHeader={(options) => (
         <SidebarHeader
           onNavigate={navigate}
@@ -43,6 +47,9 @@ export function WorkspaceScreen({
           {...options}
         />
       )}
+      renderKnowledgeScope={(options) =>
+        children ?? <KnowledgeScopePage {...options} workspace />
+      }
     />
   );
 }

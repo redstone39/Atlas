@@ -2,6 +2,9 @@ import type { AdminActionResult } from "../../shared/api-contracts";
 import { requestJson } from "../../shared/api-client";
 import type { TeamScopeRole } from "../../shared/identity-access-contracts";
 import type {
+  TeamDirectoryConnectionListResult,
+  TeamDirectoryMemberImportResult,
+  TeamDirectoryUserSearchResult,
   TeamListResult,
   TeamMemberCandidatesResult,
   TeamMemberListResult,
@@ -14,6 +17,41 @@ export const teamAdministrationApi = {
   listTeamMemberCandidates: (teamId: string) =>
     requestJson<TeamMemberCandidatesResult>(
       `/api/v1/admin/teams/${teamId}/member-candidates`,
+    ),
+  listDirectoryConnections: (teamId: string) =>
+    requestJson<TeamDirectoryConnectionListResult>(
+      `/api/v1/admin/teams/${teamId}/directory-connections`,
+    ),
+  searchDirectoryUsers: (
+    teamId: string,
+    connectionId: string,
+    searchMode: "department" | "member",
+    query: string,
+  ) =>
+    requestJson<TeamDirectoryUserSearchResult>(
+      `/api/v1/admin/teams/${teamId}/directory-connections/${encodeURIComponent(connectionId)}/users/search`,
+      {
+        method: "POST",
+        body: JSON.stringify({ search_mode: searchMode, query, limit: 100 }),
+      },
+    ),
+  importDirectoryMembers: (
+    teamId: string,
+    connectionId: string,
+    externalSubjects: string[],
+    role: TeamScopeRole,
+    idempotencyKey: string,
+  ) =>
+    requestJson<TeamDirectoryMemberImportResult>(
+      `/api/v1/admin/teams/${teamId}/directory-connections/${encodeURIComponent(connectionId)}/users/import`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          external_subjects: externalSubjects,
+          role,
+          idempotency_key: idempotencyKey,
+        }),
+      },
     ),
   createTeam: (teamId: string, name: string, parentTeamId: string | null) =>
     requestJson<AdminActionResult>("/api/v1/admin/teams", {

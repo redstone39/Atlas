@@ -1,5 +1,6 @@
 import { FileText, Network, Plus, Save, UserRoundPlus, UsersRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -67,6 +68,7 @@ import {
   type AppDestination,
   type AppRouteMatch,
 } from "../../shared/routes";
+import type { TeamScopeRole } from "../../shared/identity-access-contracts";
 import type { MessageReference } from "../../shared/user-messages";
 import { agentAccessApi, type AgentUserStatus } from "../agent-access/index";
 import {
@@ -74,7 +76,14 @@ import {
   type UserAdminSummary,
 } from "../user-administration/index";
 import { teamAdministrationApi } from "./api";
-import type { TeamMembershipRecord, TeamRecord } from "./types";
+import {
+  SystemTeamDirectoryImportView,
+  useSystemTeamDirectoryImportController,
+} from "./SystemTeamDirectoryImportController";
+import type {
+  TeamMembershipRecord,
+  TeamRecord,
+} from "./types";
 
 type MemberOption = {
   actor_id: string;
@@ -88,6 +97,12 @@ const NO_PARENT = "__no-parent__";
 const teamStatusOptions: OptionSelectItem<"active" | "retired">[] = [
   { value: "active", label: "active" },
   { value: "retired", label: "retired" },
+];
+
+const teamMemberRoleOptions: OptionSelectItem<TeamScopeRole>[] = [
+  { value: "member", label: "member" },
+  { value: "uploader", label: "uploader" },
+  { value: "admin", label: "admin" },
 ];
 
 function buildDescendantTeamIdsByTeamId(teams: TeamRecord[]) {
@@ -126,6 +141,7 @@ export function TeamAdministrationFeature({
   onRefresh: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
+  const pathname = usePathname();
   const isMobile = useIsMobile();
   const [teams, setTeams] = useState<TeamRecord[]>([]);
   const [memberships, setMemberships] = useState<TeamMembershipRecord[]>([]);
@@ -145,12 +161,15 @@ export function TeamAdministrationFeature({
   const [editTeamStatus, setEditTeamStatus] = useState<"active" | "retired">("active");
   const [editInheritParentDocuments, setEditInheritParentDocuments] = useState(true);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [newMemberRole, setNewMemberRole] = useState<TeamScopeRole>("member");
   const [memberSearch, setMemberSearch] = useState("");
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const teamEditorGenerationRef = useRef(0);
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
 
   useEffect(() => {
     void refreshTeams();
@@ -168,6 +187,16 @@ export function TeamAdministrationFeature({
     detail && detail.teamId === selectedTeamId
       ? teams.find((team) => team.team_id === selectedTeamId) ?? null
       : null;
+  const directoryImport = useSystemTeamDirectoryImportController({
+    teamId: selectedTeam?.team_id ?? "",
+    role: newMemberRole,
+    onNotice,
+    onRefresh,
+    onPostSuccess: async () => {
+      await Promise.all([refreshTeams(), refreshMemberDirectory()]);
+    },
+    onClose: closeAddMembersDialog,
+  });
   const memberOptions: MemberOption[] = useMemo(
     () => [
       ...users
@@ -288,6 +317,8 @@ export function TeamAdministrationFeature({
     setSelectedTeamId(team.team_id);
     setEditTeamName(team.name);
     setEditParentTeamId(team.parent_team_id ?? "");
+    directoryImport.invalidateRequest();
+    setShowAddMembers(false);
     setEditTeamStatus(team.status);
     setEditInheritParentDocuments(team.inherit_parent_documents);
   }
@@ -402,8 +433,22 @@ export function TeamAdministrationFeature({
   }
 
   function resetAddMembersDraft() {
+    directoryImport.reset();
     setSelectedMemberIds([]);
     setMemberSearch("");
+    setNewMemberRole("member");
+  }
+
+  function openAddMembersDialog() {
+    if (!selectedTeam) return;
+    resetAddMembersDraft();
+    setActionError("");
+    setShowAddMembers(true);
+  }
+
+  function closeAddMembersDialog() {
+    resetAddMembersDraft();
+    setShowAddMembers(false);
   }
 
   function openTeamEditor(team: TeamRecord) {
@@ -435,6 +480,37 @@ export function TeamAdministrationFeature({
           {t("admin.edit")}
         </Button>
       </div>
+    );
+  }
+
+  function memberRoleControl(membership: TeamMembershipRecord) {
+    const memberLabel =
+      memberById.get(membership.member_actor_id)?.display_name ?? t("teams.unknownMember");
+    return (
+      <>
+        <label
+          htmlFor={`system-team-member-role-${membership.membership_id}`}
+          className="sr-only"
+        >
+          {t("teams.changeMemberRole", { name: memberLabel })}
+        </label>
+        <OptionSelect
+          id={`system-team-member-role-${membership.membership_id}`}
+          value={membership.role}
+          options={teamMemberRoleOptions}
+          disabled={pendingAction === `role-${membership.membership_id}`}
+          onValueChange={(role) =>
+            void runAction(`role-${membership.membership_id}`, () =>
+              teamAdministrationApi.addTeamMember(
+                membership.team_id,
+                membership.member_actor_type,
+                membership.member_actor_id,
+                role,
+              ),
+            )
+          }
+        />
+      </>
     );
   }
 
@@ -527,6 +603,12 @@ export function TeamAdministrationFeature({
                         label={localizedStatusLabel(membership.status, t)}
                       />
                     </div>
+                    <Field>
+                      <FieldLabel htmlFor={`system-team-member-role-${membership.membership_id}`}>
+                        {t("settings.role")}
+                      </FieldLabel>
+                      {memberRoleControl(membership)}
+                    </Field>
                     <div>{removeMemberAction(membership)}</div>
                   </div>
                 ))}
@@ -538,6 +620,7 @@ export function TeamAdministrationFeature({
                     <TableRow>
                       <TableHead>{t("teams.member")}</TableHead>
                       <TableHead>{t("teams.memberType")}</TableHead>
+                      <TableHead>{t("settings.role")}</TableHead>
                       <TableHead>{t("users.status")}</TableHead>
                       <TableHead>{t("users.action")}</TableHead>
                     </TableRow>
@@ -550,6 +633,9 @@ export function TeamAdministrationFeature({
                             t("teams.unknownMember")}
                         </TableCell>
                         <TableCell>{memberTypeLabel(membership.member_actor_type)}</TableCell>
+                        <TableCell className="min-w-40">
+                          {memberRoleControl(membership)}
+                        </TableCell>
                         <TableCell>
                           <StatusBadge
                             semantic={membership.status === "active" ? "success" : "inactive"}
@@ -568,11 +654,7 @@ export function TeamAdministrationFeature({
         <Button
           type="button"
           className="w-fit"
-          onClick={() => {
-            resetAddMembersDraft();
-            setActionError("");
-            setShowAddMembers(true);
-          }}
+          onClick={() => void openAddMembersDialog()}
         >
           <UserRoundPlus data-icon="inline-start" />
           {t("teams.addMember")}
@@ -995,79 +1077,111 @@ export function TeamAdministrationFeature({
       </Dialog>
       <Dialog
         open={showAddMembers}
-        onOpenChange={(open) => {
-          setShowAddMembers(open);
-          if (!open) resetAddMembersDraft();
-        }}
+        onOpenChange={(open) =>
+          open ? void openAddMembersDialog() : closeAddMembersDialog()
+        }
       >
-        <DialogContent>
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t("teams.addMember")}</DialogTitle>
             <DialogDescription>{t("teams.membersDescription")}</DialogDescription>
           </DialogHeader>
-          {actionError && (
+          {(directoryImport.mode === "directory" ? directoryImport.actionError : actionError) && (
             <div role="alert" className="rounded-md border border-destructive/50 p-3 text-sm">
               <div className="font-medium">{t("admin.actionFailed")}</div>
-              <div className="text-muted-foreground">{serverMessage(actionError, t)}</div>
+              <div className="text-muted-foreground">
+                {serverMessage(
+                  directoryImport.mode === "directory" ? directoryImport.actionError : actionError,
+                  t,
+                )}
+              </div>
             </div>
           )}
-          <Field>
-            <FieldLabel htmlFor="member-search">{t("teams.searchMembers")}</FieldLabel>
-            <Input
-              id="member-search"
-              value={memberSearch}
-              onChange={(event) => setMemberSearch(event.target.value)}
-            />
-          </Field>
-          <div className="grid max-h-72 gap-2 overflow-y-auto rounded-md border p-2">
-            {visibleMemberOptions.length === 0 ? (
-              <Empty className="min-h-32 border-0 p-4 md:p-6">
-                <EmptyHeader>
-                  <EmptyTitle>{memberSelectionEmptyTitle}</EmptyTitle>
-                  <EmptyDescription>{memberSelectionEmptyDescription}</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : (
-              visibleMemberOptions.map((member) => (
-                <label
-                  key={member.actor_id}
-                  className="flex min-h-10 items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors hover:bg-muted/50 focus-within:bg-muted/50 focus-within:outline-none focus-within:ring-2 focus-within:ring-ring"
-                >
-                  <Checkbox
-                    checked={selectedMemberIds.includes(member.actor_id)}
-                    onCheckedChange={(checked) =>
-                      toggleMember(member.actor_id, checked === true)
-                    }
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="team-add-members-mode">{t("directory.memberSource")}</FieldLabel>
+              <OptionSelect
+                id="team-add-members-mode"
+                value={directoryImport.mode}
+                options={[
+                  { value: "atlas", label: t("directory.atlasUsers") },
+                  { value: "directory", label: t("directory.title") },
+                ]}
+                onValueChange={(value) => {
+                  setActionError("");
+                  directoryImport.setMode(value);
+                }}
+              />
+            </Field>
+            {directoryImport.mode === "atlas" ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="member-search">{t("teams.searchMembers")}</FieldLabel>
+                  <Input
+                    id="member-search"
+                    value={memberSearch}
+                    onChange={(event) => setMemberSearch(event.target.value)}
                   />
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium">{member.display_name}</span>
-                    <span className="block text-xs text-muted-foreground">
-                      {memberTypeLabel(member.actor_type)}
-                    </span>
-                  </span>
-                  <StatusBadge
-                    semantic={
-                      member.status === "active"
-                        ? "success"
-                        : member.status === "inactive" || member.status === "removed"
-                          ? "inactive"
-                          : "unknown"
-                    }
-                    label={localizedStatusLabel(member.status, t)}
-                  />
-                </label>
-              ))
-            )}
-          </div>
+                </Field>
+                <div className="grid max-h-72 gap-2 overflow-y-auto rounded-md border p-2">
+                  {visibleMemberOptions.length === 0 ? (
+                    <Empty className="min-h-32 border-0 p-4 md:p-6">
+                      <EmptyHeader>
+                        <EmptyTitle>{memberSelectionEmptyTitle}</EmptyTitle>
+                        <EmptyDescription>{memberSelectionEmptyDescription}</EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
+                  ) : (
+                    visibleMemberOptions.map((member) => (
+                      <label
+                        key={member.actor_id}
+                        className="flex min-h-11 items-center gap-3 rounded-md border px-3 py-2 text-sm transition-colors hover:bg-muted/50 focus-within:bg-muted/50 focus-within:outline-none focus-within:ring-2 focus-within:ring-ring"
+                      >
+                        <Checkbox
+                          checked={selectedMemberIds.includes(member.actor_id)}
+                          onCheckedChange={(checked) =>
+                            toggleMember(member.actor_id, checked === true)
+                          }
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-medium">{member.display_name}</span>
+                          <span className="block text-xs text-muted-foreground">
+                            {memberTypeLabel(member.actor_type)}
+                          </span>
+                        </span>
+                        <StatusBadge
+                          semantic={member.status === "active" ? "success" : "inactive"}
+                          label={localizedStatusLabel(member.status, t)}
+                        />
+                      </label>
+                    ))
+                  )}
+                </div>
+              </>
+            ) : <SystemTeamDirectoryImportView controller={directoryImport} />}
+            <Field>
+              <FieldLabel htmlFor="team-member-role">{t("permissions.role")}</FieldLabel>
+              <OptionSelect
+                id="team-member-role"
+                value={newMemberRole}
+                options={teamMemberRoleOptions}
+                onValueChange={setNewMemberRole}
+              />
+            </Field>
+          </FieldGroup>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddMembers(false)}>
+            <Button variant="outline" onClick={closeAddMembersDialog}>
               {t("admin.cancel")}
             </Button>
             <Button
               type="button"
-              onClick={() =>
-                selectedTeam &&
-                runAction(
+              onClick={() => {
+                if (!selectedTeam) return;
+                if (directoryImport.mode === "directory") {
+                  void directoryImport.importMembers();
+                  return;
+                }
+                void runAction(
                   "add-members",
                   async () => {
                     const results = await Promise.all(
@@ -1076,6 +1190,7 @@ export function TeamAdministrationFeature({
                           selectedTeam.team_id,
                           member.actor_type,
                           member.actor_id,
+                          newMemberRole,
                         ),
                       ),
                     );
@@ -1085,16 +1200,21 @@ export function TeamAdministrationFeature({
                       message_params: {},
                     };
                   },
-                  () => {
-                    resetAddMembersDraft();
-                    setShowAddMembers(false);
-                  },
-                )
+                  closeAddMembersDialog,
+                );
+              }}
+              disabled={
+                pendingAction === "add-members" ||
+                directoryImport.importPending ||
+                (directoryImport.mode === "atlas"
+                  ? !canAddMembers
+                  : directoryImport.selectedSubjects.length === 0)
               }
-              disabled={pendingAction === "add-members" || !canAddMembers}
             >
               <UserRoundPlus data-icon="inline-start" />
-              {t("teams.addSelectedMembers")}
+              {directoryImport.mode === "directory"
+                ? t("directory.importSelected")
+                : t("teams.addSelectedMembers")}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -14,12 +14,15 @@ import { DocumentLibraryScreen } from "./(authenticated)/admin/document-library/
 import { ModelsScreen } from "./(authenticated)/admin/models/screen";
 import { OpsScreen } from "./(authenticated)/admin/ops/screen";
 import { PluginsScreen } from "./(authenticated)/admin/plugins/screen";
-import { ProjectsScreen } from "./(authenticated)/admin/projects/screen";
-import { TeamsScreen } from "./(authenticated)/admin/teams/screen";
+import { ProjectsScreen as AdminProjectsScreen } from "./(authenticated)/admin/projects/screen";
+import { TeamsScreen as AdminTeamsScreen } from "./(authenticated)/admin/teams/screen";
 import { UsersScreen } from "./(authenticated)/admin/users/screen";
-import { LibraryScreen } from "./(authenticated)/library/screen";
+import { ProjectsScreen } from "./(authenticated)/projects/screen";
+import { TeamsScreen } from "./(authenticated)/teams/screen";
 import { SettingsScreen } from "./(authenticated)/settings/screen";
 import { WorkspaceScreen } from "./(authenticated)/workspace/screen";
+import WorkspaceLayout from "./(authenticated)/workspace/layout";
+import { NotesScreen } from "./(authenticated)/notes-screen";
 import { AcceptInviteScreen } from "./(public)/accept-invite/screen";
 import { LoginScreen } from "./(public)/login/screen";
 import { Providers } from "./providers";
@@ -68,8 +71,22 @@ function authenticatedScreen(pathname: string): ReactNode {
   switch (pathname) {
     case "/workspace":
       return <WorkspaceScreen />;
-    case "/library":
-      return <LibraryScreen />;
+    case "/workspace/projects":
+      return (
+        <WorkspaceScreen
+          initialKnowledgeSurface={{ scopeType: "project", scopeId: null }}
+        />
+      );
+    case "/workspace/teams":
+      return (
+        <WorkspaceScreen
+          initialKnowledgeSurface={{ scopeType: "team", scopeId: null }}
+        />
+      );
+    case "/projects":
+      return <ProjectsScreen />;
+    case "/teams":
+      return <TeamsScreen />;
     case "/settings":
       return <SettingsScreen />;
     case "/admin/document-library": {
@@ -87,9 +104,9 @@ function authenticatedScreen(pathname: string): ReactNode {
     case "/admin/users":
       return <UsersScreen />;
     case "/admin/teams":
-      return <TeamsScreen />;
+      return <AdminTeamsScreen />;
     case "/admin/projects":
-      return <ProjectsScreen />;
+      return <AdminProjectsScreen />;
     case "/admin/models":
       return <ModelsScreen />;
     case "/admin/plugins": {
@@ -125,14 +142,85 @@ function authenticatedScreen(pathname: string): ReactNode {
       />
     );
   }
+  if (/^\/workspace\/(projects|teams)\/[^/]+\/notes(?:\/.*)?$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    if (match.kind !== "scope-notes") return <UnavailableRoute />;
+    const surface = match.view === "list" || match.view === "trash"
+      ? { view: match.view }
+      : match.view === "preview"
+        ? { view: "preview" as const, noteId: match.noteId!, savepointId: match.savepointId! }
+        : { view: match.view, noteId: match.noteId! };
+    return (
+      <WorkspaceLayout>
+        <NotesScreen
+          scopeType={match.scopeType}
+          scopeId={match.scopeId}
+          surface={surface}
+          workspace
+        />
+      </WorkspaceLayout>
+    );
+  }
+  if (/^\/workspace\/projects\/[^/]+\/knowledge$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    return (
+      <WorkspaceScreen
+        initialKnowledgeSurface={{
+          scopeType: "project",
+          scopeId: match.kind === "workspace-projects" ? match.projectId : null,
+        }}
+      />
+    );
+  }
+  if (/^\/workspace\/teams\/[^/]+\/knowledge$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    return (
+      <WorkspaceScreen
+        initialKnowledgeSurface={{
+          scopeType: "team",
+          scopeId: match.kind === "workspace-teams" ? match.teamId : null,
+        }}
+      />
+    );
+  }
+  if (/^\/(projects|teams)\/[^/]+\/notes(?:\/.*)?$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    if (match.kind !== "scope-notes") return <UnavailableRoute />;
+    const surface = match.view === "list" || match.view === "trash"
+      ? { view: match.view }
+      : match.view === "preview"
+        ? { view: "preview" as const, noteId: match.noteId!, savepointId: match.savepointId! }
+        : { view: match.view, noteId: match.noteId! };
+    return (
+      <NotesScreen
+        scopeType={match.scopeType}
+        scopeId={match.scopeId}
+        surface={surface}
+      />
+    );
+  }
+  if (/^\/projects\/[^/]+\/knowledge$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    return (
+      <ProjectsScreen
+        projectId={match.kind === "project-knowledge" ? match.projectId : null}
+      />
+    );
+  }
+  if (/^\/teams\/[^/]+\/knowledge$/.test(pathname)) {
+    const match = matchAppRoute(route);
+    return (
+      <TeamsScreen teamId={match.kind === "team-knowledge" ? match.teamId : null} />
+    );
+  }
   if (/^\/admin\/users\/[^/]+$/.test(pathname)) {
     return <UsersScreen route={route} />;
   }
   if (/^\/admin\/teams\/[^/]+\/(profile|members)$/.test(pathname)) {
-    return <TeamsScreen route={route} />;
+    return <AdminTeamsScreen route={route} />;
   }
   if (/^\/admin\/projects\/[^/]+\/(profile|access)$/.test(pathname)) {
-    return <ProjectsScreen route={route} />;
+    return <AdminProjectsScreen route={route} />;
   }
   if (/^\/admin\/audit\/conversations\/[^/]+\/transcript$/.test(pathname)) {
     return <AuditTranscriptScreen route={route} />;

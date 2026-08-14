@@ -1,4 +1,9 @@
 import type { TeamScopeRole } from "../../shared/identity-access-contracts";
+import type {
+  ScopedDirectoryConnectionListResult,
+  ScopedDirectoryMemberImportResult,
+  ScopedDirectoryUserSearchResult,
+} from "../directory-administration";
 
 export interface TeamRecord {
   team_id: string;
@@ -51,3 +56,7 @@ export interface TeamMemberCandidate {
 export interface TeamMemberCandidatesResult {
   users: TeamMemberCandidate[];
 }
+
+export type TeamDirectoryConnectionListResult = ScopedDirectoryConnectionListResult;
+export type TeamDirectoryUserSearchResult = ScopedDirectoryUserSearchResult;
+export type TeamDirectoryMemberImportResult = ScopedDirectoryMemberImportResult;
