@@ -121,6 +121,70 @@ class Handler(BaseHTTPRequestHandler):
                 "refusal": None,
             }
 
+        user_text = " ".join(
+            item["content"]
+            for item in messages
+            if item.get("role") == "user" and isinstance(item.get("content"), str)
+        ).casefold()
+        question = (
+            "What does ORION VISUAL BUS connect?"
+            if "visual bus" in user_text
+            else (
+                "For ORION, what values are listed for Target resistance "
+                "and Qualification tolerance?"
+            )
+        )
+        if schema_name == "context_resolver_v1":
+            output = {"resolver_context": f"The current request asks: {question}"}
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+        if schema_name == "context_rewrite_v1":
+            output = {"rewritten_question": question}
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+        if schema_name == "atlas_initial_plan_decision_v1":
+            output = {
+                "next_objective": "Retrieve the authorized ORION evidence.",
+                "completion_condition": "Answer from retrieved evidence.",
+                "item_summaries": ["Search the authorized knowledge scope."],
+            }
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+        if schema_name == "atlas_replan_decision_v1":
+            output = {
+                "next_objective": "Finalize the supported answer.",
+                "completion_condition": "The answer cites retrieved evidence.",
+                "completed_item_ids": [],
+                "skipped_item_ids": [],
+                "new_item_summaries": [],
+            }
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+        if schema_name == "atlas_process_evaluation_decision_v2":
+            output = {
+                "verdict": "accept",
+                "summary": "The answer is supported by retrieved evidence.",
+                "rubric_dimensions": {
+                    "plan_coverage": 2,
+                    "evidence_handling": 2,
+                    "conflict_handling": 2,
+                    "gap_resolution": 2,
+                    "revision_completion": 2,
+                },
+            }
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+
         if schema_name == "atlas_office_visual_interpretation_v1":
             user_content = messages[-1].get("content")
             if not isinstance(user_content, list):
@@ -177,34 +241,98 @@ class Handler(BaseHTTPRequestHandler):
                 "refusal": None,
             }
 
-        if schema_name == "atlas_claim_validation_v1":
-            payload = json.loads(messages[-1]["content"])
+        if schema_name == "provisional_declared_evidence_decision_v3":
+            payload = next(
+                json.loads(item["content"])
+                for item in messages
+                if item.get("role") == "user"
+                and isinstance(item.get("content"), str)
+                and item["content"].startswith("{")
+            )
+            image_parts = [
+                part
+                for item in messages
+                if isinstance(item.get("content"), list)
+                for part in item["content"]
+                if part.get("type") == "image_url"
+            ]
             output = {
-                "assessments": [
-                    {
-                        "segment_id": candidate["segment_id"],
-                        "status": "evidence_supported",
-                        "reason_code": "supported_by_evidence",
-                        "evidence_ids": [
-                            item["evidence_id"] for item in candidate["evidence"]
-                        ],
-                    }
-                    for candidate in payload["candidates"]
-                ]
+                "item_outcomes": ["aligned"] * len(payload["answer_items"])
+            }
+            if image_parts:
+                url = image_parts[0].get("image_url", {}).get("url", "")
+                prefix = "data:image/png;base64,"
+                if not isinstance(url, str) or not url.startswith(prefix):
+                    raise ValueError("assessment visual request is not PNG")
+                image = base64.b64decode(url.removeprefix(prefix), validate=True)
+                output["_call_metadata"] = {
+                    "has_image": True,
+                    "image_digest": sha256(image).hexdigest(),
+                }
+            provider_output = {
+                key: value
+                for key, value in output.items()
+                if key != "_call_metadata"
             }
             return output, "stop", {
-                "content": json.dumps(output, separators=(",", ":")),
+                "content": json.dumps(provider_output, separators=(",", ":")),
                 "refusal": None,
             }
 
+
         if not any(item.get("role") == "tool" for item in messages):
-            question = next(
+            arguments = json.dumps(
+                {
+                    "action": "discover_relevant_documents",
+                    "query_text": question,
+                    "limit": 20,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            return {}, "tool_calls", {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "discover-multiformat",
+                        "type": "function",
+                        "function": {
+                            "name": "discover_relevant_documents",
+                            "arguments": arguments,
+                        },
+                    }
+                ],
+            }
+
+        tool = json.loads(
+            next(
                 item["content"]
                 for item in reversed(messages)
-                if item.get("role") == "user"
+                if item.get("role") == "tool"
             )
+        )
+        _record({"schema_name": "atlas_workspace_tool_raw", "tool": tool})
+        result = tool.get("result") or tool.get("observation", {})
+        if result.get("result_type") == "relevant_document_discovery_result":
+            document_handles = [
+                item["document_handle"] for item in result.get("candidates", [])
+            ]
             arguments = json.dumps(
-                {"query_text": question, "evidence_budget": 12},
+                {
+                    "action": "search_knowledge",
+                    "query_text": question,
+                    "document_handles": document_handles,
+                    "required_modalities": [],
+                    "facet_hints": {
+                        "document_types": [],
+                        "date_from": None,
+                        "date_to": None,
+                        "languages": [],
+                        "tags": [],
+                    },
+                    "limit": 20,
+                    "max_output_tokens": 64000,
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -221,115 +349,118 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 ],
             }
-
-        tool = json.loads(
-            next(
-                item["content"]
-                for item in reversed(messages)
-                if item.get("role") == "tool"
-            )
-        )
-        result = tool["result"]
-        _record({
-            "schema_name": "atlas_workspace_tool_result",
-            "status": result.get("status"),
-            "evidence": [
-                {
-                    "evidence_id": item.get("evidence_id"),
-                    "content": str(item.get("content", ""))[:300],
-                }
-                for item in result.get("evidence", [])
-            ],
-        })
-        question = next(
-            item["content"]
-            for item in reversed(messages)
-            if item.get("role") == "user"
-        ).casefold()
-        if result.get("status") != "completed":
+        if result.get("result_type") == "visual_inspection_result":
             output = {
-                "response_kind": "unknown",
+                "action": "finalize_answer",
                 "segments": [
                     {
-                        "segment_id": "unknown",
-                        "kind": "unknown",
-                        "text": "No supported answer.",
-                        "citation_ids": [],
-                        "claim_ids": [],
-                        "evidence_unit_ids": [],
-                        "external_unverified": False,
+                        "segment_id": "visual-bus",
+                        "text": (
+                            "ORION VISUAL BUS connects one controller to two sensors."
+                        ),
                     }
                 ],
+                "claimed_evidence_handles": [result["visual_handle"]],
             }
-        elif "visual bus" in question:
-            output = Handler._grounded_answer(
-                result,
-                segment_id="visual-bus",
-                text="ORION VISUAL BUS connects one controller to two sensors.",
-                claim_id="claim-visual-bus",
-                required_phrases=("orion visual bus",),
-            )
-        else:
-            output = Handler._grounded_answer(
-                result,
-                segment_id="controller-spec",
-                text=(
+            return output, "stop", {
+                "content": json.dumps(output, separators=(",", ":")),
+                "refusal": None,
+            }
+        if result.get("result_type") == "knowledge_search_result":
+            if "visual bus" in question.casefold():
+                visual_source = next(
+                    item
+                    for item in result.get("evidence", [])
+                    if item["document_display_name"] == "orion-target"
+                    and item.get("page_handle")
+                )
+                arguments = json.dumps(
+                    {
+                        "action": "inspect_visual",
+                        "handle": visual_source["page_handle"],
+                        "scope": "full",
+                        "bbox": None,
+                    },
+                    separators=(",", ":"),
+                )
+                return {}, "tool_calls", {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "inspect-visual-multiformat",
+                            "type": "function",
+                            "function": {
+                                "name": "inspect_visual",
+                                "arguments": arguments,
+                            },
+                        }
+                    ],
+                }
+            expected_text = (
+                "ORION VISUAL BUS connects one controller to two sensors."
+                if "visual bus" in question.casefold()
+                else (
                     "The ORION controller target is 47 ohm and the qualification "
                     "tolerance is plus or minus 5 percent."
-                ),
-                claim_id="claim-controller-spec",
-                required_phrases=("47 ohm", "plus or minus 5 percent"),
+                )
             )
-        return output, "stop", {
-            "content": json.dumps(output, ensure_ascii=False, separators=(",", ":")),
-            "refusal": None,
-        }
-
-    @staticmethod
-    def _grounded_answer(
-        result: dict,
-        *,
-        segment_id: str,
-        text: str,
-        claim_id: str,
-        required_phrases: tuple[str, ...],
-    ) -> dict:
-        selected_indices = [
-            index
-            for index, evidence in enumerate(result["evidence"])
-            if any(
-                phrase in str(evidence.get("content", "")).casefold()
+            required_phrases = (
+                ("orion visual bus",)
+                if "visual bus" in question.casefold()
+                else ("47 ohm", "plus or minus 5 percent")
+            )
+            evidence = result.get("evidence", [])
+            selected = [
+                item
+                for item in evidence
+                if any(
+                    phrase in str(item.get("snippet", "")).casefold()
+                    for phrase in required_phrases
+                )
+            ]
+            matched = {
+                phrase
+                for item in selected
                 for phrase in required_phrases
-            )
-        ]
-        matched_phrases = {
-            phrase
-            for index in selected_indices
-            for phrase in required_phrases
-            if phrase
-            in str(result["evidence"][index].get("content", "")).casefold()
-        }
-        if matched_phrases != set(required_phrases):
-            raise ValueError("required acceptance evidence was not retrieved")
-        return {
-            "response_kind": "grounded_answer",
+                if phrase in str(item.get("snippet", "")).casefold()
+            }
+            if matched != set(required_phrases):
+                raise ValueError("required acceptance evidence was not retrieved")
+            output = {
+                "action": "finalize_answer",
+                "segments": [
+                    {
+                        "segment_id": (
+                            "visual-bus"
+                            if "visual bus" in question.casefold()
+                            else "controller-spec"
+                        ),
+                        "text": expected_text,
+                    }
+                ],
+                "claimed_evidence_handles": list(
+                    dict.fromkeys(item["evidence_handle"] for item in selected)
+                ),
+            }
+            return output, "stop", {
+                "content": json.dumps(
+                    output, ensure_ascii=False, separators=(",", ":")
+                ),
+                "refusal": None,
+            }
+        output = {
+            "action": "finalize_answer",
             "segments": [
                 {
-                    "segment_id": segment_id,
-                    "kind": "controlled",
-                    "text": text,
-                    "citation_ids": [
-                        result["citations"][index]["citation_handle"]
-                        for index in selected_indices
-                    ],
-                    "claim_ids": [claim_id],
-                    "evidence_unit_ids": [
-                        result["evidence"][index]["evidence_id"]
-                        for index in selected_indices
-                    ],
-                    "external_unverified": False,
+                    "segment_id": "unknown",
+                    "text": "No supported answer.",
                 }
             ],
+            "claimed_evidence_handles": [],
+        }
+        return output, "stop", {
+            "content": json.dumps(output, separators=(",", ":")),
+            "refusal": None,
         }
 
 

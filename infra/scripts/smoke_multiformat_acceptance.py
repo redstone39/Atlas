@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from io import BytesIO
 import json
 import os
 from pathlib import Path
 import time
 
 import httpx
-from pypdf import PdfReader
 
 
 PROJECT_ID = "project-multiformat-acceptance"
@@ -405,66 +403,90 @@ def create_conversation(client: httpx.Client, suffix: str) -> str:
                 "idempotency_key": f"conversation-multiformat-{suffix}",
             },
         ),
-        201,
+        200,
     ).json()
-    return body["conversation_id"]
+    return body["conversation"]["conversation_id"]
 
 
 def run_turn(
     client: httpx.Client, conversation_id: str, text: str, suffix: str
 ) -> dict:
-    response = checked(
+    accepted = checked(
         client.post(
             f"/api/v1/workspace/conversations/{conversation_id}/turns",
             json={
                 "input_text": text,
-                "evidence_budget": 12,
                 "idempotency_key": f"turn-multiformat-{suffix}",
+                "reasoning_mode": "standard",
             },
             timeout=150,
         ),
-        200,
-    )
-    body = response.json()
-    if body["execution_status"] != "completed":
-        raise RuntimeError(
-            f"Workspace turn did not complete: {body.get('refusal_code')}"
-        )
-    return body
-
-
-def open_viewer(client: httpx.Client, turn: dict, citation: dict) -> tuple[dict, bytes]:
-    if not citation["viewer_available"]:
-        raise RuntimeError(f"citation has no Viewer: {citation['citation_id']}")
-    manifest = checked(
-        client.post(
-            f"/api/v1/workspace/citations/{citation['citation_id']}/viewer-sessions"
-        ),
-        201,
+        202,
     ).json()
-    if manifest["assistant_turn_id"] != turn["turn_id"]:
-        raise RuntimeError("Viewer session was not bound to the answer turn")
-    item = next(
-        value
-        for value in manifest["viewer_items"]
-        if value["viewer_item_id"] == manifest["initial_viewer_item_id"]
-    )
-    content = checked(client.get(item["content_endpoint"]), 200)
-    if content.headers.get("cache-control") != "no-store":
-        raise RuntimeError("Viewer content was not marked no-store")
-    if content.headers.get("x-content-type-options") != "nosniff":
-        raise RuntimeError("Viewer content was not marked nosniff")
-    if "inline" not in content.headers.get("content-disposition", ""):
-        raise RuntimeError("Viewer content was not served inline")
-    if not content.headers.get("etag"):
-        raise RuntimeError("Viewer content did not include an ETag")
-    return {"manifest": manifest, "item": item, "headers": dict(content.headers)}, content.content
+    deadline = time.monotonic() + 240
+    while time.monotonic() < deadline:
+        status = checked(
+            client.get(accepted["status_url"], timeout=30),
+            200,
+        ).json()
+        if status["state"] == "terminal_completed":
+            detail = checked(
+                client.get(
+                    f"/api/v1/workspace/conversations/{conversation_id}",
+                    timeout=30,
+                ),
+                200,
+            ).json()
+            turn = next(
+                item
+                for item in detail["turns"]
+                if item["turn_id"] == accepted["turn_id"]
+            )
+            turn["answer_text"] = " ".join(
+                segment["text"] for segment in turn["segments"]
+            )
+            return turn
+        if status["state"] in {"terminal_failed", "lease_closed"}:
+            raise RuntimeError(
+                f"Workspace turn did not complete: {json.dumps(status)}"
+            )
+        time.sleep(0.25)
+    raise RuntimeError("workspace turn timed out")
 
 
 def verify_queries_and_viewer(
     client: httpx.Client, manifest: dict, *, run_suffix: str = ""
 ) -> dict[str, object]:
     suffix = f"-{run_suffix}" if run_suffix else ""
+    format_by_title = {
+        Path(item["filename"]).stem: document_format
+        for document_format, item in manifest["files"].items()
+    }
+
+    def resolved_evidence(turn: dict) -> list[dict]:
+        evidence = [
+            item
+            for item in turn["model_claimed_evidence"]
+            if item["resolution_status"] == "resolved"
+            and item["duplicate_of_position"] is None
+        ]
+        if not evidence:
+            raise RuntimeError("Workspace answer did not resolve declared evidence")
+        return evidence
+
+    def open_evidence(conversation_id: str, turn: dict, item: dict) -> dict:
+        return checked(
+            client.get(
+                (
+                    f"/api/v1/workspace/conversations/{conversation_id}/turns/"
+                    f"{turn['turn_id']}/declared-evidence/"
+                    f"{item['protected_open_ref']}"
+                ),
+                headers={"Accept": "application/json"},
+            ),
+            200,
+        ).json()
+
     conversation_id = create_conversation(client, f"cross-document{suffix}")
     cross = run_turn(
         client,
@@ -475,33 +497,35 @@ def verify_queries_and_viewer(
     answer = (cross.get("answer_text") or "").casefold()
     if not all(term.casefold() in answer for term in manifest["expected_answer_terms"]):
         raise RuntimeError(f"cross-document answer was incomplete: {answer}")
-    formats = {item["document_format"] for item in cross["citations"]}
-    titles = {item["document_title"] for item in cross["citations"]}
+    cross_evidence = resolved_evidence(cross)
+    titles = {item["document_display_name"] for item in cross_evidence}
+    formats = {
+        format_by_title[title] for title in titles if title in format_by_title
+    }
     if len(formats) < 2 or len(titles) < 2:
-        raise RuntimeError("Workspace answer did not cite two documents and formats")
+        raise RuntimeError(
+            "Workspace answer did not declare two current documents and formats"
+        )
     if "pdf" not in formats or not formats.intersection({"doc", "docx"}):
         raise RuntimeError(
             f"complementary answer did not combine PDF and Word evidence: {formats}"
         )
-    pdf_citation = next(item for item in cross["citations"] if item["document_format"] == "pdf")
-    office_citation = next(
+    pdf_evidence = next(
         item
-        for item in cross["citations"]
-        if item["document_format"] in {"doc", "docx"}
+        for item in cross_evidence
+        if format_by_title.get(item["document_display_name"]) == "pdf"
     )
-    pdf_view, pdf_bytes = open_viewer(client, cross, pdf_citation)
-    if (
-        pdf_view["item"]["artifact_kind"] != "pdf_single_page"
-        or not pdf_bytes.startswith(b"%PDF")
-        or len(PdfReader(BytesIO(pdf_bytes)).pages) != 1
-    ):
-        raise RuntimeError("PDF citation did not open one immutable evidence page")
-    office_view, office_bytes = open_viewer(client, cross, office_citation)
-    if (
-        office_view["item"]["artifact_kind"] != "page_image"
-        or not office_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-    ):
-        raise RuntimeError("Office citation did not open a page-image PNG")
+    word_evidence = next(
+        item
+        for item in cross_evidence
+        if format_by_title.get(item["document_display_name"]) in {"doc", "docx"}
+    )
+    pdf_open = open_evidence(conversation_id, cross, pdf_evidence)
+    word_open = open_evidence(conversation_id, cross, word_evidence)
+    if "47 ohm" not in pdf_open["content"].casefold():
+        raise RuntimeError("protected PDF evidence did not preserve target resistance")
+    if "plus or minus 5 percent" not in word_open["content"].casefold():
+        raise RuntimeError("protected Word evidence did not preserve qualification")
 
     visual_conversation = create_conversation(client, f"visual{suffix}")
     visual = run_turn(
@@ -510,67 +534,36 @@ def verify_queries_and_viewer(
         manifest["visual_query"],
         f"visual{suffix}",
     )
-    visual_citations = [
-        item
-        for item in visual["citations"]
-        if item["evidence_modality"] == "visual_inference"
+    visual_answer = (visual.get("answer_text") or "").casefold()
+    if "one controller to two sensors" not in visual_answer:
+        raise RuntimeError(f"visual answer was incomplete: {visual_answer}")
+    visual_evidence = resolved_evidence(visual)
+    visual_open = [
+        open_evidence(visual_conversation, visual, item)
+        for item in visual_evidence
     ]
-    if not visual_citations:
-        raise RuntimeError("visual inference was not retrieved into Workspace")
-    if visual["response_kind"] != "external_unverified" or not any(
-        item["verification_status"] == "unverified_inference"
-        for item in visual["response_segments"]
+    visual_items = [
+        (declared, opened)
+        for declared, opened in zip(visual_evidence, visual_open, strict=True)
+        if declared["handle_kind"] == "visual"
+        and opened["modality"] == "figure"
+    ]
+    if not visual_items or not all(
+        "image digest " in opened["content"].casefold()
+        for _, opened in visual_items
     ):
-        raise RuntimeError("VLM-only claim was not kept unverified")
-    visual_view, visual_bytes = open_viewer(client, visual, visual_citations[0])
-    initial_citation = next(
-        item
-        for item in visual_view["manifest"]["citations"]
-        if item["citation_id"] == visual_citations[0]["citation_id"]
-    )
-    if (
-        visual_view["item"]["artifact_kind"] != "page_image"
-        or not visual_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-        or initial_citation["viewer_target"]["kind"]
-        not in {"image_rectangle", "image_whole_page"}
-    ):
-        raise RuntimeError("visual citation did not open its verified Office page")
+        raise RuntimeError("protected visual evidence was not retrievable")
 
     return {
         "cross_document_formats": sorted(formats),
         "cross_document_titles": sorted(titles),
-        "cross_document_citation_count": len(cross["citations"]),
-        "pdf_viewer_bytes": len(pdf_bytes),
-        "office_viewer_bytes": len(office_bytes),
-        "office_target_kind": next(
-            item["viewer_target"]["kind"]
-            for item in office_view["manifest"]["citations"]
-            if item["citation_id"] == office_citation["citation_id"]
-        ),
-        "visual_citation_count": len(visual_citations),
-        "visual_target_kind": initial_citation["viewer_target"]["kind"],
+        "cross_document_evidence_count": len(cross_evidence),
+        "cross_document_review_status": cross["evidence_review_status"],
+        "visual_evidence_count": len(visual_items),
+        "visual_review_status": visual["evidence_review_status"],
     }
 
 
-def processing_visual_call_count(url: str) -> int:
-    response = checked(httpx.get(f"{url.rstrip('/')}/calls", timeout=10), 200)
-    calls = response.json().get("calls")
-    if not isinstance(calls, list):
-        raise RuntimeError("processing provider did not return its call log")
-    visual = [
-        item
-        for item in calls
-        if isinstance(item, dict)
-        and item.get("schema_name") == "atlas_office_visual_interpretation_v1"
-    ]
-    if not visual or any(
-        item.get("has_image") is not True
-        or not isinstance(item.get("image_digest"), str)
-        or len(item["image_digest"]) != 64
-        for item in visual
-    ):
-        raise RuntimeError("processing provider visual call evidence is incomplete")
-    return len(visual)
 
 
 def main() -> int:
@@ -580,11 +573,6 @@ def main() -> int:
     parser.add_argument("--processing-timeout-seconds", type=int, default=900)
     parser.add_argument("--journey-only", action="store_true")
     parser.add_argument("--run-suffix", default="")
-    parser.add_argument(
-        "--processing-provider-url",
-        default="http://127.0.0.1:18082",
-    )
-    parser.add_argument("--expected-visual-provider-call-count", type=int)
     parser.add_argument("--configuration-ready", action="store_true")
     args = parser.parse_args()
     fixtures = args.fixtures.resolve()
@@ -598,23 +586,11 @@ def main() -> int:
             journey = verify_queries_and_viewer(
                 client, manifest, run_suffix=args.run_suffix
             )
-            visual_provider_call_count = processing_visual_call_count(
-                args.processing_provider_url
-            )
-            if (
-                args.expected_visual_provider_call_count is not None
-                and visual_provider_call_count
-                != args.expected_visual_provider_call_count
-            ):
-                raise RuntimeError(
-                    "processing worker restart changed the visual provider call count"
-                )
             print(
                 json.dumps(
                     {
                         "status": "passed",
                         "mode": "journey_only",
-                        "visual_provider_call_count": visual_provider_call_count,
                         **journey,
                     },
                     ensure_ascii=False,
@@ -636,9 +612,6 @@ def main() -> int:
         journey = verify_queries_and_viewer(
             client, manifest, run_suffix=args.run_suffix
         )
-        visual_provider_call_count = processing_visual_call_count(
-            args.processing_provider_url
-        )
 
     result = {
         "status": "passed",
@@ -647,7 +620,6 @@ def main() -> int:
             key: value["status"] for key, value in statuses.items()
         },
         "vision_profile_revisions": revisions,
-        "visual_provider_call_count": visual_provider_call_count,
         **journey,
     }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)

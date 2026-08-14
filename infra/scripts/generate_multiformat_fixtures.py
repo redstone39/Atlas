@@ -47,7 +47,7 @@ def _diagram(path: Path) -> None:
     image.save(path, format="PNG", optimize=False)
 
 
-def _pdf_source(path: Path) -> None:
+def _pdf_source(path: Path, diagram: Path) -> None:
     document = Document()
     document.add_heading("ORION controller target", level=1)
     document.add_paragraph(FIXTURE_TEXT["pdf"])
@@ -57,6 +57,10 @@ def _pdf_source(path: Path) -> None:
     cells = table.add_row().cells
     cells[0].text = "Target resistance"
     cells[1].text = "47 ohm"
+    document.add_paragraph(
+        "ORION VISUAL BUS diagram: one controller connects to two sensors."
+    )
+    document.add_picture(str(diagram), width=Inches(4.6))
     document.save(path)
 
 
@@ -192,7 +196,7 @@ def main() -> int:
     pptx = output / "orion-board.pptx"
     xlsx = output / "orion-current.xlsx"
     _diagram(diagram)
-    _pdf_source(pdf_source)
+    _pdf_source(pdf_source, diagram)
     _docx(docx, diagram)
     _pptx(pptx, diagram)
     _xlsx(xlsx, diagram)
