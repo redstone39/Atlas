@@ -45,6 +45,7 @@ compose() {
 }
 
 cleanup() {
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "$admin_cookie" "$member_cookie" "$accept_cookie" "$revoked_member_cookie" "$image_file" "$downloaded_image" "$image_headers"
   rm -rf "$provider_dir"
 }
