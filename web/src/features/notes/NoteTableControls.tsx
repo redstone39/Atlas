@@ -53,6 +53,12 @@ export function NoteTableControls({ editor, editable }: { editor: Editor; editab
     };
   }, [editor]);
 
+  useEffect(() => {
+    if (editable) return;
+    setActionsOpen(false);
+    setTooltipOpen(false);
+  }, [editable]);
+
   const getReferencedVirtualElement = useCallback(() => {
     const pointerAnchor = pointerAnchorRef.current;
     return pointerAnchor
@@ -81,10 +87,14 @@ export function NoteTableControls({ editor, editable }: { editor: Editor; editab
   }
 
   return (
-    <ContextMenu onOpenChange={(open) => {
-      setActionsOpen(open);
-      if (open) setTooltipOpen(false);
-    }}>
+    <ContextMenu
+      open={editable && actionsOpen}
+      onOpenChange={(open) => {
+        const nextOpen = editable && open;
+        setActionsOpen(nextOpen);
+        if (nextOpen) setTooltipOpen(false);
+      }}
+    >
       <BubbleMenu
         editor={editor}
         pluginKey="note-table-controls"

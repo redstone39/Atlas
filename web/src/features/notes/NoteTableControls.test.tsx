@@ -130,4 +130,19 @@ describe("NoteTableControls", () => {
     expect(screen.queryByRole("button", { name: "Table actions" })).not.toBeInTheDocument();
     editor.destroy();
   });
+
+  it("closes mutating table actions when the editor becomes read-only", () => {
+    const editor = tableEditor();
+    const { rerender } = render(<NoteTableControls editor={editor} editable />);
+
+    const trigger = screen.getByRole("button", { name: "Table actions" });
+    fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
+    expect(screen.getByRole("menuitem", { name: "Add row before" })).toBeInTheDocument();
+
+    rerender(<NoteTableControls editor={editor} editable={false} />);
+
+    expect(screen.queryByRole("button", { name: "Table actions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Add row before" })).not.toBeInTheDocument();
+    editor.destroy();
+  });
 });
