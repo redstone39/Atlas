@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -17,9 +16,11 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../../components/ui/empty";
+import { Item, ItemGroup } from "../../components/ui/item";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Field, FieldGroup, FieldLabel } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
+import { Spinner } from "../../components/ui/spinner";
 import { useIsMobile } from "../../hooks/use-mobile";
 import {
   Table,
@@ -32,14 +33,16 @@ import {
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
 import {
   AdminBreadcrumb,
+  AdminResourceHeader,
   AdminResourceUnavailable,
+  AdminSection,
+  AdminSectionNav,
 } from "../../shared/admin-detail";
 import {
   ConfirmActionButton,
   LoadErrorState,
   LoadingState,
   PageHeader,
-  clickableCardClassName,
   serverMessage,
 } from "../../shared/product-ui";
 import {
@@ -62,11 +65,6 @@ import type {
   TeamRecord,
 } from "./types";
 
-const roleOptions: OptionSelectItem<TeamScopeRole>[] = [
-  { value: "member", label: "member" },
-  { value: "uploader", label: "uploader" },
-  { value: "admin", label: "admin" },
-];
 
 export function ScopedTeamAdministrationFeature({
   detail,
@@ -82,6 +80,11 @@ export function ScopedTeamAdministrationFeature({
   const { t } = useTranslation();
   const isMobile = useIsMobile();
   const pathname = usePathname();
+  const roleOptions: OptionSelectItem<TeamScopeRole>[] = [
+    { value: "member", label: t("roleValues.member") },
+    { value: "uploader", label: t("roleValues.uploader") },
+    { value: "admin", label: t("roleValues.admin") },
+  ];
   const [teams, setTeams] = useState<TeamRecord[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [members, setMembers] = useState<TeamMemberSummary[]>([]);
@@ -147,6 +150,8 @@ export function ScopedTeamAdministrationFeature({
     setCandidateId("");
     directoryImport.invalidateRequest();
     setShowAddMember(false);
+    setShowInvite(false);
+    setInviteUrl("");
     if (selectedTeamId) {
       void refreshMembers(selectedTeamId);
       void refreshCandidates(selectedTeamId);
@@ -248,6 +253,19 @@ export function ScopedTeamAdministrationFeature({
     setCandidateRole("member");
     setShowAddMember(false);
   }
+  function openInviteDialog() {
+    setInviteName("");
+    setInviteEmail("");
+    setInviteRole("member");
+    setInviteUrl("");
+    setActionError("");
+    setShowInvite(true);
+  }
+
+  function closeInviteDialog() {
+    setInviteUrl("");
+    setShowInvite(false);
+  }
   async function runAction(
     actionName: string,
     action: () => Promise<MessageReference>,
@@ -307,7 +325,7 @@ export function ScopedTeamAdministrationFeature({
     const isReadOnly = member.subject_type === "service_account";
     const isLastHumanAdmin = member.role === "admin" && humanAdmins.length <= 1;
     if (isReadOnly || isLastHumanAdmin) {
-      return <span className="text-sm">{member.role}</span>;
+      return <span className="text-sm">{t(`roleValues.${member.role}`)}</span>;
     }
     return (
       <>
@@ -392,32 +410,60 @@ export function ScopedTeamAdministrationFeature({
       <section className="flex flex-col gap-5">
         <PageHeader title={t("teams.scopedTitle")} description={t("teams.scopedDescription")} />
         {teams.length === 0 ? (
-          <Empty className="border">
+          <Empty>
             <EmptyHeader>
               <EmptyMedia variant="icon"><UsersRound /></EmptyMedia>
               <EmptyTitle>{t("teams.scopedEmptyTitle")}</EmptyTitle>
               <EmptyDescription>{t("teams.scopedEmptyDescription")}</EmptyDescription>
             </EmptyHeader>
           </Empty>
-        ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        ) : isMobile ? (
+          <ItemGroup>
             {teams.map((team) => (
-              <button
+              <Item
                 key={team.team_id}
-                type="button"
-                className={`${clickableCardClassName} p-4 text-left`}
-                onClick={() => onNavigate(adminTeamDetailRoute(team.team_id, "members"))}
+                role="listitem"
+                className="grid gap-3 rounded-none px-0 py-4"
               >
-                <div className="flex items-center gap-2 font-medium">
-                  <UsersRound />
+                <Button
+                  variant="link"
+                  className="min-h-11 max-w-full justify-start px-0 text-left"
+                  onClick={() => onNavigate(adminTeamDetailRoute(team.team_id, "members"))}
+                >
                   <span className="truncate">{team.name}</span>
-                </div>
-                <div className="mt-2 text-sm text-muted-foreground">
+                </Button>
+                <div className="text-sm text-muted-foreground">
                   {t("admin.membersSection")}
                 </div>
-              </button>
+              </Item>
             ))}
-          </div>
+          </ItemGroup>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t("teams.team")}</TableHead>
+                <TableHead>{t("admin.membersSection")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {teams.map((team) => (
+                <TableRow key={team.team_id}>
+                  <TableCell>
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="h-auto px-0"
+                      onClick={() => onNavigate(adminTeamDetailRoute(team.team_id, "members"))}
+                    >
+                      {team.name}
+                    </Button>
+                  </TableCell>
+                  <TableCell>{t("admin.membersSection")}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         )}
       </section>
     );
@@ -436,22 +482,28 @@ export function ScopedTeamAdministrationFeature({
         ]}
         onNavigate={onNavigate}
       />
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <PageHeader
-          title={selectedTeam.name}
-          description={t("teams.membersForTeamDescription", { team: selectedTeam.name })}
-        />
-        <Button
-          variant="outline"
-          onClick={() =>
-            onNavigate(documentLibraryDestination("team", selectedTeam.team_id))
-          }
-        >
-          <FileText data-icon="inline-start" />
-          {t("documentLibrary.manageTargetDocuments")}
-        </Button>
-      </div>
-
+      <AdminResourceHeader
+        title={selectedTeam.name}
+        description={t("teams.membersForTeamDescription", { team: selectedTeam.name })}
+        actions={
+          <Button
+            variant="outline"
+            onClick={() =>
+              onNavigate(documentLibraryDestination("team", selectedTeam.team_id))
+            }
+          >
+            <FileText data-icon="inline-start" />
+            {t("documentLibrary.manageTargetDocuments")}
+          </Button>
+        }
+      />
+      <AdminSectionNav
+        value="members"
+        items={[{ value: "members", label: t("admin.membersSection") }]}
+        onValueChange={() =>
+          onNavigate(adminTeamDetailRoute(selectedTeam.team_id, "members"))
+        }
+      />
       {actionError && (
         <Alert variant="destructive">
           <ShieldCheck />
@@ -459,123 +511,114 @@ export function ScopedTeamAdministrationFeature({
           <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
         </Alert>
       )}
-
-      <>
-          <div className="flex flex-col gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>{t("teams.membersTitle")}</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                {membersLoading ? (
-                  <LoadingState title={t("teams.membersLoadingTitle")} />
-                ) : membersLoadError ? (
-                  <LoadErrorState
-                    title={t("admin.listLoadFailed")}
-                    description={serverMessage(membersLoadError, t)}
-                    retryLabel={t("admin.retry")}
-                    onRetry={() => void refreshMembers(selectedTeamId)}
-                  />
-                ) : members.length === 0 ? (
-                  <Empty className="border">
-                    <EmptyHeader>
-                      <EmptyTitle>{t("teams.noMembersTitle")}</EmptyTitle>
-                      <EmptyDescription>{t("teams.noMembersDescription")}</EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                ) : isMobile ? (
-                  <div className="grid gap-3">
-                    {members.map((member) => (
-                      <div
-                        key={member.membership_id}
-                        className="grid gap-3 rounded-md border p-3"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <div className="font-medium">{member.display_name}</div>
-                            {member.display_detail && (
-                              <div className="text-xs text-muted-foreground">
-                                {member.display_detail}
-                              </div>
-                            )}
-                          </div>
-                          <Badge variant="secondary">
-                            {member.subject_type === "service_account"
-                              ? t("users.serviceAccount")
-                              : t("users.humanUser")}
-                          </Badge>
-                        </div>
-                        <div className="grid gap-1">
-                          <div className="text-xs text-muted-foreground">
-                            {t("settings.role")}
-                          </div>
-                          {memberRoleControl(member)}
-                        </div>
-                        <div>{memberAction(member)}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto rounded-md border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>{t("teams.member")}</TableHead>
-                          <TableHead>{t("teams.memberType")}</TableHead>
-                          <TableHead>{t("settings.role")}</TableHead>
-                          <TableHead className="text-right">{t("documentLibrary.actions")}</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {members.map((member) => {
-                          const isReadOnly = member.subject_type === "service_account";
-                          return (
-                            <TableRow key={member.membership_id}>
-                              <TableCell>
-                                <div className="font-medium">{member.display_name}</div>
-                                {member.display_detail && (
-                                  <div className="text-xs text-muted-foreground">{member.display_detail}</div>
-                                )}
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant="secondary">
-                                  {isReadOnly ? t("users.serviceAccount") : t("users.humanUser")}
-                                </Badge>
-                              </TableCell>
-                              <TableCell className="min-w-36">{memberRoleControl(member)}</TableCell>
-                              <TableCell className="text-right">{memberAction(member)}</TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-
-              </CardContent>
-            </Card>
-            <div className="flex flex-wrap gap-3">
-              <Button onClick={() => void openAddMemberDialog()}>
-                <UserRoundPlus data-icon="inline-start" />
-                {t("teams.addMember")}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setInviteName("");
-                  setInviteEmail("");
-                  setInviteRole("member");
-                  setInviteUrl("");
-                  setActionError("");
-                  setShowInvite(true);
-                }}
+      <AdminSection
+        title={t("teams.membersTitle")}
+        actions={
+          <>
+            <Button
+              size="sm"
+              className="min-h-11 md:min-h-8"
+              onClick={() => void openAddMemberDialog()}
+            >
+              <UserRoundPlus data-icon="inline-start" />
+              {t("teams.addMember")}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-h-11 md:min-h-8"
+              onClick={openInviteDialog}
+            >
+              <MailPlus data-icon="inline-start" />
+              {t("teams.createInvite")}
+            </Button>
+          </>
+        }
+      >
+        {membersLoading ? (
+          <LoadingState title={t("teams.membersLoadingTitle")} />
+        ) : membersLoadError ? (
+          <LoadErrorState
+            title={t("admin.listLoadFailed")}
+            description={serverMessage(membersLoadError, t)}
+            retryLabel={t("admin.retry")}
+            onRetry={() => void refreshMembers(selectedTeamId)}
+          />
+        ) : members.length === 0 ? (
+          <Empty>
+            <EmptyHeader>
+              <EmptyTitle>{t("teams.noMembersTitle")}</EmptyTitle>
+              <EmptyDescription>{t("teams.noMembersDescription")}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : isMobile ? (
+          <ItemGroup>
+            {members.map((member) => (
+              <Item
+                key={member.membership_id}
+                role="listitem"
+                className="grid gap-3 rounded-none px-0 py-4"
               >
-                <MailPlus data-icon="inline-start" />
-                {t("teams.createInvite")}
-              </Button>
-            </div>
-          </div>
-        </>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{member.display_name}</div>
+                    {member.display_detail && (
+                      <div className="text-xs text-muted-foreground">
+                        {member.display_detail}
+                      </div>
+                    )}
+                  </div>
+                  <Badge variant="secondary">
+                    {member.subject_type === "service_account"
+                      ? t("users.serviceAccount")
+                      : t("users.humanUser")}
+                  </Badge>
+                </div>
+                <div className="grid gap-1">
+                  <div className="text-xs text-muted-foreground">
+                    {t("settings.role")}
+                  </div>
+                  {memberRoleControl(member)}
+                </div>
+                <div>{memberAction(member)}</div>
+              </Item>
+            ))}
+          </ItemGroup>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t("teams.member")}</TableHead>
+                <TableHead>{t("teams.memberType")}</TableHead>
+                <TableHead>{t("settings.role")}</TableHead>
+                <TableHead className="text-right">{t("documentLibrary.actions")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {members.map((member) => {
+                const isReadOnly = member.subject_type === "service_account";
+                return (
+                  <TableRow key={member.membership_id}>
+                    <TableCell>
+                      <div className="font-medium">{member.display_name}</div>
+                      {member.display_detail && (
+                        <div className="text-xs text-muted-foreground">{member.display_detail}</div>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">
+                        {isReadOnly ? t("users.serviceAccount") : t("users.humanUser")}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="min-w-36">{memberRoleControl(member)}</TableCell>
+                    <TableCell className="text-right">{memberAction(member)}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </AdminSection>
       <Dialog
         open={showAddMember}
         onOpenChange={(open) => (open ? void openAddMemberDialog() : closeAddMemberDialog())}
@@ -678,7 +721,11 @@ export function ScopedTeamAdministrationFeature({
                   : directoryImport.selectedSubjects.length === 0)
               }
             >
-              <UserRoundPlus data-icon="inline-start" />
+              {pendingAction === "add-member" || directoryImport.importPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <UserRoundPlus data-icon="inline-start" />
+              )}
               {directoryImport.mode === "directory"
                 ? t("directory.importSelected")
                 : t("teams.addMember")}
@@ -686,7 +733,10 @@ export function ScopedTeamAdministrationFeature({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showInvite} onOpenChange={setShowInvite}>
+      <Dialog
+        open={showInvite}
+        onOpenChange={(open) => (open ? openInviteDialog() : closeInviteDialog())}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("teams.inviteTitle")}</DialogTitle>
@@ -715,16 +765,23 @@ export function ScopedTeamAdministrationFeature({
             </Field>
             {inviteUrl && (
               <div className="rounded-md border bg-muted/30 p-3">
-                <div className="mb-2 text-sm font-medium">{t("teams.inviteLink")}</div>
+                <div className="mb-2 text-sm font-medium">
+                  {t("admin.inviteAcceptanceLink")}
+                </div>
                 <div className="flex gap-2">
-                  <Input readOnly value={inviteUrl} aria-label={t("teams.inviteLink")} />
+                  <Input
+                    readOnly
+                    value={inviteUrl}
+                    aria-label={t("admin.inviteAcceptanceLink")}
+                  />
                   <Button
                     variant="outline"
                     size="icon"
-                    aria-label={t("teams.copyInviteLink")}
+                    className="size-11 md:size-8"
+                    aria-label={t("admin.copyInvite")}
                     onClick={() => {
                       void navigator.clipboard.writeText(inviteUrl);
-                      toast.success(t("teams.inviteLinkCopied"));
+                      toast.success(t("admin.inviteCopied"));
                     }}
                   >
                     <Copy />
@@ -734,14 +791,18 @@ export function ScopedTeamAdministrationFeature({
             )}
           </FieldGroup>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowInvite(false)}>
+            <Button variant="outline" onClick={closeInviteDialog}>
               {t("admin.cancel")}
             </Button>
             <Button
               onClick={() => void createScopedInvite()}
               disabled={!inviteName.trim() || !inviteEmail.trim() || pendingAction === "invite"}
             >
-              <MailPlus data-icon="inline-start" />
+              {pendingAction === "invite" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <MailPlus data-icon="inline-start" />
+              )}
               {t("teams.createInvite")}
             </Button>
           </DialogFooter>

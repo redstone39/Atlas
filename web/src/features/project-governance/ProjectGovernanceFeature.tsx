@@ -1,4 +1,4 @@
-import { CheckCircle2, FileText, Plus, Save, Trash2, UserPlus } from "lucide-react";
+import { Copy, FileText, Pencil, Plus, Save, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
@@ -7,13 +7,8 @@ import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "../../components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../../components/ui/empty";
+import { Item, ItemGroup } from "../../components/ui/item";
 import { Checkbox } from "../../components/ui/checkbox";
 import {
   Field,
@@ -31,6 +26,7 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
+import { Spinner } from "../../components/ui/spinner";
 import { useIsMobile } from "../../hooks/use-mobile";
 import {
   Table,
@@ -43,7 +39,9 @@ import {
 import { generatedId } from "../../shared/ids";
 import {
   AdminBreadcrumb,
+  AdminResourceHeader,
   AdminResourceUnavailable,
+  AdminSection,
   AdminSectionNav,
 } from "../../shared/admin-detail";
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
@@ -54,8 +52,6 @@ import {
   LoadingState,
   PageHeader,
   TargetSummary,
-  activateOnEnterOrSpace,
-  clickableSurfaceClassName,
   serverMessage,
 } from "../../shared/product-ui";
 import type { AdminActionResult } from "../../shared/api-contracts";
@@ -152,9 +148,9 @@ export function ProjectGovernanceFeature({
     onClose: closeAddAccessDialog,
   });
   const memberRoleOptions: OptionSelectItem<ProjectMemberRole>[] = [
-    { value: "viewer", label: "viewer" },
-    { value: "contributor", label: "contributor" },
-    { value: "admin", label: t("projects.role.admin") },
+    { value: "viewer", label: t("roleValues.viewer") },
+    { value: "contributor", label: t("roleValues.contributor") },
+    { value: "admin", label: t("roleValues.admin") },
   ];
   const memberEffectOptions: OptionSelectItem<ProjectMemberEffect>[] = [
     { value: "allow", label: t("permissions.allow") },
@@ -258,6 +254,8 @@ export function ProjectGovernanceFeature({
     setEditProjectName(project.name);
     directoryImport.invalidateRequest();
     setShowAddAccess(false);
+    setShowInviteUser(false);
+    setInviteLink("");
   }
 
   function resetProjectMemberDraft() {
@@ -287,6 +285,19 @@ export function ProjectGovernanceFeature({
     directoryImport.reset();
     setNewUserRole("viewer");
     setShowAddAccess(false);
+  }
+  function openInviteUserDialog() {
+    setInviteName("");
+    setInviteEmail("");
+    setInviteRole("viewer");
+    setInviteLink("");
+    setActionError("");
+    setShowInviteUser(true);
+  }
+
+  function closeInviteUserDialog() {
+    setInviteLink("");
+    setShowInviteUser(false);
   }
 
   function openProjectEditor(project: ProjectAdminSummary) {
@@ -540,20 +551,48 @@ export function ProjectGovernanceFeature({
       (grant) => grant.status === "active",
     );
     return (
-      <div className="flex flex-col gap-4 pt-3">
+      <>
         {actionError && (
           <Alert variant="destructive">
             <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
             <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
           </Alert>
         )}
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-          <FieldSet>
-            <FieldLegend>{t("projects.currentMembers")}</FieldLegend>
-            {membersLoading ? (
-              <LoadingState
-                title={t("projects.membersLoadingTitle")}
+        <AdminSection
+          title={t("projects.currentMembers")}
+          actions={
+            <>
+              <Button
+                size="sm"
+                className="min-h-11 md:min-h-8"
+                onClick={() => void openAddAccessDialog()}
+              >
+                <Plus data-icon="inline-start" />
+                {t("admin.addAccess")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-11 md:min-h-8"
+                onClick={openInviteUserDialog}
+              >
+                <UserPlus data-icon="inline-start" />
+                {t("projects.inviteNewUser")}
+              </Button>
+            </>
+          }
+        >
+          <div className="grid gap-4">
+            {candidatesLoadError && (
+              <LoadErrorState
+                title={t("admin.listLoadFailed")}
+                description={serverMessage(candidatesLoadError, t)}
+                retryLabel={t("admin.retry")}
+                onRetry={() => void refreshProjectCandidates(selectedProject.project_id)}
               />
+            )}
+            {membersLoading ? (
+              <LoadingState title={t("projects.membersLoadingTitle")} />
             ) : membersLoadError ? (
               <LoadErrorState
                 title={t("admin.listLoadFailed")}
@@ -562,22 +601,23 @@ export function ProjectGovernanceFeature({
                 onRetry={() => void refreshProjectMembers(selectedProject.project_id)}
               />
             ) : activeProjectMembers.length === 0 ? (
-              <Empty className="border">
+              <Empty>
                 <EmptyHeader>
                   <EmptyTitle>{t("projects.noMembersTitle")}</EmptyTitle>
                   <EmptyDescription>{t("projects.noMembersDescription")}</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : isMobile ? (
-              <div className="grid gap-3">
+              <ItemGroup>
                 {activeProjectMembers.map((member) => {
                   const subject = memberSubject(member);
                   const subjectName =
                     subject?.display_name ?? t("projects.unavailableSubject");
                   return (
-                    <div
+                    <Item
                       key={member.grant_id}
-                      className="grid gap-3 rounded-md border p-3"
+                      role="listitem"
+                      className="grid gap-3 rounded-none px-0 py-4"
                     >
                       <div>
                         <div className="font-medium">{subjectName}</div>
@@ -630,110 +670,97 @@ export function ProjectGovernanceFeature({
                       >
                         {t("projects.remove")}
                       </ConfirmActionButton>
-                    </div>
+                    </Item>
                   );
                 })}
-              </div>
+              </ItemGroup>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t("projects.projectMember")}</TableHead>
-                    <TableHead>{t("projects.role")}</TableHead>
-                    <TableHead>{t("permissions.effect")}</TableHead>
-                    <TableHead>{t("users.action")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {activeProjectMembers.map((member) => {
-                    const subject = memberSubject(member);
-                    const subjectName = subject?.display_name ?? t("projects.unavailableSubject");
-                    return (
-                    <TableRow key={member.grant_id}>
-                      <TableCell>
-                        <div className="min-w-0">
-                          <div className="font-medium">{subjectName}</div>
-                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            <Badge variant="outline">{memberTypeLabel(member)}</Badge>
-                            {subject?.display_detail && <span>{subject.display_detail}</span>}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="min-w-40">
-                        <label
-                          htmlFor={`project-member-role-${member.grant_id}`}
-                          className="sr-only"
-                        >
-                          {t("projects.roleForMember", { name: subjectName })}
-                        </label>
-                        <OptionSelect
-                          id={`project-member-role-${member.grant_id}`}
-                          value={member.role}
-                          options={memberRoleOptions}
-                          onValueChange={(role) => updateProjectMemberAccess(member, { role })}
-                          disabled={pendingAction === `project-member-role-${member.grant_id}`}
-                        />
-                      </TableCell>
-                      <TableCell className="min-w-32">
-                        <label
-                          htmlFor={`project-member-effect-${member.grant_id}`}
-                          className="sr-only"
-                        >
-                          {t("permissions.effect")} {subjectName}
-                        </label>
-                        <OptionSelect
-                          id={`project-member-effect-${member.grant_id}`}
-                          value={member.effect}
-                          options={memberEffectOptions}
-                          onValueChange={(effect) => updateProjectMemberAccess(member, { effect })}
-                          disabled={pendingAction === `project-member-role-${member.grant_id}`}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <ConfirmActionButton
-                          ariaLabel={`${t("projects.remove")} ${subjectName}`}
-                          icon={<Trash2 data-icon="inline-start" />}
-                          disabled={pendingAction === `project-member-remove-${member.grant_id}`}
-                          confirmTitle={t("admin.destructiveConfirmTitle", {
-                            action: t("projects.remove"),
-                          })}
-                          confirmDescription={t("admin.destructiveConfirmDescription", {
-                            target: subjectName,
-                          })}
-                          confirmLabel={t("projects.remove")}
-                          cancelLabel={t("admin.cancel")}
-                          onConfirm={() => removeProjectMember(member)}
-                        >
-                          {t("projects.remove")}
-                        </ConfirmActionButton>
-                      </TableCell>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("projects.projectMember")}</TableHead>
+                      <TableHead>{t("projects.role")}</TableHead>
+                      <TableHead>{t("permissions.effect")}</TableHead>
+                      <TableHead>{t("users.action")}</TableHead>
                     </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {activeProjectMembers.map((member) => {
+                      const subject = memberSubject(member);
+                      const subjectName =
+                        subject?.display_name ?? t("projects.unavailableSubject");
+                      return (
+                        <TableRow key={member.grant_id}>
+                          <TableCell>
+                            <div className="min-w-0">
+                              <div className="font-medium">{subjectName}</div>
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                <Badge variant="outline">{memberTypeLabel(member)}</Badge>
+                                {subject?.display_detail && <span>{subject.display_detail}</span>}
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="min-w-40">
+                            <label
+                              htmlFor={`project-member-role-${member.grant_id}`}
+                              className="sr-only"
+                            >
+                              {t("projects.roleForMember", { name: subjectName })}
+                            </label>
+                            <OptionSelect
+                              id={`project-member-role-${member.grant_id}`}
+                              value={member.role}
+                              options={memberRoleOptions}
+                              onValueChange={(role) =>
+                                updateProjectMemberAccess(member, { role })
+                              }
+                              disabled={pendingAction === `project-member-role-${member.grant_id}`}
+                            />
+                          </TableCell>
+                          <TableCell className="min-w-32">
+                            <label
+                              htmlFor={`project-member-effect-${member.grant_id}`}
+                              className="sr-only"
+                            >
+                              {t("permissions.effect")} {subjectName}
+                            </label>
+                            <OptionSelect
+                              id={`project-member-effect-${member.grant_id}`}
+                              value={member.effect}
+                              options={memberEffectOptions}
+                              onValueChange={(effect) =>
+                                updateProjectMemberAccess(member, { effect })
+                              }
+                              disabled={pendingAction === `project-member-role-${member.grant_id}`}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <ConfirmActionButton
+                              ariaLabel={`${t("projects.remove")} ${subjectName}`}
+                              icon={<Trash2 data-icon="inline-start" />}
+                              disabled={pendingAction === `project-member-remove-${member.grant_id}`}
+                              confirmTitle={t("admin.destructiveConfirmTitle", {
+                                action: t("projects.remove"),
+                              })}
+                              confirmDescription={t("admin.destructiveConfirmDescription", {
+                                target: subjectName,
+                              })}
+                              confirmLabel={t("projects.remove")}
+                              cancelLabel={t("admin.cancel")}
+                              onConfirm={() => removeProjectMember(member)}
+                            >
+                              {t("projects.remove")}
+                            </ConfirmActionButton>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
             )}
-          </FieldSet>
-          <div className="flex flex-col gap-3">
-            {candidatesLoadError && (
-              <LoadErrorState
-                title={t("admin.listLoadFailed")}
-                description={serverMessage(candidatesLoadError, t)}
-                retryLabel={t("admin.retry")}
-                onRetry={() => void refreshProjectCandidates(selectedProject.project_id)}
-              />
-            )}
-            <Button onClick={() => void openAddAccessDialog()}>
-              <Plus data-icon="inline-start" />
-              {t("admin.addAccess")}
-            </Button>
-            <Button variant="outline" onClick={() => setShowInviteUser(true)}>
-              <UserPlus data-icon="inline-start" />
-              {t("projects.inviteNewUser")}
-            </Button>
           </div>
-        </div>
-      </div>
+        </AdminSection>
+      </>
     );
   }
 
@@ -771,24 +798,10 @@ export function ProjectGovernanceFeature({
               ]}
               onNavigate={onNavigate}
             />
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <PageHeader
-                title={selectedProject.name}
-                description={policyProfileLabel(selectedProject.policy_profile_id)}
-              />
-              <div className="flex flex-wrap items-center gap-2">
-                {detail.section === "profile" && canManageProjectProfile && (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setEditProjectName(selectedProject.name);
-                      setShowEditProject(true);
-                    }}
-                  >
-                    <Save data-icon="inline-start" />
-                    {t("admin.editProfile")}
-                  </Button>
-                )}
+            <AdminResourceHeader
+              title={selectedProject.name}
+              description={policyProfileLabel(selectedProject.policy_profile_id)}
+              actions={
                 <Button
                   variant="outline"
                   onClick={() =>
@@ -803,8 +816,8 @@ export function ProjectGovernanceFeature({
                   <FileText data-icon="inline-start" />
                   {t("documentLibrary.manageTargetDocuments")}
                 </Button>
-              </div>
-            </div>
+              }
+            />
             <AdminSectionNav
               value={detail.section}
               items={[
@@ -816,29 +829,44 @@ export function ProjectGovernanceFeature({
               }
             />
             {detail.section === "profile" ? (
-              <Card>
-                <CardHeader>
-                  <CardTitle>{t("admin.profileSection")}</CardTitle>
-                </CardHeader>
-                <CardContent className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <div className="text-sm text-muted-foreground">{t("admin.projectName")}</div>
-                    <div className="font-medium">{selectedProject.name}</div>
-                  </div>
-                  <div>
-                    <div className="text-sm text-muted-foreground">{t("projects.governanceMode")}</div>
-                    <Badge variant="outline">
-                      {policyProfileLabel(selectedProject.policy_profile_id)}
-                    </Badge>
-                  </div>
+              <AdminSection
+                title={t("admin.profileSection")}
+                actions={
+                  canManageProjectProfile ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="min-h-11 md:min-h-8"
+                      onClick={() => {
+                        setEditProjectName(selectedProject.name);
+                        setShowEditProject(true);
+                      }}
+                    >
+                      <Pencil data-icon="inline-start" />
+                      {t("admin.editProfile")}
+                    </Button>
+                  ) : undefined
+                }
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <TargetSummary
+                    variant="flat"
+                    label={t("admin.projectName")}
+                    title={selectedProject.name}
+                  />
+                  <TargetSummary
+                    label={t("projects.governanceMode")}
+                    variant="flat"
+                    title={policyProfileLabel(selectedProject.policy_profile_id)}
+                  />
                   {!canManageProjectProfile && (
                     <Alert className="sm:col-span-2">
                       <AlertTitle>{t("projects.profileReadOnlyTitle")}</AlertTitle>
                       <AlertDescription>{t("projects.profileReadOnlyDescription")}</AlertDescription>
                     </Alert>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </AdminSection>
             ) : (
               renderProjectMembersTab()
             )}
@@ -849,15 +877,16 @@ export function ProjectGovernanceFeature({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader title={t("projects.title")} />
         {canManageProjectProfile && (
-          <Button size="sm" onClick={openCreateProjectDialog}>
+          <Button size="sm" className="min-h-11 md:min-h-8" onClick={openCreateProjectDialog}>
             <Plus data-icon="inline-start" />
             {t("admin.createProject")}
           </Button>
         )}
       </div>
-      <div data-slot="project-directory-layout" className="grid w-full gap-5">
-        <Card>
-          <CardContent className="flex flex-col gap-5 pt-6">
+      <div
+        data-slot="project-directory-layout"
+        className="flex w-full flex-col gap-5"
+      >
             {loading ? (
               <LoadingState
                 title={t("projects.loadingTitle")}
@@ -870,25 +899,29 @@ export function ProjectGovernanceFeature({
                 onRetry={() => void refreshProjects()}
               />
             ) : projects.length === 0 ? (
-              <Empty className="border">
+              <Empty>
                 <EmptyHeader>
                   <EmptyTitle>{t("projects.emptyTitle")}</EmptyTitle>
                   <EmptyDescription>{t("projects.emptyDescription")}</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : isMobile ? (
-              <div className="grid gap-3">
+              <ItemGroup>
                 {projects.map((project) => (
-                  <button
-                    type="button"
+                  <Item
                     key={project.project_id}
-                    aria-label={`${t("admin.edit")} ${project.name}`}
-                    className="w-full rounded-md border bg-card p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => openProjectEditor(project)}
+                    role="listitem"
+                    className="grid gap-3 rounded-none px-0 py-4"
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="font-medium">{project.name}</div>
+                        <Button
+                          variant="link"
+                          className="min-h-11 max-w-full justify-start px-0 text-left"
+                          onClick={() => openProjectEditor(project)}
+                        >
+                          <span className="truncate">{project.name}</span>
+                        </Button>
                         <div className="text-xs text-muted-foreground">
                           {t("projects.governanceMode")}
                         </div>
@@ -897,61 +930,40 @@ export function ProjectGovernanceFeature({
                         {policyProfileLabel(project.policy_profile_id)}
                       </Badge>
                     </div>
-                    <div className="mt-3">
-                      <span className="inline-flex h-8 items-center justify-center rounded-md border px-3 text-sm font-medium">
-                        {t("admin.edit")}
-                      </span>
-                    </div>
-                  </button>
+                  </Item>
                 ))}
-              </div>
+              </ItemGroup>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t("admin.projectName")}</TableHead>
-                    <TableHead>{t("projects.governanceMode")}</TableHead>
-                    <TableHead>{t("users.action")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projects.map((project) => (
-                    <TableRow
-                      key={project.project_id}
-                      className={clickableSurfaceClassName}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={project.name}
-                      onClick={() => openProjectEditor(project)}
-                      onKeyDown={(event) =>
-                        activateOnEnterOrSpace(event, () => openProjectEditor(project))
-                      }
-                    >
-                      <TableCell>{project.name}</TableCell>
-                      <TableCell>
-                        <Badge variant="outline">
-                          {policyProfileLabel(project.policy_profile_id)}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openProjectEditor(project);
-                          }}
-                        >
-                          {t("admin.edit")}
-                        </Button>
-                      </TableCell>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("admin.projectName")}</TableHead>
+                      <TableHead>{t("projects.governanceMode")}</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {projects.map((project) => (
+                      <TableRow key={project.project_id}>
+                        <TableCell>
+                          <Button
+                            variant="link"
+                            size="sm"
+                            className="h-auto px-0"
+                            onClick={() => openProjectEditor(project)}
+                          >
+                            {project.name}
+                          </Button>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">
+                            {policyProfileLabel(project.policy_profile_id)}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
             )}
-          </CardContent>
-        </Card>
       </div>
       </>
       )}
@@ -1006,7 +1018,11 @@ export function ProjectGovernanceFeature({
               }
               disabled={pendingAction === "project" || !canCreateProject}
             >
-              <ShieldIcon />
+              {pendingAction === "project" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Plus data-icon="inline-start" />
+              )}
               {t("admin.createProject")}
             </Button>
           </DialogFooter>
@@ -1066,7 +1082,11 @@ export function ProjectGovernanceFeature({
               }
               disabled={pendingAction === "project-update" || !canSaveProject}
             >
-              <Save data-icon="inline-start" />
+              {pendingAction === "project-update" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Save data-icon="inline-start" />
+              )}
               {t("projects.saveProject")}
             </Button>
           </DialogFooter>
@@ -1200,7 +1220,12 @@ export function ProjectGovernanceFeature({
                 if (succeeded) closeAddAccessDialog();
               }}
             >
-              <Plus data-icon="inline-start" />
+              {directoryImport.importPending ||
+              pendingAction === `project-member-add-${accessSubjectType}` ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Plus data-icon="inline-start" />
+              )}
               {directoryImport.mode === "directory"
                 ? t("directory.importSelected")
                 : t("admin.addAccess")}
@@ -1208,7 +1233,10 @@ export function ProjectGovernanceFeature({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showInviteUser} onOpenChange={setShowInviteUser}>
+      <Dialog
+        open={showInviteUser}
+        onOpenChange={(open) => (open ? openInviteUserDialog() : closeInviteUserDialog())}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("projects.inviteNewUser")}</DialogTitle>
@@ -1235,6 +1263,7 @@ export function ProjectGovernanceFeature({
               <FieldLabel htmlFor="focused-project-invite-email">{t("projects.inviteEmail")}</FieldLabel>
               <Input
                 id="focused-project-invite-email"
+                type="email"
                 value={inviteEmail}
                 onChange={(event) => setInviteEmail(event.target.value)}
               />
@@ -1249,21 +1278,45 @@ export function ProjectGovernanceFeature({
               />
             </Field>
             {inviteLink && (
-              <Alert>
-                <AlertTitle>{t("admin.inviteReady")}</AlertTitle>
-                <AlertDescription>{inviteLink}</AlertDescription>
-              </Alert>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="mb-2 text-sm font-medium">
+                  {t("admin.inviteAcceptanceLink")}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={inviteLink}
+                    aria-label={t("admin.inviteAcceptanceLink")}
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-11 md:size-8"
+                    aria-label={t("admin.copyInvite")}
+                    onClick={() => {
+                      void navigator.clipboard.writeText(inviteLink);
+                      toast.success(t("admin.inviteCopied"));
+                    }}
+                  >
+                    <Copy />
+                  </Button>
+                </div>
+              </div>
             )}
           </FieldGroup>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowInviteUser(false)}>
+            <Button variant="outline" onClick={closeInviteUserDialog}>
               {t("admin.cancel")}
             </Button>
             <Button
               onClick={inviteProjectUser}
               disabled={pendingAction === "project-member-invite" || !canInviteProjectUser}
             >
-              <UserPlus data-icon="inline-start" />
+              {pendingAction === "project-member-invite" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <UserPlus data-icon="inline-start" />
+              )}
               {t("projects.inviteNewUser")}
             </Button>
           </DialogFooter>
@@ -1273,9 +1326,6 @@ export function ProjectGovernanceFeature({
   );
 }
 
-function ShieldIcon() {
-  return <CheckCircle2 data-icon="inline-start" />;
-}
 
 function candidateOption(candidate: ProjectMemberCandidate): SearchSelectOption {
   return {

@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("next/navigation", () => import("../test/next-navigation-mock"));
 
 import App from "./atlas-app.test-support";
+import i18n, { LANGUAGE_STORAGE_KEY } from "../i18n";
 import { sessionQueryClient } from "../shared/session-query-client";
 import {
   adminSession,
@@ -51,6 +53,11 @@ it("project admins manage only their own project members from Projects", async (
     window.history.pushState({}, "", "/settings");
     mockApi(projectAdminSession, readyReadiness);
     const { container } = render(<App />);
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
 
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
     expect(screen.getByText("Identity & Access")).toBeInTheDocument();
@@ -117,7 +124,29 @@ it("project admins manage only their own project members from Projects", async (
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Invite new user" }));
-    expect(await screen.findByRole("dialog", { name: "Invite new user" })).toBeInTheDocument();
+    const inviteDialog = await screen.findByRole("dialog", { name: "Invite new user" });
+    fireEvent.change(within(inviteDialog).getByLabelText("Invite name"), {
+      target: { value: "Project Teammate" },
+    });
+    fireEvent.change(within(inviteDialog).getByLabelText("Invite email"), {
+      target: { value: "project-teammate@example.test" },
+    });
+    expect(within(inviteDialog).getByLabelText("Invite email")).toHaveAttribute("type", "email");
+    fireEvent.click(within(inviteDialog).getByRole("button", { name: "Invite new user" }));
+    expect(await within(inviteDialog).findByLabelText("Invite acceptance link")).toHaveValue(
+      "/accept-invite?token=atlas_invite_visible_once",
+    );
+    fireEvent.click(within(inviteDialog).getByRole("button", { name: "Copy invite link" }));
+    expect(clipboardWriteText).toHaveBeenCalledWith(
+      "/accept-invite?token=atlas_invite_visible_once",
+    );
+    expect(await screen.findByText("Invite link copied.")).toBeInTheDocument();
+    fireEvent.click(within(inviteDialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Invite new user" }));
+    expect(
+      within(await screen.findByRole("dialog", { name: "Invite new user" }))
+        .queryByLabelText("Invite acceptance link"),
+    ).not.toBeInTheDocument();
   });
 
 it("replaces Project detail with the directory after the current admin revokes own access", async () => {
@@ -292,20 +321,24 @@ it("/admin/projects owns the canonical Project Members controls", async () => {
     expect(await screen.findByRole("heading", { name: "Projects" })).toBeInTheDocument();
     expect((await screen.findAllByText("Admin Live Project")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("Default governed access")).length).toBeGreaterThan(0);
-    expect(container.querySelector('[data-slot="project-directory-layout"]'))
-      .toHaveClass("w-full");
-    expect(container.querySelector('[data-slot="project-directory-layout"]'))
-      .not.toHaveClass("xl:grid-cols-[minmax(0,1fr)_420px]");
+    const projectDirectory = container.querySelector(
+      '[data-slot="project-directory-layout"]',
+    )!;
+    expect(projectDirectory).toHaveClass("w-full");
+    expect(projectDirectory).not.toHaveClass("xl:grid-cols-[minmax(0,1fr)_420px]");
+    expect(projectDirectory.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent("proj-admin-live");
     expect(container).not.toHaveTextContent("policy-default-governed");
     expect(screen.queryByRole("button", { name: /create invite/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /grant membership/i })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Project name")).not.toBeInTheDocument();
-    const projectRow = screen.getByRole("button", { name: /^Admin Live Project$/ });
-    expect(projectRow).toHaveAttribute("tabindex", "0");
-    projectRow.focus();
-    expect(projectRow).toHaveFocus();
-    fireEvent.keyDown(projectRow, { key: "Enter" });
+    const projectNameTrigger = screen.getByRole("button", { name: /^Admin Live Project$/ });
+    const projectRow = projectNameTrigger.closest("tr");
+    expect(projectRow).not.toHaveAttribute("role");
+    expect(projectRow).not.toHaveAttribute("tabindex");
+    projectNameTrigger.focus();
+    expect(projectNameTrigger).toHaveFocus();
+    fireEvent.click(projectNameTrigger);
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
     );
@@ -314,12 +347,20 @@ it("/admin/projects owns the canonical Project Members controls", async () => {
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/access"),
     );
+    const accessCard = (await screen.findByRole("heading", {
+      name: "Current members",
+      level: 2,
+    })).closest('[data-slot="admin-section"]')!;
+    expect(within(accessCard).getByRole("button", { name: "Add access" }))
+      .toBeInTheDocument();
+    expect(within(accessCard).getByRole("button", { name: "Invite new user" }))
+      .toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Add access" }));
     let dialog = await screen.findByRole("dialog", { name: "Add access" });
     fireEvent.click(within(dialog).getByLabelText("Project member"));
     fireEvent.click(await screen.findByText("Engineer One"));
     fireEvent.click(within(dialog).getByLabelText("Role"));
-    fireEvent.click(await screen.findByRole("option", { name: "Admin" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Administrator" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Add access" }));
     expect(await screen.findByText(/Project member is active/)).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(
@@ -433,7 +474,7 @@ it("clears Project detail and relationship projections for an unavailable route 
     )).toHaveLength(protectedReadsBefore);
   });
 
-it("uses mobile cards for Project access relationships", async () => {
+it("uses a flat mobile list for Project access relationships", async () => {
     window.innerWidth = 500;
     window.history.pushState({}, "", "/admin/projects/proj-admin-live/access");
     mockApi(projectAdminSession, readyReadiness);
@@ -443,7 +484,13 @@ it("uses mobile cards for Project access relationships", async () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(await screen.findByLabelText("Role")).toBeInTheDocument();
     expect(await screen.findByLabelText("Decision")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /remove Project Admin/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add access" })).toHaveClass("min-h-11");
+    const removeButton = screen.getByRole("button", { name: /remove Project Admin/i });
+    expect(removeButton).toBeInTheDocument();
+    const memberList = removeButton.closest('[data-slot="item-group"]')!;
+    expect(memberList).toHaveAttribute("role", "list");
+    expect(within(memberList).getAllByRole("listitem")).not.toHaveLength(0);
+    expect(memberList.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
   });
 
 it("no-scope user sees an explicit Project directory empty state", async () => {
@@ -529,7 +576,7 @@ it("retains a failed Project directory role retry and resets it after success", 
     fireEvent.click(await screen.findByRole("option", { name: "Directory sources" }));
     expect(await within(dialog).findByText("Main AD")).toBeInTheDocument();
     fireEvent.click(within(dialog).getByLabelText("Role"));
-    fireEvent.click(await screen.findByRole("option", { name: "contributor" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Contributor" }));
     fireEvent.change(within(dialog).getByLabelText("Name, email, or username"), {
       target: { value: "Ada" },
     });
@@ -538,7 +585,7 @@ it("retains a failed Project directory role retry and resets it after success", 
     fireEvent.click(within(candidate.closest("label")!).getByRole("checkbox"));
     fireEvent.click(within(dialog).getByRole("button", { name: "Import selected" }));
     await waitFor(() => expect(importAttempts).toBe(1));
-    expect(within(dialog).getByLabelText("Role")).toHaveTextContent("contributor");
+    expect(within(dialog).getByLabelText("Role")).toHaveTextContent("Contributor");
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Import selected" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -548,6 +595,96 @@ it("retains a failed Project directory role retry and resets it after success", 
     fireEvent.click(within(reopened).getByLabelText("Member source"));
     fireEvent.click(await screen.findByRole("option", { name: "Directory sources" }));
     expect(await within(reopened).findByText("Main AD")).toBeInTheDocument();
-    expect(within(reopened).getByLabelText("Role")).toHaveTextContent("viewer");
+    expect(within(reopened).getByLabelText("Role")).toHaveTextContent("Viewer");
   });
+it("uses a flat mobile list with one 44px Project name trigger", async () => {
+  window.innerWidth = 500;
+  window.history.pushState({}, "", "/admin/projects");
+  mockApi(projectAdminSession, readyReadiness);
+  render(<App />);
+
+  const trigger = await screen.findByRole("button", { name: "Admin Live Project" });
+  const projectList = trigger.closest('[data-slot="item-group"]')!;
+  expect(projectList).toHaveAttribute("role", "list");
+  expect(within(projectList).getAllByRole("listitem")).not.toHaveLength(0);
+  expect(projectList.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  expect(trigger).toHaveClass("min-h-11");
+  expect(trigger.parentElement?.closest('[role="button"]')).toBeNull();
+  fireEvent.click(trigger);
+  await waitFor(() =>
+    expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
+  );
+});
+
+it("disables a pending Project invite and replaces its action icon with a Spinner", async () => {
+  window.history.pushState({}, "", "/admin/projects/proj-admin-live/access");
+  mockApi(projectAdminSession, readyReadiness);
+  const normalFetch = global.fetch;
+  let settleInvite!: (response: Response) => void;
+  const delayedInvite = new Promise<Response>((resolve) => {
+    settleInvite = resolve;
+  });
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const path = new URL(String(input), "http://localhost").pathname;
+    if (path === "/api/v1/admin/user-invites" && init?.method === "POST") {
+      return delayedInvite;
+    }
+    return normalFetch(input, init);
+  });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Invite new user" }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("Invite name"), {
+    target: { value: "Pending Project User" },
+  });
+  fireEvent.change(within(dialog).getByLabelText("Invite email"), {
+    target: { value: "pending-project@example.test" },
+  });
+  const submit = within(dialog).getByRole("button", { name: "Invite new user" });
+  fireEvent.click(submit);
+
+  expect(submit).toBeDisabled();
+  expect(within(submit).getByRole("status", { name: "Loading" })).toBeInTheDocument();
+
+  await act(async () => {
+    settleInvite(await jsonResponse({
+      message_code: "identity.invite_is_ready",
+      message_params: {},
+      local_pilot_acceptance: {
+        acceptance_url: "/accept-invite?token=pending_project_invite",
+      },
+    }));
+    await delayedInvite;
+  });
+  expect(await within(dialog).findByLabelText("Invite acceptance link")).toHaveValue(
+    "/accept-invite?token=pending_project_invite",
+  );
+});
+
+it("renders Project roles and effects as Traditional Chinese labels", async () => {
+  await i18n.changeLanguage("zh-TW");
+  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-TW");
+  window.history.pushState({}, "", "/admin/projects/proj-admin-live/access");
+  mockApi(projectAdminSession, readyReadiness);
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Admin Live Project" }))
+    .toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText("Project Admin 的角色"));
+  expect(await screen.findByRole("option", { name: "檢視者" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "貢獻者" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "管理員" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "viewer" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "contributor" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "admin" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText("決策 Project Admin"));
+  expect(await screen.findByRole("option", { name: "允許" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "拒絕" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "allow" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "deny" })).not.toBeInTheDocument();
+});
+
 });

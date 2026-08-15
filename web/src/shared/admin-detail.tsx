@@ -9,6 +9,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "../components/ui/breadcrumb";
+import { Card } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import {
   Empty,
@@ -17,6 +18,7 @@ import {
   EmptyTitle,
 } from "../components/ui/empty";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { PageHeader } from "./product-ui";
 import type { AppRoute } from "./routes";
 
 export type AdminBreadcrumbItem = {
@@ -60,6 +62,43 @@ export function AdminBreadcrumb({
         })}
       </BreadcrumbList>
     </Breadcrumb>
+  );
+}
+
+export function AdminResourceHeader({
+  title,
+  description,
+  actions,
+}: {
+  title: string;
+  description?: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <PageHeader title={title} description={description} />
+      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
+export function AdminSection({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section data-slot="admin-section" className="flex flex-col gap-4">
+      <div className="flex flex-row flex-wrap items-start justify-between gap-3">
+        <h2 className="font-semibold">{title}</h2>
+        {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+      </div>
+      <div>{children}</div>
+    </section>
   );
 }
 

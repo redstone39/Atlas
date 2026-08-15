@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("next/navigation", () => import("../test/next-navigation-mock"));
 
 import App from "./atlas-app.test-support";
+import i18n, { LANGUAGE_STORAGE_KEY } from "../i18n";
 import { sessionQueryClient } from "../shared/session-query-client";
 import {
   adminSession,
@@ -43,18 +44,18 @@ it("/admin/teams can create nested teams and add a member", async () => {
 
     expect(await screen.findByRole("heading", { name: "Teams" })).toBeInTheDocument();
     expect((await screen.findAllByText("Signal Integrity")).length).toBeGreaterThan(0);
+    const teamDirectory = container.querySelector('[data-slot="team-directory-layout"]')!;
+    expect(teamDirectory.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
     expect(screen.queryByText("Invited Engineer")).not.toBeInTheDocument();
     expect(screen.queryByText("Engineer One")).not.toBeInTheDocument();
     expect(screen.queryByText("Human user")).not.toBeInTheDocument();
-    const signalTeamRow = screen.getAllByText("Signal Integrity")[0].closest("tr");
-    expect(signalTeamRow).toHaveClass("hover:bg-muted/50");
-    expect(signalTeamRow).toHaveClass("focus-visible:ring-2");
-    expect(signalTeamRow).toHaveAttribute("role", "button");
-    expect(signalTeamRow).toHaveAttribute("tabindex", "0");
-    expect(signalTeamRow).toHaveAttribute("aria-label", "Signal Integrity");
-    signalTeamRow!.focus();
-    expect(signalTeamRow).toHaveFocus();
-    fireEvent.keyDown(signalTeamRow!, { key: "Enter" });
+    const signalTeamTrigger = screen.getByRole("button", { name: "Signal Integrity" });
+    const signalTeamRow = signalTeamTrigger.closest("tr");
+    expect(signalTeamRow).not.toHaveAttribute("role");
+    expect(signalTeamRow).not.toHaveAttribute("tabindex");
+    signalTeamTrigger.focus();
+    expect(signalTeamTrigger).toHaveFocus();
+    fireEvent.click(signalTeamTrigger);
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/teams/team-si/profile"),
     );
@@ -125,8 +126,13 @@ it("/admin/teams can create nested teams and add a member", async () => {
       expect(window.location.pathname).toBe("/admin/teams/team-si/members"),
     );
     expect(await screen.findByText("Engineer One")).toBeInTheDocument();
+    const systemMembersCard = screen.getByRole("heading", { name: "Members", level: 2 })
+      .closest('[data-slot="admin-section"]')!;
+    expect(
+      within(systemMembersCard).getByRole("button", { name: "Add member" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Change role for Engineer One"));
-    fireEvent.click(await screen.findByRole("option", { name: "admin" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Administrator" }));
     await waitFor(() =>
       expect(global.fetch).toHaveBeenCalledWith(
         "/api/v1/admin/teams/team-si/members",
@@ -137,7 +143,7 @@ it("/admin/teams can create nested teams and add a member", async () => {
       ),
     );
     expect(await screen.findByText(/team member role is updated/i)).toBeInTheDocument();
-    expect(screen.getByLabelText("Change role for Engineer One")).toHaveTextContent("admin");
+    expect(screen.getByLabelText("Change role for Engineer One")).toHaveTextContent("Administrator");
     let existingMemberTable = screen.getByRole("table");
     expect(within(existingMemberTable).queryByText("Invited Engineer")).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /documents/i })).not.toBeInTheDocument();
@@ -166,7 +172,7 @@ it("/admin/teams can create nested teams and add a member", async () => {
     expect(invitedMemberCheckbox).toHaveFocus();
     fireEvent.click(invitedMemberCheckbox);
     fireEvent.click(within(addMemberGroup).getByLabelText("Role"));
-    fireEvent.click(await screen.findByRole("option", { name: "admin" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Administrator" }));
     fireEvent.click(within(addMemberGroup).getByRole("button", { name: /add selected members/i }));
     expect(await screen.findByText(/Team members are active/)).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(
@@ -196,7 +202,7 @@ it("/admin/teams can create nested teams and add a member", async () => {
     );
     const currentMembersGroup = screen
       .getAllByText("Members")
-      .map((element) => element.closest('[data-slot="card"]'))
+      .map((element) => element.closest('[data-slot="admin-section"]'))
       .find((element): element is HTMLElement => element instanceof HTMLElement)!;
     await waitFor(() => {
       expect(within(currentMembersGroup).queryByText("Engineer One")).not.toBeInTheDocument();
@@ -204,7 +210,7 @@ it("/admin/teams can create nested teams and add a member", async () => {
     expect(within(currentMembersGroup).getByText("Invited Engineer")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add member" }));
     addMemberGroup = await screen.findByRole("dialog", { name: "Add member" });
-    expect(within(addMemberGroup).getByLabelText("Role")).toHaveTextContent("member");
+    expect(within(addMemberGroup).getByLabelText("Role")).toHaveTextContent("Member");
     memberSearch = within(addMemberGroup).getByLabelText("Search members");
     fireEvent.change(memberSearch, { target: { value: "Engineer" } });
     expect(within(addMemberGroup).getByText("Engineer One")).toBeInTheDocument();
@@ -240,7 +246,7 @@ it("restores the same Team and section through browser back and forward", async 
     expect(await screen.findByText("Engineer One")).toBeInTheDocument();
   });
 
-it("uses mobile cards for System Team member relationships", async () => {
+it("uses a flat mobile list for System Team member relationships", async () => {
     window.innerWidth = 500;
     window.history.pushState({}, "", "/admin/teams/team-si/members");
     mockApi(adminSession, readyReadiness);
@@ -248,10 +254,15 @@ it("uses mobile cards for System Team member relationships", async () => {
 
     expect(await screen.findByText("Engineer One")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /remove Engineer One/i })).toBeInTheDocument();
+    const removeButton = screen.getByRole("button", { name: /remove Engineer One/i });
+    expect(removeButton).toBeInTheDocument();
+    const memberList = removeButton.closest('[data-slot="item-group"]')!;
+    expect(memberList).toHaveAttribute("role", "list");
+    expect(within(memberList).getAllByRole("listitem")).not.toHaveLength(0);
+    expect(memberList.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
   });
 
-it("uses mobile cards for scoped Team member relationships", async () => {
+it("uses a flat mobile list for scoped Team member relationships", async () => {
     window.innerWidth = 500;
     window.history.pushState({}, "", "/admin/teams/team-si/members");
     mockApi(teamAdminSession, readyReadiness);
@@ -260,6 +271,10 @@ it("uses mobile cards for scoped Team member relationships", async () => {
     expect((await screen.findAllByText("Team Admin")).length).toBeGreaterThan(0);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(await screen.findByText("Required admin")).toBeInTheDocument();
+    const memberList = screen.getByText("Required admin").closest('[data-slot="item-group"]')!;
+    expect(memberList).toHaveAttribute("role", "list");
+    expect(within(memberList).getAllByRole("listitem")).not.toHaveLength(0);
+    expect(memberList.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
   });
 
 it("scoped Team management keeps initial loading separate from member data", async () => {
@@ -345,12 +360,24 @@ it("scoped Team admin manages only human membership and scoped invites", async (
     window.history.pushState({}, "", "/admin/teams/team-si/members");
     mockApi(teamAdminSession, readyReadiness);
     const { container } = render(<App />);
+    const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
 
     expect(await screen.findByRole("heading", { name: "Signal Integrity" })).toBeInTheDocument();
     expect((await screen.findAllByText("Team Admin")).length).toBeGreaterThan(0);
     expect(screen.getByText("Layout Review Agent")).toBeInTheDocument();
     expect(screen.getByText("Read only")).toBeInTheDocument();
     expect(screen.getByText("Required admin")).toBeInTheDocument();
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "Members" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Profile" })).not.toBeInTheDocument();
+    const membersCard = screen.getByRole("heading", { name: "Members", level: 2 })
+      .closest('[data-slot="admin-section"]')!;
+    expect(within(membersCard).getByRole("button", { name: "Add member" })).toBeInTheDocument();
+    expect(within(membersCard).getByRole("button", { name: "Create invite" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /create team/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/parent team|inherit parent|permission grant/i)).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent(/user-team-admin-001|agent-layout-review-001|team-si/);
@@ -372,10 +399,16 @@ it("scoped Team admin manages only human membership and scoped invites", async (
     dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "New Teammate" } });
     fireEvent.change(within(dialog).getByLabelText("Email"), { target: { value: "new@example.test" } });
+    expect(within(dialog).getByLabelText("Email")).toHaveAttribute("type", "email");
     fireEvent.click(within(dialog).getByRole("button", { name: "Create invite" }));
     expect(await within(dialog).findByLabelText("Invite acceptance link")).toHaveValue(
       "/accept-invite?token=atlas_invite_visible_once",
     );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Copy invite link" }));
+    expect(clipboardWriteText).toHaveBeenCalledWith(
+      "/accept-invite?token=atlas_invite_visible_once",
+    );
+    expect(await screen.findByText("Invite link copied.")).toBeInTheDocument();
     expect(global.fetch).toHaveBeenCalledWith(
       "/api/v1/admin/user-invites",
       expect.objectContaining({
@@ -419,7 +452,7 @@ it("fails closed after scoped Team self-removal when the authority refresh fails
     fireEvent.click(screen.getByRole("button", { name: "Add member" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByLabelText("Role"));
-    fireEvent.click(await screen.findByRole("option", { name: "admin" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Administrator" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Add member" }));
     const removeOwnMembership = await screen.findByRole("button", {
       name: "Remove Team Admin",
@@ -1124,4 +1157,88 @@ it.each([
       );
     },
   );
+it.each([
+  [adminSession, "/admin/teams/team-si/profile"],
+  [teamAdminSession, "/admin/teams/team-si/members"],
+])("uses a flat mobile list with one 44px Team name trigger", async (session, route) => {
+  window.innerWidth = 500;
+  window.history.pushState({}, "", "/admin/teams");
+  mockApi(session, readyReadiness);
+  render(<App />);
+
+  const trigger = await screen.findByRole("button", { name: "Signal Integrity" });
+  const teamList = trigger.closest('[data-slot="item-group"]')!;
+  expect(teamList).toHaveAttribute("role", "list");
+  expect(within(teamList).getAllByRole("listitem")).not.toHaveLength(0);
+  expect(teamList.querySelector('[data-slot="card"]')).not.toBeInTheDocument();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  expect(trigger).toHaveClass("min-h-11");
+  expect(trigger.parentElement?.closest('[role="button"]')).toBeNull();
+  fireEvent.click(trigger);
+  await waitFor(() => expect(window.location.pathname).toBe(route));
+});
+
+it("disables a pending Team invite and replaces its action icon with a Spinner", async () => {
+  window.history.pushState({}, "", "/admin/teams/team-si/members");
+  mockApi(teamAdminSession, readyReadiness);
+  const normalFetch = global.fetch;
+  let settleInvite!: (response: Response) => void;
+  const delayedInvite = new Promise<Response>((resolve) => {
+    settleInvite = resolve;
+  });
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const path = new URL(String(input), "http://localhost").pathname;
+    if (path === "/api/v1/admin/user-invites" && init?.method === "POST") {
+      return delayedInvite;
+    }
+    return normalFetch(input, init);
+  });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Create invite" }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("Name"), {
+    target: { value: "Pending Teammate" },
+  });
+  fireEvent.change(within(dialog).getByLabelText("Email"), {
+    target: { value: "pending@example.test" },
+  });
+  const submit = within(dialog).getByRole("button", { name: "Create invite" });
+  fireEvent.click(submit);
+
+  expect(submit).toBeDisabled();
+  expect(within(submit).getByRole("status", { name: "Loading" })).toBeInTheDocument();
+
+  await act(async () => {
+    settleInvite(await jsonResponse({
+      message_code: "identity.invite_is_ready",
+      message_params: {},
+      local_pilot_acceptance: {
+        acceptance_url: "/accept-invite?token=pending_invite",
+      },
+    }));
+    await delayedInvite;
+  });
+  expect(await within(dialog).findByLabelText("Invite acceptance link")).toHaveValue(
+    "/accept-invite?token=pending_invite",
+  );
+});
+
+it("renders Team role values as Traditional Chinese labels", async () => {
+  await i18n.changeLanguage("zh-TW");
+  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, "zh-TW");
+  window.history.pushState({}, "", "/admin/teams/team-si/members");
+  mockApi(adminSession, readyReadiness);
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Signal Integrity" })).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText("變更 Engineer One 的角色"));
+  expect(await screen.findByRole("option", { name: "成員" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "上傳者" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "管理員" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "member" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "uploader" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "admin" })).not.toBeInTheDocument();
+});
+
 });

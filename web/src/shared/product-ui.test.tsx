@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { AdminResourceHeader, AdminSection } from "./admin-detail";
 
 import {
   conversationTurnStatusPresentation,
@@ -7,6 +8,7 @@ import {
   resultStatusSemantic,
   LoadingState,
   StatusBadge,
+  TargetSummary,
   TechnicalDetails,
 } from "./product-ui";
 
@@ -100,5 +102,50 @@ describe("shared status semantics", () => {
     rerender(<StatusBadge semantic="failure" label="Failed" />);
     expect(screen.getByText("Failed").closest('[data-slot="badge"]')?.querySelector(".lucide-circle-x"))
       .not.toBeNull();
+  });
+  it("keeps flat management summaries unframed without changing the default boundary", () => {
+    const { container, rerender } = render(
+      <TargetSummary label="Project" title="Atlas" />,
+    );
+    let summary = container.querySelector('[data-slot="target-summary"]');
+    expect(summary?.getAttribute("data-variant")).toBe("default");
+    expect(summary?.classList.contains("border")).toBe(true);
+    expect(summary?.classList.contains("px-3")).toBe(true);
+    expect(summary?.classList.contains("py-2")).toBe(true);
+
+    rerender(<TargetSummary label="Project" title="Atlas" variant="flat" />);
+    summary = container.querySelector('[data-slot="target-summary"]');
+    expect(summary?.getAttribute("data-variant")).toBe("flat");
+    expect(summary?.classList.contains("border")).toBe(false);
+    expect(summary?.classList.contains("px-3")).toBe(false);
+    expect(summary?.classList.contains("py-2")).toBe(false);
+  });
+  it("keeps management resource and section actions keyboard-focusable", () => {
+    render(
+      <>
+        <AdminResourceHeader
+          title="Project Atlas"
+          description="Managed project"
+          actions={<button type="button">Open documents</button>}
+        />
+        <AdminSection
+          title="Access"
+          actions={<button type="button">Add access</button>}
+        >
+          <p>Relationship collection</p>
+        </AdminSection>
+      </>,
+    );
+
+    const resourceAction = screen.getByRole("button", { name: "Open documents" });
+    resourceAction.focus();
+    expect(document.activeElement).toBe(resourceAction);
+
+    const sectionAction = screen.getByRole("button", { name: "Add access" });
+    sectionAction.focus();
+    expect(document.activeElement).toBe(sectionAction);
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 2, name: "Access" })).not.toBeNull();
+    expect(screen.getByText("Relationship collection")).not.toBeNull();
   });
 });

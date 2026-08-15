@@ -127,15 +127,24 @@ export function TargetSummary({
   description,
   children,
   className,
+  variant = "default",
 }: {
   label: string;
   title: string;
   description?: string;
   children?: ReactNode;
   className?: string;
+  variant?: "default" | "flat";
 }) {
   return (
-    <div className={cn("rounded-md border bg-muted/50 px-3 py-2", className)}>
+    <div
+      data-slot="target-summary"
+      data-variant={variant}
+      className={cn(
+        variant === "flat" ? "bg-transparent" : "rounded-md border bg-muted/50 px-3 py-2",
+        className,
+      )}
+    >
       <div className="text-xs font-medium text-muted-foreground">{label}</div>
       <div className="mt-1 font-medium">{title}</div>
       {description && (

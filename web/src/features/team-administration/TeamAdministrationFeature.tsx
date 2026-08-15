@@ -1,16 +1,11 @@
-import { FileText, Network, Plus, Save, UserRoundPlus, UsersRound, X } from "lucide-react";
+import { FileText, Pencil, Plus, Save, UserRoundPlus, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import {
   Dialog,
@@ -21,6 +16,7 @@ import {
   DialogTitle,
 } from "../../components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../../components/ui/empty";
+import { Item, ItemGroup } from "../../components/ui/item";
 import {
   Field,
   FieldDescription,
@@ -44,7 +40,9 @@ import {
 import { generatedId } from "../../shared/ids";
 import {
   AdminBreadcrumb,
+  AdminResourceHeader,
   AdminResourceUnavailable,
+  AdminSection,
   AdminSectionNav,
 } from "../../shared/admin-detail";
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
@@ -57,9 +55,6 @@ import {
   PageHeader,
   StatusBadge,
   TargetSummary,
-  activateOnEnterOrSpace,
-  clickableCardClassName,
-  clickableSurfaceClassName,
   serverMessage,
 } from "../../shared/product-ui";
 import {
@@ -99,11 +94,6 @@ const teamStatusOptions: OptionSelectItem<"active" | "retired">[] = [
   { value: "retired", label: "retired" },
 ];
 
-const teamMemberRoleOptions: OptionSelectItem<TeamScopeRole>[] = [
-  { value: "member", label: "member" },
-  { value: "uploader", label: "uploader" },
-  { value: "admin", label: "admin" },
-];
 
 function buildDescendantTeamIdsByTeamId(teams: TeamRecord[]) {
   const childIdsByParentId = new Map<string, string[]>();
@@ -143,6 +133,11 @@ export function TeamAdministrationFeature({
   const { t } = useTranslation();
   const pathname = usePathname();
   const isMobile = useIsMobile();
+  const teamMemberRoleOptions: OptionSelectItem<TeamScopeRole>[] = [
+    { value: "member", label: t("roleValues.member") },
+    { value: "uploader", label: t("roleValues.uploader") },
+    { value: "admin", label: t("roleValues.admin") },
+  ];
   const [teams, setTeams] = useState<TeamRecord[]>([]);
   const [memberships, setMemberships] = useState<TeamMembershipRecord[]>([]);
   const [users, setUsers] = useState<UserAdminSummary[]>([]);
@@ -466,22 +461,6 @@ export function TeamAdministrationFeature({
     setShowEditTeam(false);
   }
 
-  function teamActions(team: TeamRecord) {
-    return (
-      <div className="flex flex-wrap gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={(event) => {
-            event.stopPropagation();
-            onNavigate(adminTeamDetailRoute(team.team_id, "profile"));
-          }}
-        >
-          {t("admin.edit")}
-        </Button>
-      </div>
-    );
-  }
 
   function memberRoleControl(membership: TeamMembershipRecord) {
     const memberLabel =
@@ -568,98 +547,95 @@ export function TeamAdministrationFeature({
       );
     }
     return (
-      <div className="flex flex-col gap-4">
-        <Card className="min-w-0">
-          <CardHeader>
-            <CardTitle>{t("teams.membersTitle")}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {selectedTeamMemberships.length === 0 ? (
-              <Empty className="border">
-                <EmptyHeader>
-                  <EmptyTitle>{t("teams.noMembersTitle")}</EmptyTitle>
-                  <EmptyDescription>{t("teams.noMembersDescription")}</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : isMobile ? (
-              <div className="grid gap-3">
+      <AdminSection
+        title={t("teams.membersTitle")}
+        actions={
+          <Button
+            type="button"
+            size="sm"
+            className="min-h-11 md:min-h-8"
+            onClick={() => void openAddMembersDialog()}
+          >
+            <UserRoundPlus data-icon="inline-start" />
+            {t("teams.addMember")}
+          </Button>
+        }
+      >
+        {selectedTeamMemberships.length === 0 ? (
+          <Empty>
+            <EmptyHeader>
+              <EmptyTitle>{t("teams.noMembersTitle")}</EmptyTitle>
+              <EmptyDescription>{t("teams.noMembersDescription")}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : isMobile ? (
+          <ItemGroup>
+            {selectedTeamMemberships.map((membership) => (
+              <Item
+                key={membership.membership_id}
+                role="listitem"
+                className="grid gap-3 rounded-none px-0 py-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">
+                      {memberById.get(membership.member_actor_id)?.display_name ??
+                        t("teams.unknownMember")}
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {memberTypeLabel(membership.member_actor_type)}
+                    </div>
+                  </div>
+                  <StatusBadge
+                    semantic={membership.status === "active" ? "success" : "inactive"}
+                    label={localizedStatusLabel(membership.status, t)}
+                  />
+                </div>
+                <Field>
+                  <FieldLabel htmlFor={`system-team-member-role-${membership.membership_id}`}>
+                    {t("settings.role")}
+                  </FieldLabel>
+                  {memberRoleControl(membership)}
+                </Field>
+                <div>{removeMemberAction(membership)}</div>
+              </Item>
+            ))}
+          </ItemGroup>
+        ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("teams.member")}</TableHead>
+                  <TableHead>{t("teams.memberType")}</TableHead>
+                  <TableHead>{t("settings.role")}</TableHead>
+                  <TableHead>{t("users.status")}</TableHead>
+                  <TableHead>{t("users.action")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {selectedTeamMemberships.map((membership) => (
-                  <div
-                    key={membership.membership_id}
-                    className="grid gap-3 rounded-md border p-3"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium">
-                          {memberById.get(membership.member_actor_id)?.display_name ??
-                            t("teams.unknownMember")}
-                        </div>
-                        <div className="text-sm text-muted-foreground">
-                          {memberTypeLabel(membership.member_actor_type)}
-                        </div>
-                      </div>
+                  <TableRow key={membership.membership_id}>
+                    <TableCell>
+                      {memberById.get(membership.member_actor_id)?.display_name ??
+                        t("teams.unknownMember")}
+                    </TableCell>
+                    <TableCell>{memberTypeLabel(membership.member_actor_type)}</TableCell>
+                    <TableCell className="min-w-40">
+                      {memberRoleControl(membership)}
+                    </TableCell>
+                    <TableCell>
                       <StatusBadge
                         semantic={membership.status === "active" ? "success" : "inactive"}
                         label={localizedStatusLabel(membership.status, t)}
                       />
-                    </div>
-                    <Field>
-                      <FieldLabel htmlFor={`system-team-member-role-${membership.membership_id}`}>
-                        {t("settings.role")}
-                      </FieldLabel>
-                      {memberRoleControl(membership)}
-                    </Field>
-                    <div>{removeMemberAction(membership)}</div>
-                  </div>
+                    </TableCell>
+                    <TableCell>{removeMemberAction(membership)}</TableCell>
+                  </TableRow>
                 ))}
-              </div>
-            ) : (
-              <div className="overflow-x-auto rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t("teams.member")}</TableHead>
-                      <TableHead>{t("teams.memberType")}</TableHead>
-                      <TableHead>{t("settings.role")}</TableHead>
-                      <TableHead>{t("users.status")}</TableHead>
-                      <TableHead>{t("users.action")}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {selectedTeamMemberships.map((membership) => (
-                      <TableRow key={membership.membership_id}>
-                        <TableCell>
-                          {memberById.get(membership.member_actor_id)?.display_name ??
-                            t("teams.unknownMember")}
-                        </TableCell>
-                        <TableCell>{memberTypeLabel(membership.member_actor_type)}</TableCell>
-                        <TableCell className="min-w-40">
-                          {memberRoleControl(membership)}
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge
-                            semantic={membership.status === "active" ? "success" : "inactive"}
-                            label={localizedStatusLabel(membership.status, t)}
-                          />
-                        </TableCell>
-                        <TableCell>{removeMemberAction(membership)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-        <Button
-          type="button"
-          className="w-fit"
-          onClick={() => void openAddMembersDialog()}
-        >
-          <UserRoundPlus data-icon="inline-start" />
-          {t("teams.addMember")}
-        </Button>
-      </div>
+              </TableBody>
+            </Table>
+        )}
+      </AdminSection>
     );
   }
 
@@ -696,49 +672,56 @@ export function TeamAdministrationFeature({
               ]}
               onNavigate={onNavigate}
             />
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <PageHeader title={selectedTeam.name} />
-              <Button
-                variant="outline"
-                onClick={() =>
-                  onNavigate(
-                    documentLibraryDestination("team", selectedTeam.team_id),
-                  )
-                }
-              >
-                <FileText data-icon="inline-start" />
-                {t("documentLibrary.manageTargetDocuments")}
-              </Button>
-            </div>
+            <AdminResourceHeader
+              title={selectedTeam.name}
+              actions={
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    onNavigate(
+                      documentLibraryDestination("team", selectedTeam.team_id),
+                    )
+                  }
+                >
+                  <FileText data-icon="inline-start" />
+                  {t("documentLibrary.manageTargetDocuments")}
+                </Button>
+              }
+            />
             <AdminSectionNav
               value={detail.section}
               items={[
-                { value: "profile", label: t("admin.profileSection"), icon: <Network /> },
-                { value: "members", label: t("admin.membersSection"), icon: <UsersRound /> },
+                { value: "profile", label: t("admin.profileSection") },
+                { value: "members", label: t("admin.membersSection") },
               ]}
               onValueChange={(section) =>
                 onNavigate(adminTeamDetailRoute(selectedTeam.team_id, section))
               }
             />
             {actionError && (
-              <div className="text-sm text-destructive">{serverMessage(actionError, t)}</div>
+              <Alert variant="destructive">
+                <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+                <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+              </Alert>
             )}
             {detail.section === "profile" ? (
-              <Card>
-                <CardHeader>
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <CardTitle>{t("admin.profileSection")}</CardTitle>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => openTeamProfileEditor(selectedTeam)}
-                    >
-                      {t("admin.editProfile")}
-                    </Button>
-                  </div>
-                </CardHeader>
-                <CardContent className="grid gap-4 text-sm sm:grid-cols-2">
+              <AdminSection
+                title={t("admin.profileSection")}
+                actions={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="min-h-11 md:min-h-8"
+                    onClick={() => openTeamProfileEditor(selectedTeam)}
+                  >
+                    <Pencil data-icon="inline-start" />
+                    {t("admin.editProfile")}
+                  </Button>
+                }
+              >
+                <div className="grid gap-4 text-sm sm:grid-cols-2">
                   <TargetSummary
+                    variant="flat"
                     label={t("teams.parentTeam")}
                     title={
                       selectedTeam.parent_team_id
@@ -747,8 +730,13 @@ export function TeamAdministrationFeature({
                         : t("teams.noParent")
                     }
                   />
-                  <TargetSummary label={t("users.status")} title={localizedStatusLabel(selectedTeam.status, t)} />
                   <TargetSummary
+                    variant="flat"
+                    label={t("users.status")}
+                    title={localizedStatusLabel(selectedTeam.status, t)}
+                  />
+                  <TargetSummary
+                    variant="flat"
                     label={t("teams.documentInheritance")}
                     title={
                       selectedTeam.inherit_parent_documents
@@ -756,8 +744,8 @@ export function TeamAdministrationFeature({
                         : t("teams.inheritParentDocumentsOff")
                     }
                   />
-                </CardContent>
-              </Card>
+                </div>
+              </AdminSection>
             ) : (
               renderMembersSection()
             )}
@@ -767,13 +755,12 @@ export function TeamAdministrationFeature({
         <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader title={t("teams.title")} />
-        <Button size="sm" onClick={openCreateTeamDialog}>
+        <Button size="sm" className="min-h-11 md:min-h-8" onClick={openCreateTeamDialog}>
           <Plus data-icon="inline-start" />
           {t("teams.createTeam")}
         </Button>
       </div>
-      <Card>
-        <CardContent className="pt-6">
+      <div data-slot="team-directory-layout" className="flex w-full flex-col gap-5">
           {loading ? (
             <LoadingState
               title={t("teams.loadingTitle")}
@@ -786,32 +773,29 @@ export function TeamAdministrationFeature({
               onRetry={() => void refreshTeams()}
             />
           ) : teams.length === 0 ? (
-            <Empty className="border">
+            <Empty>
               <EmptyHeader>
                 <EmptyTitle>{t("teams.emptyTitle")}</EmptyTitle>
                 <EmptyDescription>{t("teams.emptyDescription")}</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : isMobile ? (
-            <div className="grid gap-3">
+            <ItemGroup>
               {teams.map((team) => (
-                <div
+                <Item
                   key={team.team_id}
-                  className={`${clickableCardClassName} p-3`}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={team.name}
-                  onClick={() => openTeamEditor(team)}
-                  onKeyDown={(event) =>
-                    activateOnEnterOrSpace(event, () => openTeamEditor(team))
-                  }
+                  role="listitem"
+                  className="grid gap-3 rounded-none px-0 py-4"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="inline-flex max-w-full items-center gap-2 font-medium">
-                        <Network />
+                      <Button
+                        variant="link"
+                        className="min-h-11 max-w-full justify-start px-0 text-left"
+                        onClick={() => openTeamEditor(team)}
+                      >
                         <span className="truncate">{team.name}</span>
-                      </div>
+                      </Button>
                       <div className="text-xs text-muted-foreground">
                         {team.parent_team_id
                           ? teamById.get(team.parent_team_id)?.name ?? team.parent_team_id
@@ -828,71 +812,59 @@ export function TeamAdministrationFeature({
                       label={localizedStatusLabel(team.status, t)}
                     />
                   </div>
-                  <div className="mt-3">{teamActions(team)}</div>
-                </div>
+                </Item>
               ))}
-            </div>
+            </ItemGroup>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("teams.team")}</TableHead>
-                  <TableHead>{t("teams.parentTeam")}</TableHead>
-                  <TableHead>{t("teams.documentInheritance")}</TableHead>
-                  <TableHead>{t("users.status")}</TableHead>
-                  <TableHead>{t("users.action")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {teams.map((team) => (
-                  <TableRow
-                    key={team.team_id}
-                    className={clickableSurfaceClassName}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={team.name}
-                    onClick={() => openTeamEditor(team)}
-                    onKeyDown={(event) =>
-                      activateOnEnterOrSpace(event, () => openTeamEditor(team))
-                    }
-                  >
-                    <TableCell>
-                      <span className="inline-flex items-center gap-2">
-                        <Network />
-                        {team.name}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      {team.parent_team_id
-                        ? teamById.get(team.parent_team_id)?.name ?? team.parent_team_id
-                        : t("teams.noParent")}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge
-                        semantic={team.inherit_parent_documents ? "success" : "inactive"}
-                        label={
-                          team.inherit_parent_documents
-                            ? t("teams.inheritParentDocumentsOn")
-                            : t("teams.inheritParentDocumentsOff")
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge
-                        semantic={team.status === "active" ? "success" : "inactive"}
-                        label={localizedStatusLabel(team.status, t)}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      {teamActions(team)}
-                    </TableCell>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("teams.team")}</TableHead>
+                    <TableHead>{t("teams.parentTeam")}</TableHead>
+                    <TableHead>{t("teams.documentInheritance")}</TableHead>
+                    <TableHead>{t("users.status")}</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {teams.map((team) => (
+                    <TableRow key={team.team_id}>
+                      <TableCell>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-auto px-0"
+                          onClick={() => openTeamEditor(team)}
+                        >
+                          {team.name}
+                        </Button>
+                      </TableCell>
+                      <TableCell>
+                        {team.parent_team_id
+                          ? teamById.get(team.parent_team_id)?.name ?? team.parent_team_id
+                          : t("teams.noParent")}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          semantic={team.inherit_parent_documents ? "success" : "inactive"}
+                          label={
+                            team.inherit_parent_documents
+                              ? t("teams.inheritParentDocumentsOn")
+                              : t("teams.inheritParentDocumentsOff")
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          semantic={team.status === "active" ? "success" : "inactive"}
+                          label={localizedStatusLabel(team.status, t)}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
           )}
-        </CardContent>
-      </Card>
+      </div>
         </>
       )}
       <Dialog open={showCreateTeam} onOpenChange={handleCreateTeamOpenChange}>
@@ -1060,7 +1032,11 @@ export function TeamAdministrationFeature({
                       }
                       disabled={pendingAction === "update-team" || !canSaveTeam}
                     >
-                      <Save data-icon="inline-start" />
+                      {pendingAction === "update-team" ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <Save data-icon="inline-start" />
+                      )}
                       {t("teams.saveTeam")}
                     </Button>
                   </FieldGroup>
@@ -1087,15 +1063,15 @@ export function TeamAdministrationFeature({
             <DialogDescription>{t("teams.membersDescription")}</DialogDescription>
           </DialogHeader>
           {(directoryImport.mode === "directory" ? directoryImport.actionError : actionError) && (
-            <div role="alert" className="rounded-md border border-destructive/50 p-3 text-sm">
-              <div className="font-medium">{t("admin.actionFailed")}</div>
-              <div className="text-muted-foreground">
+            <Alert variant="destructive">
+              <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+              <AlertDescription>
                 {serverMessage(
                   directoryImport.mode === "directory" ? directoryImport.actionError : actionError,
                   t,
                 )}
-              </div>
-            </div>
+              </AlertDescription>
+            </Alert>
           )}
           <FieldGroup>
             <Field>
@@ -1211,7 +1187,11 @@ export function TeamAdministrationFeature({
                   : directoryImport.selectedSubjects.length === 0)
               }
             >
-              <UserRoundPlus data-icon="inline-start" />
+              {pendingAction === "add-members" || directoryImport.importPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <UserRoundPlus data-icon="inline-start" />
+              )}
               {directoryImport.mode === "directory"
                 ? t("directory.importSelected")
                 : t("teams.addSelectedMembers")}
