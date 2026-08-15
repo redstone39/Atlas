@@ -16,6 +16,30 @@ hosted service, security certification, or support commitment. It does not
 contain private project plans, decision logs, test documents, deployment
 credentials, or build outputs.
 
+## Development methodology
+
+Atlas is both a working product and the primary reference workload for my
+harness-engineered software-development environment. All implementation coding
+for Atlas is performed through a harness-mediated agent workflow. I retain
+authority over product intent, requirements, architecture, risk, and final
+acceptance; coding agents perform bounded implementation work through the
+harness.
+
+The methodology treats the repository as durable engineering memory. Domain
+rules become contracts, architecture becomes machine-readable dependency
+boundaries, security and authority semantics become tests and audits, supported
+operator journeys become reproducible smoke environments, and applicable review
+findings become regression guards. This allows a newly started agent, without
+the previous conversation, to reconstruct the necessary project worldview and
+submit a bounded change to reproducible acceptance checks.
+
+Atlas is therefore neither an AI-generated toy nor merely a demonstration of an
+agent loop. It is a real product and the proving ground through which the
+development methodology is exercised and improved. The complete harness and
+its private execution records are not part of this public snapshot; this
+repository exposes the resulting architecture constraints, tests, audits,
+smokes, and runtime.
+
 ## Status and supported use
 
 Atlas currently uses a `resettable_development` data lifecycle. It is suitable
