@@ -9,16 +9,27 @@ import i18n from "../../i18n";
 import { noteExtensions } from "./note-extensions";
 import { NoteTableControls } from "./NoteTableControls";
 
+const bubbleMenuState = vi.hoisted(() => ({
+  getReferencedVirtualElement: undefined as
+    | undefined
+    | (() => { getBoundingClientRect: () => DOMRect } | null),
+}));
+
 vi.mock("@tiptap/react/menus", () => ({
   BubbleMenu: ({
     editor,
     shouldShow,
+    getReferencedVirtualElement,
     children,
   }: {
     editor: Editor;
     shouldShow: (props: { editor: Editor }) => boolean;
+    getReferencedVirtualElement?: () => { getBoundingClientRect: () => DOMRect } | null;
     children: ReactNode;
-  }) => shouldShow({ editor }) ? <>{children}</> : null,
+  }) => {
+    bubbleMenuState.getReferencedVirtualElement = getReferencedVirtualElement;
+    return shouldShow({ editor }) ? <>{children}</> : null;
+  },
 }));
 
 function tableEditor() {
@@ -50,11 +61,12 @@ function tableEditor() {
 afterEach(() => cleanup());
 
 beforeEach(async () => {
+  bubbleMenuState.getReferencedVirtualElement = undefined;
   await i18n.changeLanguage("en");
 });
 
 describe("NoteTableControls", () => {
-  it("opens above an active table selection without replacing the editor selection", () => {
+  it("opens from the keyboard without replacing the editor selection", () => {
     const editor = tableEditor();
     render(<NoteTableControls editor={editor} editable />);
 
@@ -68,6 +80,46 @@ describe("NoteTableControls", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(editor.state.selection.eq(selection)).toBe(true);
 
+    editor.destroy();
+  });
+
+  it("opens the action menu at the pointer coordinates", () => {
+    const editor = tableEditor();
+    render(<NoteTableControls editor={editor} editable />);
+    const trigger = screen.getByRole("button", { name: "Table actions" });
+    let contextPoint: { x: number; y: number } | null = null;
+    document.addEventListener("contextmenu", (event) => {
+      contextPoint = { x: event.clientX, y: event.clientY };
+    }, { once: true });
+
+    fireEvent.click(trigger, { clientX: 320, clientY: 240 });
+
+    expect(contextPoint).toEqual({ x: 320, y: 240 });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    editor.destroy();
+  });
+
+  it("anchors table actions to the pointer and falls back to selection geometry for keyboard use", () => {
+    const editor = tableEditor();
+    render(<NoteTableControls editor={editor} editable />);
+    const cell = editor.view.dom.querySelector("td");
+    expect(cell).not.toBeNull();
+
+    fireEvent(cell as HTMLTableCellElement, new MouseEvent("pointerdown", {
+      bubbles: true,
+      clientX: 240,
+      clientY: 180,
+    }));
+    const pointerReference = bubbleMenuState.getReferencedVirtualElement?.();
+    expect(pointerReference?.getBoundingClientRect()).toMatchObject({
+      x: 240,
+      y: 180,
+      width: 0,
+      height: 0,
+    });
+
+    fireEvent.keyDown(cell as HTMLTableCellElement, { key: "ArrowRight" });
+    expect(bubbleMenuState.getReferencedVirtualElement?.()).toBeNull();
     editor.destroy();
   });
 
