@@ -464,10 +464,7 @@ export function DocumentLibraryFeature({
   if (initialLoading) {
     return (
       <section className="flex flex-col gap-5">
-        <PageHeader
-          title={t("documentLibrary.title")}
-          description={t("documentLibrary.description")}
-        />
+        <PageHeader title={t("documentLibrary.title")} />
         <LoadingState
           title={t("documentLibrary.loadingTitle")}
         />
@@ -477,10 +474,7 @@ export function DocumentLibraryFeature({
 
   return (
     <section className="flex flex-col gap-5">
-      <PageHeader
-        title={t("documentLibrary.title")}
-        description={t("documentLibrary.description")}
-      />
+      <PageHeader title={t("documentLibrary.title")} />
 
       {!pageLoadError && (
         <div className="flex flex-col gap-3 rounded-md border bg-card p-4 md:flex-row md:items-end md:justify-between">

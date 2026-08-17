@@ -205,7 +205,7 @@ export function ProcessingPluginsFeature({
 
   const pageHeader = (
     <div className="flex items-start justify-between gap-4">
-      <PageHeader title={t("plugins.title")} description={t("plugins.description")} />
+      <PageHeader title={t("plugins.title")} />
       <Button variant="outline" onClick={() => void refresh()} disabled={busy || loading}>
         <RefreshCw />
         {t("plugins.refresh")}

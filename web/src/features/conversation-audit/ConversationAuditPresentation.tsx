@@ -152,7 +152,7 @@ if (resourceUnavailable) {
   if (loading && isConversationDirectory) {
     return (
       <section className="flex flex-col gap-5">
-        <PageHeader title={t("audit.title")} description={t("audit.description")} />
+        <PageHeader title={t("audit.title")} />
         <LoadingState
           title={t("audit.loadingTitle")}
         />
@@ -163,7 +163,7 @@ if (resourceUnavailable) {
   if (loadError && isConversationDirectory) {
     return (
       <section className="flex flex-col gap-5">
-        <PageHeader title={t("audit.title")} description={t("audit.description")} />
+        <PageHeader title={t("audit.title")} />
         <LoadErrorState
           title={t("admin.listLoadFailed")}
           description={serverMessage(loadError, t)}
@@ -177,7 +177,7 @@ if (resourceUnavailable) {
   return (
     <>
     <section className="flex flex-col gap-5">
-      <PageHeader title={t("audit.title")} description={t("audit.description")} />
+      <PageHeader title={t("audit.title")} />
       {!isLanding && (
         <AdminBreadcrumb
           onNavigate={onNavigate}

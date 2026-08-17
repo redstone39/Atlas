@@ -92,7 +92,7 @@ export function NoteFindReplace({ editor, editable }: { editor: Editor | null; e
   return (
     <Popover open={open} onOpenChange={changeOpen}>
       <PopoverTrigger asChild>
-        <Button type="button" size="icon-sm" variant="ghost" className="size-11 sm:size-8" aria-label={t("notes.findReplace")} disabled={!editor}>
+        <Button type="button" size="icon-sm" variant="ghost" aria-label={t("notes.findReplace")} disabled={!editor}>
           <Search />
         </Button>
       </PopoverTrigger>

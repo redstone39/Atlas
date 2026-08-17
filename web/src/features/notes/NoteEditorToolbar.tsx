@@ -39,7 +39,6 @@ function ToolbarIconButton({
           type="button"
           variant={active ? "secondary" : "ghost"}
           size="icon-sm"
-          className="size-11 sm:size-8"
           aria-label={label}
           aria-pressed={active}
           disabled={disabled}
@@ -71,7 +70,7 @@ export function NoteEditorToolbar({
         <div className="flex gap-2 sm:gap-1" role="group" aria-label={t("notes.textStyle")}>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-11 sm:h-8" disabled={!editable}>
+              <Button type="button" variant="ghost" size="sm" disabled={!editable}>
                 {editor?.isActive("heading", { level: 1 })
                   ? t("notes.heading1")
                   : editor?.isActive("heading", { level: 2 })
@@ -111,7 +110,7 @@ export function NoteEditorToolbar({
           <NoteLinkPopover editor={editor} editable={editable} />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-11 sm:h-8" disabled={!editable}>
+              <Button type="button" variant="ghost" size="sm" disabled={!editable}>
                 {t("notes.moreFormatting")}<ChevronDown data-icon="inline-end" />
               </Button>
             </DropdownMenuTrigger>
@@ -132,7 +131,7 @@ export function NoteEditorToolbar({
         <div className="flex gap-2 sm:gap-1" role="group" aria-label={t("notes.blocksAndLists")}>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-11 sm:h-8" disabled={!editable}>
+              <Button type="button" variant="ghost" size="sm" disabled={!editable}>
                 <List data-icon="inline-start" />{t("notes.blocksAndLists")}<ChevronDown data-icon="inline-end" />
               </Button>
             </DropdownMenuTrigger>
@@ -156,7 +155,7 @@ export function NoteEditorToolbar({
         <div className="flex gap-2 sm:gap-1" role="group" aria-label={t("notes.insert")}>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-11 sm:h-8" disabled={!editable}>
+              <Button type="button" variant="ghost" size="sm" disabled={!editable}>
                 <Plus data-icon="inline-start" />{t("notes.insert")}<ChevronDown data-icon="inline-end" />
               </Button>
             </DropdownMenuTrigger>

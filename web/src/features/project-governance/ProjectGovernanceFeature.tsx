@@ -564,7 +564,6 @@ export function ProjectGovernanceFeature({
             <>
               <Button
                 size="sm"
-                className="min-h-11 md:min-h-8"
                 onClick={() => void openAddAccessDialog()}
               >
                 <Plus data-icon="inline-start" />
@@ -573,7 +572,6 @@ export function ProjectGovernanceFeature({
               <Button
                 variant="outline"
                 size="sm"
-                className="min-h-11 md:min-h-8"
                 onClick={openInviteUserDialog}
               >
                 <UserPlus data-icon="inline-start" />
@@ -836,7 +834,6 @@ export function ProjectGovernanceFeature({
                     <Button
                       variant="outline"
                       size="sm"
-                      className="min-h-11 md:min-h-8"
                       onClick={() => {
                         setEditProjectName(selectedProject.name);
                         setShowEditProject(true);
@@ -877,7 +874,7 @@ export function ProjectGovernanceFeature({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader title={t("projects.title")} />
         {canManageProjectProfile && (
-          <Button size="sm" className="min-h-11 md:min-h-8" onClick={openCreateProjectDialog}>
+          <Button onClick={openCreateProjectDialog}>
             <Plus data-icon="inline-start" />
             {t("admin.createProject")}
           </Button>
@@ -1290,8 +1287,7 @@ export function ProjectGovernanceFeature({
                   />
                   <Button
                     variant="outline"
-                    size="icon"
-                    className="size-11 md:size-8"
+                    size="icon-sm"
                     aria-label={t("admin.copyInvite")}
                     onClick={() => {
                       void navigator.clipboard.writeText(inviteLink);

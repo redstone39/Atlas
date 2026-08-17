@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Button } from "../../components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "../../components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../../components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "../../components/ui/field";
@@ -140,7 +139,7 @@ export function NotesListView({
     <div className="flex flex-col gap-4">
       <PageHeader
         title={t("notes.listTitle", { scope: scope.label })}
-        description={t(lifecycle === "active" ? "notes.listDescription" : "notes.trashDescription")}
+        description={lifecycle === "trashed" ? t("notes.trashDescription") : undefined}
       />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
@@ -180,12 +179,7 @@ export function NotesListView({
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>{t(lifecycle === "active" ? "notes.activeNotes" : "notes.trash")}</CardTitle>
-          <CardDescription>{t(lifecycle === "active" ? "notes.listDescription" : "notes.trashDescription")}</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4">
           <div className="max-w-xs">
             <CategorySelect value={categoryFilter} categories={categories} onChange={setCategoryFilter} includeAll ariaLabel={t("notes.categoryFilter")} />
           </div>
@@ -211,8 +205,7 @@ export function NotesListView({
               ))}</TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
+      </div>
     </div>
   );
 }

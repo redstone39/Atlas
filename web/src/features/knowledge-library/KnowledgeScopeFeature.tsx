@@ -4,13 +4,6 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "../../components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "../../components/ui/card";
-import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -203,12 +196,6 @@ export function KnowledgeScopeFeature({
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-5">
       <PageHeader title={directoryTitle} description={directoryDescription} />
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("knowledgeScope.availableScopesTitle")}</CardTitle>
-          <CardDescription>{t("knowledgeScope.availableScopesDescription")}</CardDescription>
-        </CardHeader>
-        <CardContent>
           {loading ? (
             <LoadingState title={t("knowledgeScope.directoryLoadingTitle")} />
           ) : loadError ? (
@@ -290,8 +277,6 @@ export function KnowledgeScopeFeature({
               </TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
     </section>
   );
 }

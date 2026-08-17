@@ -18,9 +18,6 @@ import {
   FieldDescription,
   FieldGroup,
   FieldLabel,
-  FieldLegend,
-  FieldSet,
-  FieldTitle,
 } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
@@ -54,9 +51,23 @@ const projectRoleOptions: OptionSelectItem<ProjectMemberRole>[] = [
   { value: "admin", label: "admin" },
 ];
 
+function AgentDialogTarget({ agent }: { agent: AgentUserStatus | null }) {
+  const { t } = useTranslation();
+  if (!agent) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm">
+      <span className="font-medium">{agent.display_name}</span>
+      <StatusBadge
+        semantic={agent.status === "active" ? "success" : "inactive"}
+        label={localizedStatusLabel(agent.status, t)}
+      />
+    </div>
+  );
+}
 export function AgentAccessFeature({
   projects,
   onNotice,
+
   onRefresh,
 }: AgentAccessFeatureProps) {
   const { t } = useTranslation();
@@ -249,12 +260,11 @@ export function AgentAccessFeature({
         <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
-            size="sm"
             onClick={() => void loadAgents({ clearIssuedToken: true })}
           >
             {t("ops.refresh")}
           </Button>
-          <Button size="sm" onClick={openCreateAgentDialog}>
+          <Button onClick={openCreateAgentDialog}>
             <Plus data-icon="inline-start" />
             {t("agents.createAgent")}
           </Button>
@@ -300,20 +310,17 @@ export function AgentAccessFeature({
               {t("agents.manageDescription")}
             </DialogDescription>
           </DialogHeader>
-          <FieldSet>
-            <FieldLegend>{t("agents.agentProfile")}</FieldLegend>
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="new-agent-name">{t("agents.agentName")}</FieldLabel>
-                <Input
-                  id="new-agent-name"
-                  value={newAgentName}
-                  onChange={(event) => setNewAgentName(event.target.value)}
-                />
-                <FieldDescription>{t("agents.idAutomatic")}</FieldDescription>
-              </Field>
-            </FieldGroup>
-          </FieldSet>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="new-agent-name">{t("agents.agentName")}</FieldLabel>
+              <Input
+                id="new-agent-name"
+                value={newAgentName}
+                onChange={(event) => setNewAgentName(event.target.value)}
+              />
+              <FieldDescription>{t("agents.idAutomatic")}</FieldDescription>
+            </Field>
+          </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={closeCreateAgentDialog}>
               {t("admin.cancel")}
@@ -350,32 +357,18 @@ export function AgentAccessFeature({
               {t("agents.manageDescription")}
             </DialogDescription>
           </DialogHeader>
-          <FieldSet>
-            <FieldLegend>{t("agents.agentProfile")}</FieldLegend>
-            <FieldGroup>
-              <Field>
-                <FieldTitle>{t("agents.agentProfile")}</FieldTitle>
-                <div className="rounded-md border bg-muted/50 px-3 py-2">
-                  <div className="font-medium">{selectedAgent?.display_name ?? "-"}</div>
-                  <div className="mt-2">
-                    <StatusBadge
-                      semantic={selectedAgent?.status === "active" ? "success" : selectedAgent ? "inactive" : "unknown"}
-                      label={localizedStatusLabel(selectedAgent?.status, t)}
-                    />
-                  </div>
-                </div>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="edit-agent-name">{t("agents.agentName")}</FieldLabel>
-                <Input
-                  id="edit-agent-name"
-                  value={editAgentName}
-                  onChange={(event) => setEditAgentName(event.target.value)}
-                  disabled={!selectedAgent}
-                />
-              </Field>
-            </FieldGroup>
-          </FieldSet>
+          <AgentDialogTarget agent={selectedAgent} />
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="edit-agent-name">{t("agents.agentName")}</FieldLabel>
+              <Input
+                id="edit-agent-name"
+                value={editAgentName}
+                onChange={(event) => setEditAgentName(event.target.value)}
+                disabled={!selectedAgent}
+              />
+            </Field>
+          </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowEditAgent(false)}>
               {t("admin.cancel")}
@@ -408,7 +401,6 @@ export function AgentAccessFeature({
               ) : (
                 <Button
                   variant="outline"
-                  size="sm"
                   onClick={() =>
                     runAction("toggle-agent", () =>
                       agentAccessApi.updateAgent(selectedAgent.actor_id, {
@@ -447,28 +439,9 @@ export function AgentAccessFeature({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("agents.issueTokenTitle")}</DialogTitle>
-            <DialogDescription className="sr-only">
-              {t("agents.issueTokenDescription")}
-            </DialogDescription>
+            <DialogDescription>{t("agents.issueTokenDescription")}</DialogDescription>
           </DialogHeader>
-          <FieldSet>
-            <FieldLegend>{t("agents.issueToken")}</FieldLegend>
-            <FieldGroup>
-              <Field>
-                <FieldTitle>{t("agents.agentProfile")}</FieldTitle>
-                <div className="rounded-md border bg-muted/50 px-3 py-2">
-                  <div className="font-medium">{selectedAgent?.display_name ?? "-"}</div>
-                  <div className="mt-2">
-                    <StatusBadge
-                      semantic={selectedAgent?.status === "active" ? "success" : selectedAgent ? "inactive" : "unknown"}
-                      label={localizedStatusLabel(selectedAgent?.status, t)}
-                    />
-                  </div>
-                </div>
-                <FieldDescription>{t("agents.issueTokenDescription")}</FieldDescription>
-              </Field>
-            </FieldGroup>
-          </FieldSet>
+          <AgentDialogTarget agent={selectedAgent} />
           {issuedToken && (
             <Alert>
               <KeyRound />
@@ -530,60 +503,44 @@ export function AgentAccessFeature({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("agents.accessDialogTitle")}</DialogTitle>
-            <DialogDescription className="sr-only">
-              {t("agents.accessDialogDescription")}
-            </DialogDescription>
+            <DialogDescription>{t("agents.accessDialogDescription")}</DialogDescription>
           </DialogHeader>
-          <FieldSet>
-            <FieldLegend>{t("agents.accessTitle")}</FieldLegend>
-            <FieldGroup>
-              <Field>
-                <FieldTitle>{t("agents.agentProfile")}</FieldTitle>
-                <div className="rounded-md border bg-muted/50 px-3 py-2">
-                  <div className="font-medium">{selectedAgent?.display_name ?? "-"}</div>
-                  <div className="mt-2">
-                    <StatusBadge
-                      semantic={selectedAgent?.status === "active" ? "success" : selectedAgent ? "inactive" : "unknown"}
-                      label={localizedStatusLabel(selectedAgent?.status, t)}
-                    />
-                  </div>
-                </div>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="agent-project">{t("workspace.project")}</FieldLabel>
-                <SearchSelect
-                  id="agent-project"
-                  value={projectId}
-                  options={projectOptions}
-                  placeholder={t("workspace.chooseProject")}
-                  emptyText={t("workspace.noProjectsTitle")}
-                  onValueChange={setProjectId}
-                />
-                <FieldDescription>{t("agents.projectHelp")}</FieldDescription>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="agent-project-role">{t("permissions.role")}</FieldLabel>
-                <OptionSelect
-                  id="agent-project-role"
-                  value={projectRole}
-                  options={projectRoleOptions}
-                  onValueChange={setProjectRole}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="agent-project-effect">{t("permissions.effect")}</FieldLabel>
-                <OptionSelect
-                  id="agent-project-effect"
-                  value={projectEffect}
-                  options={[
-                    { value: "allow", label: t("permissions.allow") },
-                    { value: "deny", label: t("permissions.deny") },
-                  ]}
-                  onValueChange={setProjectEffect}
-                />
-              </Field>
-            </FieldGroup>
-          </FieldSet>
+          <AgentDialogTarget agent={selectedAgent} />
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="agent-project">{t("workspace.project")}</FieldLabel>
+              <SearchSelect
+                id="agent-project"
+                value={projectId}
+                options={projectOptions}
+                placeholder={t("workspace.chooseProject")}
+                emptyText={t("workspace.noProjectsTitle")}
+                onValueChange={setProjectId}
+              />
+              <FieldDescription>{t("agents.projectHelp")}</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="agent-project-role">{t("permissions.role")}</FieldLabel>
+              <OptionSelect
+                id="agent-project-role"
+                value={projectRole}
+                options={projectRoleOptions}
+                onValueChange={setProjectRole}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="agent-project-effect">{t("permissions.effect")}</FieldLabel>
+              <OptionSelect
+                id="agent-project-effect"
+                value={projectEffect}
+                options={[
+                  { value: "allow", label: t("permissions.allow") },
+                  { value: "deny", label: t("permissions.deny") },
+                ]}
+                onValueChange={setProjectEffect}
+              />
+            </Field>
+          </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={closeAgentPermissionDialog}>
               {t("admin.cancel")}

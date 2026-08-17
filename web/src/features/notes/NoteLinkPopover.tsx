@@ -91,7 +91,6 @@ export function NoteLinkPopover({ editor, editable }: { editor: Editor | null; e
               type="button"
               variant={active ? "secondary" : "ghost"}
               size="icon-sm"
-              className="size-11 sm:size-8"
               aria-label={t("notes.link")}
               aria-pressed={active}
               disabled={!editable}

@@ -239,18 +239,15 @@ export function AdminAccessDenied({
     ? t("admin.operatorAccessDeniedDescription")
     : t("admin.accessDeniedDescription");
   return (
-    <section className="flex flex-col gap-4">
-      <PageHeader title={t("admin.accessDeniedTitle")} />
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <ShieldCheck />
-          </EmptyMedia>
-          <EmptyTitle>{t("admin.accessDeniedTitle")}</EmptyTitle>
-          <EmptyDescription>{description}</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    </section>
+    <Empty className="border">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <ShieldCheck />
+        </EmptyMedia>
+        <EmptyTitle role="heading" aria-level={1}>{t("admin.accessDeniedTitle")}</EmptyTitle>
+        <EmptyDescription>{description}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }
 

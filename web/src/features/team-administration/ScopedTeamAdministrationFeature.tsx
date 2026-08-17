@@ -408,7 +408,7 @@ export function ScopedTeamAdministrationFeature({
   if (!detail) {
     return (
       <section className="flex flex-col gap-5">
-        <PageHeader title={t("teams.scopedTitle")} description={t("teams.scopedDescription")} />
+        <PageHeader title={t("teams.scopedTitle")} />
         {teams.length === 0 ? (
           <Empty>
             <EmptyHeader>
@@ -517,7 +517,6 @@ export function ScopedTeamAdministrationFeature({
           <>
             <Button
               size="sm"
-              className="min-h-11 md:min-h-8"
               onClick={() => void openAddMemberDialog()}
             >
               <UserRoundPlus data-icon="inline-start" />
@@ -526,7 +525,6 @@ export function ScopedTeamAdministrationFeature({
             <Button
               variant="outline"
               size="sm"
-              className="min-h-11 md:min-h-8"
               onClick={openInviteDialog}
             >
               <MailPlus data-icon="inline-start" />
@@ -776,8 +774,7 @@ export function ScopedTeamAdministrationFeature({
                   />
                   <Button
                     variant="outline"
-                    size="icon"
-                    className="size-11 md:size-8"
+                    size="icon-sm"
                     aria-label={t("admin.copyInvite")}
                     onClick={() => {
                       void navigator.clipboard.writeText(inviteUrl);

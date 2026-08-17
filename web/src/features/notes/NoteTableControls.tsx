@@ -112,7 +112,7 @@ export function NoteTableControls({ editor, editable }: { editor: Editor; editab
                     type="button"
                     variant="secondary"
                     size="icon-sm"
-                    className="size-11 shadow-sm sm:size-8"
+                    className="shadow-sm"
                     aria-label={t("notes.tableActions")}
                     aria-haspopup="menu"
                     aria-expanded={actionsOpen}

@@ -553,7 +553,6 @@ export function TeamAdministrationFeature({
           <Button
             type="button"
             size="sm"
-            className="min-h-11 md:min-h-8"
             onClick={() => void openAddMembersDialog()}
           >
             <UserRoundPlus data-icon="inline-start" />
@@ -711,7 +710,6 @@ export function TeamAdministrationFeature({
                   <Button
                     variant="outline"
                     size="sm"
-                    className="min-h-11 md:min-h-8"
                     onClick={() => openTeamProfileEditor(selectedTeam)}
                   >
                     <Pencil data-icon="inline-start" />
@@ -755,7 +753,7 @@ export function TeamAdministrationFeature({
         <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <PageHeader title={t("teams.title")} />
-        <Button size="sm" className="min-h-11 md:min-h-8" onClick={openCreateTeamDialog}>
+        <Button onClick={openCreateTeamDialog}>
           <Plus data-icon="inline-start" />
           {t("teams.createTeam")}
         </Button>
@@ -875,31 +873,28 @@ export function TeamAdministrationFeature({
               {t("teams.treeDescription")}
             </DialogDescription>
           </DialogHeader>
-          <FieldSet>
-            <FieldLegend>{t("teams.teamProfile")}</FieldLegend>
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="team-name">{t("teams.teamName")}</FieldLabel>
-                <Input
-                  id="team-name"
-                  value={teamName}
-                  onChange={(event) => setTeamName(event.target.value)}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="parent-team">{t("teams.parentTeam")}</FieldLabel>
-                <SearchSelect
-                  id="parent-team"
-                  value={parentTeamId || NO_PARENT}
-                  options={parentTeamOptions}
-                  placeholder={t("teams.parentTeam")}
-                  emptyText={t("teams.emptyTitle")}
-                  onValueChange={(value) => setParentTeamId(value === NO_PARENT ? "" : value)}
-                />
-                <FieldDescription>{t("teams.depthHelp")}</FieldDescription>
-              </Field>
-            </FieldGroup>
-          </FieldSet>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="team-name">{t("teams.teamName")}</FieldLabel>
+              <Input
+                id="team-name"
+                value={teamName}
+                onChange={(event) => setTeamName(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="parent-team">{t("teams.parentTeam")}</FieldLabel>
+              <SearchSelect
+                id="parent-team"
+                value={parentTeamId || NO_PARENT}
+                options={parentTeamOptions}
+                placeholder={t("teams.parentTeam")}
+                emptyText={t("teams.emptyTitle")}
+                onValueChange={(value) => setParentTeamId(value === NO_PARENT ? "" : value)}
+              />
+              <FieldDescription>{t("teams.depthHelp")}</FieldDescription>
+            </Field>
+          </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={closeCreateTeamDialog}>
               {t("admin.cancel")}

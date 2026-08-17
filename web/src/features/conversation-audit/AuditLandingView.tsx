@@ -15,7 +15,7 @@ export function AuditLandingView({
   const { t } = useTranslation();
   return (
     <section className="flex flex-col gap-5">
-      <PageHeader title={t("audit.title")} description={t("audit.description")} />
+      <PageHeader title={t("audit.title")} />
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
