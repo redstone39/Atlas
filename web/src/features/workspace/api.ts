@@ -19,6 +19,8 @@ import type {
   WorkspaceTurnProjectionDto,
   WorkspaceTagScopeResult,
   ReasoningMode,
+  TurnFeedbackUpdateRequest,
+  TurnFeedbackUpdateResponse,
 } from "./types";
 
 export type DeclaredEvidencePreview =
@@ -91,6 +93,19 @@ export const workspaceApi = {
     {
       method: "POST",
       body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    },
+  ),
+  updateTurnFeedback: (
+    conversationId: string,
+    turnId: string,
+    payload: TurnFeedbackUpdateRequest,
+    signal?: AbortSignal,
+  ) => requestJson<TurnFeedbackUpdateResponse>(
+    `/api/v1/workspace/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/feedback`,
+    {
+      method: "PUT",
+      signal,
+      body: JSON.stringify(payload),
     },
   ),
   readCitation: (
@@ -363,6 +378,7 @@ function userTurn(turn: WorkspaceTurnProjectionDto, conversationId: string): Con
     runtime_trace_id: turn.execution_id,
     audit_event_ref: null,
     created_at: turn.created_at,
+    feedback: null,
   };
 }
 
@@ -425,6 +441,7 @@ function assistantTurn(turn: WorkspaceTurnProjectionDto, conversationId: string)
     audit_event_ref: null,
     runtime_trace_id: turn.execution_id,
     created_at: turn.created_at,
+    feedback: turn.feedback,
   };
 }
 

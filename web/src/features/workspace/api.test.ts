@@ -83,6 +83,11 @@ const projection: WorkspaceTurnProjectionDto = {
     protected_open_ref: "declared-evidence-open-a",
   }],
   failure_code: null,
+  feedback: {
+    feedback: "helpful",
+    revision: 1,
+    updated_at: "2026-07-20T00:00:03+00:00",
+  },
   created_at: "2026-07-20T00:00:01+00:00",
 };
 
@@ -367,6 +372,8 @@ describe("workspace execution API contract", () => {
       evidence_review_status: status,
       validation_state: "completed",
     });
+    expect(mapped.turns[0].feedback).toBeNull();
+    expect(answer.feedback).toEqual(projection.feedback);
   });
 
   it("keeps complete ordered text without promoting soft claims into verified segments", () => {
@@ -503,6 +510,41 @@ describe("workspace execution API contract", () => {
     expect(created).not.toHaveProperty("tag_refs");
     expect(created.turns.map((turn) => turn.role)).toEqual(["user", "assistant"]);
     expect(loaded.turns[1].source_turn_id).toBe("turn-a");
+  });
+
+  it("updates turn feedback through the nested Workspace route", async () => {
+    const updated = {
+      feedback: "not_helpful" as const,
+      revision: 2,
+      updated_at: "2026-07-20T00:00:04+00:00",
+    };
+    const fetchMock = vi.fn().mockResolvedValueOnce(response(updated));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await expect(workspaceApi.updateTurnFeedback(
+      "conv a",
+      "turn/a",
+      {
+        feedback: "not_helpful",
+        expected_revision: 1,
+        idempotency_key: "feedback-key",
+      },
+      controller.signal,
+    )).resolves.toEqual(updated);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/workspace/conversations/conv%20a/turns/turn%2Fa/feedback",
+      expect.objectContaining({
+        credentials: "include",
+        method: "PUT",
+        signal: controller.signal,
+        body: JSON.stringify({
+          feedback: "not_helpful",
+          expected_revision: 1,
+          idempotency_key: "feedback-key",
+        }),
+      }),
+    );
   });
 
   it("archives a conversation through the explicit retained-data action", async () => {

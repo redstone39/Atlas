@@ -1,3 +1,4 @@
+import { ThumbsDown, ThumbsUp } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "../../components/ui/badge";
@@ -18,6 +19,10 @@ import {
 } from "../../components/ui/message-scroller";
 import { Spinner } from "../../components/ui/spinner";
 import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "../../components/ui/toggle-group";
+import {
   StatusBadge,
   conversationTurnStatusPresentation,
   serverMessage,
@@ -32,6 +37,7 @@ import type {
   ConversationTurn,
   ReasoningProgress,
   ResponseSegment,
+  TurnFeedbackValue,
 } from "./types";
 import {
   answerMarkdownText,
@@ -45,6 +51,8 @@ export function ConversationThread({
   locale,
   onOpenDeclaredEvidence,
   onRetry,
+  onFeedbackChange,
+  pendingFeedbackTurnIds,
   runtimeProgress,
   liveReasoningTimeline,
   streamingSegments,
@@ -54,6 +62,11 @@ export function ConversationThread({
   locale: string;
   onOpenDeclaredEvidence: (turnId: string, protectedOpenRef: string) => void;
   onRetry: (turn: ConversationTurn) => void;
+  onFeedbackChange: (
+    turn: ConversationTurn,
+    feedback: TurnFeedbackValue,
+  ) => void;
+  pendingFeedbackTurnIds: ReadonlySet<string>;
   runtimeProgress: string;
   liveReasoningTimeline: ReasoningProgress[];
   streamingSegments: ResponseSegment[];
@@ -132,6 +145,44 @@ export function ConversationThread({
                         </BubbleContent>
                       </Bubble>
                     </MessageGroup>
+                    {turn.role === "assistant" &&
+                      turn.execution_status === "completed" &&
+                      answerMarkdownText(turn).trim().length > 0 && (
+                        <div className="flex flex-col gap-2 px-3">
+                          <p className="text-sm font-medium">
+                            {t("workspace.feedbackPrompt")}
+                          </p>
+                          <ToggleGroup
+                            type="single"
+                            variant="outline"
+                            size="sm"
+                            value={turn.feedback?.feedback ?? ""}
+                            aria-label={t("workspace.feedbackPrompt")}
+                            onValueChange={(value) => {
+                              if (value === "helpful" || value === "not_helpful") {
+                                onFeedbackChange(turn, value);
+                              }
+                            }}
+                          >
+                            <ToggleGroupItem
+                              value="helpful"
+                              disabled={pendingFeedbackTurnIds.has(turn.turn_id)}
+                              aria-label={t("workspace.feedbackHelpful")}
+                            >
+                              <ThumbsUp data-icon="inline-start" />
+                              {t("workspace.feedbackHelpful")}
+                            </ToggleGroupItem>
+                            <ToggleGroupItem
+                              value="not_helpful"
+                              disabled={pendingFeedbackTurnIds.has(turn.turn_id)}
+                              aria-label={t("workspace.feedbackNotHelpful")}
+                            >
+                              <ThumbsDown data-icon="inline-start" />
+                              {t("workspace.feedbackNotHelpful")}
+                            </ToggleGroupItem>
+                          </ToggleGroup>
+                        </div>
+                      )}
                     {turn.role === "assistant" && (
                       turn.execution_status !== "completed" || turn.response_segments.length === 0
                     ) && (

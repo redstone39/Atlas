@@ -44,6 +44,7 @@ import {
   MessageSources,
   sliceCodePoints,
 } from "../features/workspace/WorkspaceFeature";
+import { ConversationThread } from "../features/workspace/WorkspaceConversationViews";
 
 beforeEach(() => {
   sessionQueryClient.resetSession();
@@ -604,6 +605,246 @@ it("/workspace keeps default-all create available when scope options fail", asyn
     expect(JSON.parse(String(createConversationCall![1]!.body)).tag_refs)
       .toEqual([]);
   });
+
+it("offers feedback only for completed nonblank assistant answers", () => {
+  const assistant = conversationDetail.turns[1]!;
+  render(
+    <ConversationThread
+      turns={[
+        assistant,
+        {
+          ...assistant,
+          turn_id: "turn-processing",
+          execution_status: "processing",
+        },
+        {
+          ...assistant,
+          turn_id: "turn-failed",
+          execution_status: "failed_closed",
+        },
+        {
+          ...assistant,
+          turn_id: "turn-blank",
+          answer_text: "   ",
+          response_segments: [{
+            ...assistant.response_segments[0]!,
+            text: "   ",
+          }],
+        },
+      ]}
+      loading={false}
+      locale="en"
+      onOpenDeclaredEvidence={vi.fn()}
+      onRetry={vi.fn()}
+      onFeedbackChange={vi.fn()}
+      pendingFeedbackTurnIds={new Set()}
+      runtimeProgress=""
+      liveReasoningTimeline={[]}
+      streamingSegments={[]}
+    />,
+  );
+
+  expect(screen.getAllByText("Did this answer solve your problem?")).toHaveLength(1);
+  expect(screen.getAllByRole("radio", { name: "Helpful" })).toHaveLength(1);
+  expect(screen.getAllByRole("radio", { name: "Not helpful" })).toHaveLength(1);
+});
+
+it("confirms feedback on the server, switches revisions, and reloads the projection", async () => {
+  window.history.pushState(
+    {},
+    "",
+    "/workspace/conversations/conv-supported-001",
+  );
+  mockApi(memberSession, readyReadiness);
+  const normalFetch = global.fetch;
+  const feedbackBodies: Array<Record<string, unknown>> = [];
+  let currentFeedback = answeredTurn.feedback;
+  let resolveFirstFeedback: (() => void) | null = null;
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    const method = init?.method ?? "GET";
+    if (
+      url.pathname === "/api/v1/workspace/conversations/conv-supported-001" &&
+      method === "GET"
+    ) {
+      return jsonResponse(workspaceDetailDto({ ...answeredTurn, feedback: currentFeedback }));
+    }
+    if (
+      url.pathname ===
+        "/api/v1/workspace/conversations/conv-supported-001/turns/turn-answer-001/feedback" &&
+      method === "PUT"
+    ) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      feedbackBodies.push(body);
+      const nextFeedback = {
+        feedback: body.feedback,
+        revision: (currentFeedback?.revision ?? 0) + 1,
+        updated_at: "2026-07-20T00:00:04+00:00",
+      };
+      if (feedbackBodies.length === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirstFeedback = () => {
+            currentFeedback = nextFeedback;
+            resolve(jsonResponse(nextFeedback));
+          };
+        });
+      }
+      currentFeedback = nextFeedback;
+      return jsonResponse(nextFeedback);
+    }
+    return normalFetch(input, init);
+  });
+
+  const firstRender = render(<App />);
+  const helpful = await screen.findByRole("radio", { name: "Helpful" });
+  const notHelpful = screen.getByRole("radio", { name: "Not helpful" });
+  expect(helpful).toHaveAttribute("aria-checked", "false");
+
+  fireEvent.click(helpful);
+  await waitFor(() => expect(resolveFirstFeedback).not.toBeNull());
+  expect(helpful).toHaveAttribute("aria-checked", "false");
+  expect(helpful).toBeDisabled();
+  expect(notHelpful).toBeDisabled();
+
+  act(() => resolveFirstFeedback?.());
+  await waitFor(() => expect(helpful).toHaveAttribute("aria-checked", "true"));
+  expect(feedbackBodies[0]).toMatchObject({
+    feedback: "helpful",
+    expected_revision: 0,
+  });
+
+  fireEvent.click(helpful);
+  expect(feedbackBodies).toHaveLength(1);
+
+  fireEvent.click(notHelpful);
+  await waitFor(() => expect(notHelpful).toHaveAttribute("aria-checked", "true"));
+  expect(feedbackBodies[1]).toMatchObject({
+    feedback: "not_helpful",
+    expected_revision: 1,
+  });
+
+  firstRender.unmount();
+  render(<App />);
+  expect(await screen.findByRole("radio", { name: "Not helpful" }))
+    .toHaveAttribute("aria-checked", "true");
+});
+
+it("aborts pending feedback before a conversation route change can receive it", async () => {
+  window.history.pushState(
+    {},
+    "",
+    "/workspace/conversations/conv-supported-001",
+  );
+  mockApi(memberSession, readyReadiness);
+  const normalFetch = global.fetch;
+  let feedbackSignal: AbortSignal | undefined;
+  let resolveFeedback: (() => void) | null = null;
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    if (
+      url.pathname.endsWith("/turn-answer-001/feedback") &&
+      (init?.method ?? "GET") === "PUT"
+    ) {
+      feedbackSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => {
+        resolveFeedback = () => resolve(jsonResponse({
+          feedback: "helpful",
+          revision: 1,
+          updated_at: "2026-07-20T00:00:04+00:00",
+        }));
+      });
+    }
+    return normalFetch(input, init);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("radio", { name: "Helpful" }));
+  await waitFor(() => expect(feedbackSignal).toBeDefined());
+  fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+
+  await waitFor(() => expect(window.location.pathname).toBe("/workspace"));
+  expect(feedbackSignal?.aborted).toBe(true);
+  act(() => resolveFeedback?.());
+  expect(screen.queryByText("Did this answer solve your problem?"))
+    .not.toBeInTheDocument();
+});
+
+it("reloads canonical feedback after a revision conflict", async () => {
+  window.history.pushState(
+    {},
+    "",
+    "/workspace/conversations/conv-supported-001",
+  );
+  mockApi(memberSession, readyReadiness);
+  const normalFetch = global.fetch;
+  let detailReads = 0;
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    const method = init?.method ?? "GET";
+    if (
+      url.pathname === "/api/v1/workspace/conversations/conv-supported-001" &&
+      method === "GET"
+    ) {
+      detailReads += 1;
+      const feedback = detailReads === 1
+        ? null
+        : {
+            feedback: "helpful" as const,
+            revision: 2,
+            updated_at: "2026-07-20T00:00:05+00:00",
+          };
+      return jsonResponse(workspaceDetailDto({ ...answeredTurn, feedback }));
+    }
+    if (url.pathname.endsWith("/turn-answer-001/feedback") && method === "PUT") {
+      return jsonResponse({
+        message_code: "conversation.feedback_revision_changed_before_update",
+        message_params: {},
+      }, 409);
+    }
+    return normalFetch(input, init);
+  });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("radio", { name: "Not helpful" }));
+
+  await waitFor(() => expect(detailReads).toBe(2));
+  expect(await screen.findByRole("radio", { name: "Helpful" }))
+    .toHaveAttribute("aria-checked", "true");
+  expect(screen.getByText(
+    "Feedback changed elsewhere. The latest response was reloaded.",
+  )).toBeInTheDocument();
+});
+
+it("keeps feedback unchanged and localizes typed save failures", async () => {
+  window.history.pushState(
+    {},
+    "",
+    "/workspace/conversations/conv-supported-001",
+  );
+  mockApi(memberSession, readyReadiness);
+  const normalFetch = global.fetch;
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    if (
+      url.pathname.endsWith("/turn-answer-001/feedback") &&
+      (init?.method ?? "GET") === "PUT"
+    ) {
+      return jsonResponse({
+        message_code: "conversation.feedback_history_is_invalid",
+        message_params: {},
+      }, 503);
+    }
+    return normalFetch(input, init);
+  });
+
+  render(<App />);
+  const helpful = await screen.findByRole("radio", { name: "Helpful" });
+  fireEvent.click(helpful);
+
+  expect(await screen.findByText("Feedback is temporarily unavailable."))
+    .toBeInTheDocument();
+  expect(helpful).toHaveAttribute("aria-checked", "false");
+});
 
 it("loads a canonical Workspace conversation route directly", async () => {
     window.history.pushState(

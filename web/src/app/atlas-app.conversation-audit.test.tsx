@@ -38,6 +38,20 @@ beforeEach(() => {
 });
 afterEach(cleanupAppTest);
 
+function respondWithAdminConversationDetail(payload: unknown) {
+  const defaultFetch = global.fetch;
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input), "http://localhost");
+    if (
+      url.pathname === "/api/v1/admin/conversations/conv-supported-001" &&
+      (init?.method ?? "GET") === "GET"
+    ) {
+      return jsonResponse(payload);
+    }
+    return defaultFetch(input, init);
+  });
+}
+
 describe("Atlas production web: conversation-audit", () => {
 it("/admin/audit shows safe agent management events without raw token values", async () => {
     window.history.pushState({}, "", "/admin/audit/events");
@@ -329,6 +343,104 @@ it("/admin/audit does not duplicate operation reads under StrictMode", async () 
         ([input]) => String(input) === "/api/v1/admin/audit/events",
       ),
     ).toHaveLength(1);
+  });
+
+it("/admin/audit presents current helpful feedback as read-only metadata", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const detail = adminDetailDto();
+    respondWithAdminConversationDetail({
+      ...detail,
+      turns: detail.turns.map((turn) => ({
+        ...turn,
+        feedback: {
+          feedback: "helpful",
+          revision: 2,
+          updated_at: "2026-07-10T11:30:00+00:00",
+        },
+      })),
+    });
+    const { container } = render(<App />);
+
+    const helpful = await screen.findByText("Helpful");
+    expect(helpful).toHaveAttribute("data-slot", "badge");
+    const feedback = helpful.closest('[data-slot="turn-feedback"]');
+    expect(feedback).toHaveTextContent("Answer feedback");
+    expect(feedback).toHaveTextContent("Last modified:");
+    expect(
+      feedback?.querySelector('time[datetime="2026-07-10T11:30:00+00:00"]'),
+    ).toBeInTheDocument();
+    expect(within(feedback as HTMLElement).queryByText(/revision/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Helpful" })).not.toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        new URL(String(input), "http://localhost").pathname.endsWith("/feedback"),
+      ),
+    ).toBe(false);
+    expect(container.querySelector('[data-slot="toggle-group"]')).not.toBeInTheDocument();
+  });
+
+it("/admin/audit presents current not-helpful feedback for an archived conversation", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const detail = adminDetailDto();
+    respondWithAdminConversationDetail({
+      ...detail,
+      conversation: {
+        ...detail.conversation,
+        status: "archived",
+      },
+      turns: detail.turns.map((turn) => ({
+        ...turn,
+        feedback: {
+          feedback: "not_helpful",
+          revision: 1,
+          updated_at: "2026-07-11T09:15:00+00:00",
+        },
+      })),
+    });
+    render(<App />);
+
+    expect(await screen.findByText("Archived")).toBeInTheDocument();
+    const notHelpful = screen.getByText("Not helpful");
+    expect(notHelpful).toHaveAttribute("data-slot", "badge");
+    const feedback = notHelpful.closest('[data-slot="turn-feedback"]');
+    expect(
+      feedback?.querySelector('time[datetime="2026-07-11T09:15:00+00:00"]'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Not helpful" })).not.toBeInTheDocument();
+  });
+
+it("/admin/audit explicitly presents turns without feedback", async () => {
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const detail = adminDetailDto();
+    respondWithAdminConversationDetail({
+      ...detail,
+      turns: detail.turns.map((turn) => ({
+        ...turn,
+        feedback: null,
+      })),
+    });
+    render(<App />);
+
+    const emptyFeedback = await screen.findByText("No feedback provided");
+    const feedback = emptyFeedback.closest('[data-slot="turn-feedback"]');
+    expect(feedback).toHaveTextContent("Answer feedback");
+    expect(feedback?.querySelector('[data-slot="badge"]')).not.toBeInTheDocument();
+    expect(feedback?.querySelector("time")).not.toBeInTheDocument();
   });
 
 it("/admin/audit shows global conversation history with a bounded runtime trace", async () => {

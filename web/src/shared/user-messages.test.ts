@@ -22,6 +22,20 @@ describe("localized user-message contract", () => {
     );
   });
 
+  it("localizes typed turn feedback failures", async () => {
+    const enT = await translator("en");
+    const zhT = await translator("zh-TW");
+
+    expect(localizeMessage({
+      message_code: "conversation.feedback_is_not_available",
+      message_params: {},
+    }, enT)).toBe("Feedback is not available for this response.");
+    expect(localizeMessage({
+      message_code: "conversation.feedback_revision_changed_before_update",
+      message_params: {},
+    }, zhT)).toBe("反饋在儲存前已變更，請重新整理後再試。");
+  });
+
   it("fails closed to localized generic copy for prose, unknown codes, or invalid params", async () => {
     const t = await translator("en");
     const unsafeValues = [

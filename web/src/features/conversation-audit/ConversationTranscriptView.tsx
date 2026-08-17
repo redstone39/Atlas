@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Bubble, BubbleContent } from "../../components/ui/bubble";
 import { Message, MessageContent, MessageHeader } from "../../components/ui/message";
@@ -25,6 +26,7 @@ import {
 import {
   assistantAttemptPosition,
   AuditTraceValue,
+  formatDateTime,
 } from "./AuditPresentationUtils";
 
 export function ConversationTranscriptView({
@@ -47,7 +49,8 @@ export function ConversationTranscriptView({
     protectedOpenRef: string,
   ) => Promise<void>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language;
   return (
 <div className="min-w-0">
                   {conversationLoading ? (
@@ -195,6 +198,48 @@ export function ConversationTranscriptView({
                                       <span>
                                         {turn.input_text ?? serverMessage(turn.user_reason, t)}
                                       </span>
+                                    )}
+                                    {turn.role === "assistant" && (
+                                      <div
+                                        data-slot="turn-feedback"
+                                        className="flex flex-col items-start gap-2"
+                                      >
+                                        <div className="text-sm font-medium">
+                                          {t("audit.turnFeedback")}
+                                        </div>
+                                        {turn.feedback ? (
+                                          <>
+                                            <Badge
+                                              variant={
+                                                turn.feedback.feedback === "helpful"
+                                                  ? "secondary"
+                                                  : "outline"
+                                              }
+                                            >
+                                              {t(
+                                                turn.feedback.feedback === "helpful"
+                                                  ? "audit.feedbackHelpful"
+                                                  : "audit.feedbackNotHelpful",
+                                              )}
+                                            </Badge>
+                                            <time
+                                              className="text-xs text-muted-foreground"
+                                              dateTime={turn.feedback.updated_at}
+                                            >
+                                              {t("audit.feedbackUpdatedAt", {
+                                                time: formatDateTime(
+                                                  turn.feedback.updated_at,
+                                                  locale,
+                                                ),
+                                              })}
+                                            </time>
+                                          </>
+                                        ) : (
+                                          <span className="text-sm text-muted-foreground">
+                                            {t("audit.feedbackNotProvided")}
+                                          </span>
+                                        )}
+                                      </div>
                                     )}
                                     {turn.role === "assistant" && turn.evidence_review_status && (
                                       <div className="flex flex-wrap items-center gap-2">

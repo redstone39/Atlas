@@ -73,6 +73,7 @@ import type {
   ReasoningProgress,
   RuntimeStreamEvent,
   WorkspaceFeatureProps,
+  TurnFeedbackValue,
 } from "./types";
 
 type TurnContext = {
@@ -128,6 +129,8 @@ export function WorkspaceFeature({
   const [conversationReloadKey, setConversationReloadKey] = useState(0);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationLoadError, setConversationLoadError] = useState("");
+  const [pendingFeedbackTurnIds, setPendingFeedbackTurnIds] =
+    useState<Set<string>>(() => new Set());
   const [reconnectingExecutionId, setReconnectingExecutionId] =
     useState<string | null>(null);
   const [runtimeProgress, setRuntimeProgress] = useState("");
@@ -162,6 +165,7 @@ export function WorkspaceFeature({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const conversationRequestRef = useRef<AbortController | null>(null);
   const liveTurnRequestRef = useRef<AbortController | null>(null);
+  const feedbackRequestRefs = useRef<Map<string, AbortController>>(new Map());
   const currentConversationIdRef = useRef(conversationId);
   currentConversationIdRef.current = conversationId;
   const newConversationScopeVisible =
@@ -275,12 +279,22 @@ export function WorkspaceFeature({
   useEffect(() => () => {
     conversationRequestRef.current?.abort();
     liveTurnRequestRef.current?.abort();
+    abortFeedbackRequests();
     if (compositionEndTimerRef.current !== null) {
       window.clearTimeout(compositionEndTimerRef.current);
     }
   }, []);
 
+  function abortFeedbackRequests() {
+    for (const controller of feedbackRequestRefs.current.values()) {
+      controller.abort();
+    }
+    feedbackRequestRefs.current.clear();
+    setPendingFeedbackTurnIds(new Set());
+  }
+
   async function selectConversation(conversationId: string) {
+    abortFeedbackRequests();
     cancelLiveTurnRequest();
     conversationRequestRef.current?.abort();
     const controller = new AbortController();
@@ -330,6 +344,76 @@ export function WorkspaceFeature({
         pending.execution_id,
         controller,
       );
+    }
+  }
+
+  async function updateTurnFeedback(
+    turn: ConversationTurn,
+    feedback: TurnFeedbackValue,
+  ) {
+    if (
+      turn.role !== "assistant" ||
+      turn.feedback?.feedback === feedback ||
+      feedbackRequestRefs.current.has(turn.turn_id)
+    ) return;
+    const selectedConversationId = turn.conversation_id;
+    if (currentConversationIdRef.current !== selectedConversationId) return;
+
+    const controller = new AbortController();
+    feedbackRequestRefs.current.set(turn.turn_id, controller);
+    setPendingFeedbackTurnIds((current) => new Set(current).add(turn.turn_id));
+    try {
+      const result = await workspaceApi.updateTurnFeedback(
+        selectedConversationId,
+        turn.turn_id,
+        {
+          feedback,
+          expected_revision: turn.feedback?.revision ?? 0,
+          idempotency_key: createIdempotencyKey(),
+        },
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted ||
+        currentConversationIdRef.current !== selectedConversationId
+      ) return;
+      setTurns((current) => current.map((item) =>
+        item.role === "assistant" && item.turn_id === turn.turn_id
+          ? { ...item, feedback: result }
+          : item,
+      ));
+      setActiveConversation((current) =>
+        current?.conversation_id === selectedConversationId
+          ? {
+              ...current,
+              turns: current.turns.map((item) =>
+                item.role === "assistant" && item.turn_id === turn.turn_id
+                  ? { ...item, feedback: result }
+                  : item),
+            }
+          : current);
+      toast.success(t("workspace.feedbackSaved"));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof ApiError && error.status === 409) {
+        toast.error(t("workspace.feedbackConflictReload"));
+        await selectConversation(selectedConversationId);
+        return;
+      }
+      toast.error(
+        error instanceof ApiError
+          ? serverMessage(error, t)
+          : t("workspace.feedbackSaveFailed"),
+      );
+    } finally {
+      if (feedbackRequestRefs.current.get(turn.turn_id) === controller) {
+        feedbackRequestRefs.current.delete(turn.turn_id);
+        setPendingFeedbackTurnIds((current) => {
+          const next = new Set(current);
+          next.delete(turn.turn_id);
+          return next;
+        });
+      }
     }
   }
 
@@ -454,6 +538,7 @@ export function WorkspaceFeature({
 
   function startNewConversation(clearScopeSelection = true) {
     cancelLiveTurnRequest();
+    abortFeedbackRequests();
     conversationRequestRef.current?.abort();
     conversationRequestRef.current = null;
     setActiveConversation(null);
@@ -630,6 +715,7 @@ export function WorkspaceFeature({
         runtime_trace_id: null,
         audit_event_ref: null,
         created_at: new Date().toISOString(),
+        feedback: null,
       };
       if (!existingKey) setTurns((current) => [...current, userTurn]);
       setQuery("");
@@ -968,6 +1054,8 @@ export function WorkspaceFeature({
                 locale={i18n.language}
                 onOpenDeclaredEvidence={openDeclaredEvidence}
                 onRetry={retryFailedTurn}
+                onFeedbackChange={updateTurnFeedback}
+                pendingFeedbackTurnIds={pendingFeedbackTurnIds}
                 runtimeProgress={runtimeProgress}
                 liveReasoningTimeline={liveReasoningTimeline}
                 streamingSegments={streamingSegments}

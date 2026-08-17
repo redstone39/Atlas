@@ -91,6 +91,7 @@ export const answeredTurn: ConversationTurnResult = {
   audit_event_ref: "audit-conversation-answer",
   runtime_trace_id: "trace-answer-001",
   created_at: "2026-07-09T00:00:01+00:00",
+  feedback: null,
 };
 
 export const unknownTurn: ConversationTurnResult = {
@@ -167,6 +168,7 @@ export const conversationDetail: ConversationDetail = {
       runtime_trace_id: null,
       audit_event_ref: null,
       created_at: "2026-07-09T00:00:00+00:00",
+      feedback: null,
     },
     {
       ...answeredTurn,
@@ -229,6 +231,7 @@ export function workspaceProjectionDto(
     })),
     model_claimed_evidence: turn.model_claimed_evidence,
     failure_code: terminalFailed ? turn.refusal_code : null,
+    feedback: turn.feedback,
     created_at: turn.created_at,
   };
 }
@@ -531,6 +534,7 @@ export function runtimeEventStream(executionId: string, state: "terminal_complet
 }
 
 export function createWorkspaceHandler(): MockApiHandler {
+  let feedback = answeredTurn.feedback;
   const workspaceExecutions = new Map<string, ConversationTurnResult>();
   return ({ url, method, init }) => {
     if (url.pathname === "/api/v1/workspace/conversations" && method === "GET") {
@@ -551,7 +555,20 @@ export function createWorkspaceHandler(): MockApiHandler {
     }
     if (url.pathname === "/api/v1/workspace/conversations/conv-supported-001" && method === "GET") {
       const latest = [...workspaceExecutions.values()].at(-1) ?? answeredTurn;
-      return jsonResponse(workspaceDetailDto(latest));
+      return jsonResponse(workspaceDetailDto({ ...latest, feedback }));
+    }
+    if (
+      url.pathname ===
+        "/api/v1/workspace/conversations/conv-supported-001/turns/turn-answer-001/feedback" &&
+      method === "PUT"
+    ) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      feedback = {
+        feedback: body.feedback,
+        revision: (feedback?.revision ?? 0) + 1,
+        updated_at: "2026-07-20T00:00:04+00:00",
+      };
+      return jsonResponse(feedback);
     }
     if (
       url.pathname === "/api/v1/workspace/conversations/conv-supported-001/turns" &&

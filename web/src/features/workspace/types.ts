@@ -78,6 +78,22 @@ export interface ConversationArchiveResultDto {
   audit_event_ref: string;
 }
 
+export type TurnFeedbackValue = "helpful" | "not_helpful";
+
+export interface TurnFeedbackRevision {
+  feedback: TurnFeedbackValue;
+  revision: number;
+  updated_at: string;
+}
+
+export interface TurnFeedbackUpdateRequest {
+  feedback: TurnFeedbackValue;
+  expected_revision: number;
+  idempotency_key: string;
+}
+
+export type TurnFeedbackUpdateResponse = TurnFeedbackRevision;
+
 export interface ConversationTurn {
   turn_id: string;
   conversation_id: string;
@@ -109,6 +125,7 @@ export interface ConversationTurn {
   runtime_trace_id: string | null;
   audit_event_ref: string | null;
   created_at: string;
+  feedback: TurnFeedbackRevision | null;
 }
 
 export interface ConversationDetail {
@@ -153,6 +170,7 @@ export interface ConversationTurnResult {
   audit_event_ref: string | null;
   runtime_trace_id: string | null;
   created_at: string;
+  feedback: TurnFeedbackRevision | null;
 }
 
 export type ExecutionState =
@@ -315,6 +333,7 @@ export interface WorkspaceTurnProjectionDto {
   model_claimed_evidence: ClaimedEvidenceTrace[];
   failure_code: string | null;
   created_at: string;
+  feedback: TurnFeedbackRevision | null;
 }
 
 export interface WorkspaceConversationDetailDto {
