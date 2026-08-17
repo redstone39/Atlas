@@ -61,6 +61,9 @@ from atlas_production.modules.conversation.public import (
     ReasoningMode,
     ResponseLanguage,
     TurnAcceptedV1,
+    TurnFeedbackError,
+    TurnFeedbackRevisionV1,
+    TurnFeedbackUpdateV1,
 )
 from atlas_production.modules.result_governance.public import (
     AssessmentReasonCodeV2,
@@ -352,6 +355,7 @@ class WorkspaceTurnProjectionV1(_StrictModel):
         default_factory=list, max_length=100
     )
     failure_code: str | None = None
+    feedback: TurnFeedbackRevisionV1 | None = None
     created_at: AwareDatetime
 
 
@@ -1148,6 +1152,79 @@ class WorkspaceTurnApplication:
             conversation=conversation,
             turns=self._detail_turns(actor_id, conversation_id),
         )
+    def update_turn_feedback(
+        self,
+        actor: object | None,
+        conversation_id: str,
+        turn_id: str,
+        command: TurnFeedbackUpdateV1,
+    ) -> TurnFeedbackRevisionV1:
+        actor_id = self._actor_id(actor)
+        self._owned_conversation(actor_id, conversation_id)
+        member = self._conversations.get_turn(turn_id)
+        if member is None or member.conversation_id != conversation_id:
+            raise WorkspaceTurnError(
+                "not_found", "conversation.was_not_found", 404
+            )
+        snapshot = self._runtime.snapshot(member.execution_id)
+        outcome = self._runtime.terminal_outcome(member.execution_id)
+        if (
+            snapshot.state != ExecutionState.TERMINAL_COMPLETED
+            or outcome is None
+            or outcome.outcome != "completed"
+            or not outcome.governed_answer_draft_ref
+        ):
+            raise WorkspaceTurnError(
+                "feedback_is_not_available",
+                "conversation.feedback_is_not_available",
+                409,
+            )
+        answer = self._results.read_v2(outcome.governed_answer_draft_ref)
+        if (
+            answer is None
+            or answer.execution_id != member.execution_id
+            or not any(segment.text.strip() for segment in answer.segments)
+        ):
+            raise WorkspaceTurnError(
+                "feedback_is_not_available",
+                "conversation.feedback_is_not_available",
+                409,
+            )
+        try:
+            return self._conversations.revise_turn_feedback(
+                actor_id=actor_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                command=command,
+            )
+        except TurnFeedbackError as error:
+            mapping = {
+                "not_found": (
+                    "not_found",
+                    "conversation.was_not_found",
+                    404,
+                ),
+                "revision_conflict": (
+                    "feedback_revision_conflict",
+                    "conversation.feedback_revision_changed_before_update",
+                    409,
+                ),
+                "idempotency_conflict": (
+                    "feedback_idempotency_conflict",
+                    "conversation.feedback_idempotency_key_was_reused",
+                    409,
+                ),
+                "history_invalid": (
+                    "feedback_history_invalid",
+                    "conversation.feedback_history_is_invalid",
+                    503,
+                ),
+            }
+            error_code, message_code, status_code = mapping[error.reason]
+            raise WorkspaceTurnError(
+                error_code, message_code, status_code
+            ) from error
+
 
     def read_citation(
         self,
@@ -1649,6 +1726,7 @@ class WorkspaceTurnApplication:
         assessment_input_digest = None
         assessment_output_digest = None
         failure_code = snapshot.terminal_failure_code
+        feedback = self._current_turn_feedback(member.turn_id)
         if outcome is not None and outcome.outcome == "completed":
             answer = self._results.read_v2(outcome.governed_answer_draft_ref)
             binding = self._citations.read_v2(outcome.citation_binding_draft_ref)
@@ -1718,9 +1796,22 @@ class WorkspaceTurnApplication:
             segments=segments,
             citations=citations,
             model_claimed_evidence=model_claimed_evidence,
+            feedback=feedback,
             failure_code=failure_code,
             created_at=member.created_at,
         )
+
+    def _current_turn_feedback(
+        self, turn_id: str
+    ) -> TurnFeedbackRevisionV1 | None:
+        try:
+            return self._conversations.current_turn_feedback(turn_id)
+        except TurnFeedbackError as error:
+            raise WorkspaceTurnError(
+                "feedback_history_invalid",
+                "conversation.feedback_history_is_invalid",
+                503,
+            ) from error
 
     def _reasoning_timeline(
         self, execution_id: str

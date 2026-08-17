@@ -10,6 +10,7 @@ from atlas_production.modules.conversation.public import (
     ConversationArchiveResultV1,
     ConversationV1,
     TurnAcceptedV1,
+    TurnFeedbackRevisionV1,
 )
 from atlas_production.modules.citation_preview.public import ProtectedCitationEvidenceV1
 from atlas_production.modules.identity_access.records import UserRecord
@@ -62,6 +63,21 @@ class _WorkspaceTurns:
 
     def get_conversation(self, _actor, _conversation_id):
         return WorkspaceConversationDetailV1(conversation=CONVERSATION, turns=[])
+    def update_turn_feedback(
+        self, actor, conversation_id, turn_id, command
+    ):
+        assert actor.actor_id == ACTOR.actor_id
+        assert conversation_id == CONVERSATION.conversation_id
+        assert turn_id == "turn-1"
+        assert command.feedback == "helpful"
+        assert command.expected_revision == 0
+        assert command.idempotency_key == "feedback-key"
+        return TurnFeedbackRevisionV1(
+            feedback=command.feedback,
+            revision=1,
+            updated_at=NOW,
+        )
+
 
     def read_citation(self, _actor, conversation_id, turn_id, citation_ref):
         assert (conversation_id, turn_id, citation_ref) == (
@@ -240,6 +256,52 @@ def test_new_turn_api_returns_execution_identity_and_durable_sse_replay() -> Non
     assert "event: reasoning_progressed" in replay.text
     assert '"reasoning_phase": "planning"' in replay.text
     assert "event-1" not in replay.text
+
+def test_workspace_feedback_api_is_strict_owner_only_put() -> None:
+    client = TestClient(create_app(_composition()))
+    response = client.put(
+        "/api/v1/workspace/conversations/conversation-1/turns/turn-1/feedback",
+        json={
+            "feedback": "helpful",
+            "expected_revision": 0,
+            "idempotency_key": "feedback-key",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "feedback": "helpful",
+        "revision": 1,
+        "updated_at": NOW.isoformat().replace("+00:00", "Z"),
+    }
+
+    invalid_value = client.put(
+        "/api/v1/workspace/conversations/conversation-1/turns/turn-1/feedback",
+        json={
+            "feedback": "unknown",
+            "expected_revision": 0,
+            "idempotency_key": "feedback-key",
+        },
+    )
+    assert invalid_value.status_code == 422
+    actor_override = client.put(
+        "/api/v1/workspace/conversations/conversation-1/turns/turn-1/feedback",
+        json={
+            "feedback": "helpful",
+            "expected_revision": 0,
+            "idempotency_key": "feedback-key",
+            "actor_id": "actor-2",
+        },
+    )
+    assert actor_override.status_code == 422
+    assert client.put(
+        "/api/v1/admin/conversations/conversation-1/turns/turn-1/feedback",
+        json={
+            "feedback": "helpful",
+            "expected_revision": 0,
+            "idempotency_key": "feedback-key",
+        },
+    ).status_code == 404
+
 
 
 def test_unknown_sse_cursor_is_typed_conflict_and_legacy_routes_are_absent() -> None:

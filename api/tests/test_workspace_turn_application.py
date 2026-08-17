@@ -28,6 +28,9 @@ from atlas_production.modules.conversation.public import (
     ConversationMembershipConflict,
     ConversationTurnMemberV1,
     ConversationV1,
+    TurnFeedbackError,
+    TurnFeedbackRevisionV1,
+    TurnFeedbackUpdateV1,
 )
 from atlas_production.modules.identity_access.records import UserRecord
 from atlas_production.modules.retrieval.public import KnowledgeCatalogSnapshotRefV1
@@ -190,6 +193,8 @@ class Conversations:
         self._retry_sources = {}
         self.conversation = CONVERSATION
         self.create_calls = []
+        self.feedback = None
+        self.feedback_calls = []
 
     def create(self, *, actor_id, command):
         self.create_calls.append((actor_id, command))
@@ -225,6 +230,24 @@ class Conversations:
 
     def get_turn(self, turn_id):
         return self.member if self.member is not None and self.member.turn_id == turn_id else None
+    def revise_turn_feedback(
+        self, *, actor_id, conversation_id, turn_id, command
+    ):
+        self.feedback_calls.append(
+            (actor_id, conversation_id, turn_id, command)
+        )
+        self.feedback = TurnFeedbackRevisionV1(
+            feedback=command.feedback,
+            revision=command.expected_revision + 1,
+            updated_at=NOW,
+        )
+        return self.feedback
+
+    def current_turn_feedback(self, turn_id):
+        if self.member is None or self.member.turn_id != turn_id:
+            return None
+        return self.feedback
+
 
     def append_turn_member(self, *, actor_id, command):
         if command.operation == "create_turn":
@@ -747,6 +770,188 @@ def test_archive_conversation_hides_non_owned_target() -> None:
     assert error.value.status_code == 404
 
 
+def _feedback_application():
+    application, runtime, _source = _app(SimpleNamespace())
+    member = ConversationTurnMemberV1(
+        turn_id="turn-feedback",
+        conversation_id=CONVERSATION.conversation_id,
+        execution_id="execution-feedback",
+        role="user",
+        ordinal=1,
+        created_at=NOW,
+    )
+    application._conversations.member = member
+    runtime.executions[member.execution_id] = SimpleNamespace(
+        state=ExecutionState.TERMINAL_COMPLETED
+    )
+    runtime.terminal_outcome = lambda _execution_id: SimpleNamespace(
+        outcome="completed",
+        governed_answer_draft_ref="answer-feedback",
+    )
+    application._results = SimpleNamespace(
+        read_v2=lambda _ref: SimpleNamespace(
+            execution_id=member.execution_id,
+            segments=[SimpleNamespace(text="A governed answer")],
+        )
+    )
+    return application, runtime, member
+
+
+def test_update_turn_feedback_accepts_only_server_confirmed_owner_answer() -> None:
+    application, _runtime, member = _feedback_application()
+    command = TurnFeedbackUpdateV1(
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="feedback-key",
+    )
+
+    result = application.update_turn_feedback(
+        ACTOR,
+        CONVERSATION.conversation_id,
+        member.turn_id,
+        command,
+    )
+
+    assert result.feedback == "helpful"
+    assert result.revision == 1
+    assert application._conversations.feedback_calls == [
+        (
+            ACTOR.actor_id,
+            CONVERSATION.conversation_id,
+            member.turn_id,
+            command,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["processing", "failed", "missing_draft", "whitespace"],
+)
+def test_update_turn_feedback_rejects_ineligible_answers(case: str) -> None:
+    application, runtime, member = _feedback_application()
+    if case == "processing":
+        runtime.executions[member.execution_id].state = (
+            ExecutionState.AWAITING_MODEL_ACTION
+        )
+    elif case == "failed":
+        runtime.executions[member.execution_id].state = (
+            ExecutionState.TERMINAL_FAILED
+        )
+        runtime.terminal_outcome = lambda _execution_id: SimpleNamespace(
+            outcome="failed",
+            governed_answer_draft_ref=None,
+        )
+    elif case == "missing_draft":
+        application._results = SimpleNamespace(read_v2=lambda _ref: None)
+    elif case == "whitespace":
+        application._results = SimpleNamespace(
+            read_v2=lambda _ref: SimpleNamespace(
+                execution_id=member.execution_id,
+                segments=[SimpleNamespace(text=" \n ")],
+            )
+        )
+
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.update_turn_feedback(
+            ACTOR,
+            CONVERSATION.conversation_id,
+            member.turn_id,
+            TurnFeedbackUpdateV1(
+                feedback="helpful",
+                expected_revision=0,
+                idempotency_key=f"feedback-{case}",
+            ),
+        )
+
+    assert error.value.status_code == 409
+    assert (
+        error.value.message_code
+        == "conversation.feedback_is_not_available"
+    )
+    assert application._conversations.feedback_calls == []
+
+
+@pytest.mark.parametrize(
+    ("owner_reason", "status_code", "message_code"),
+    [
+        (
+            "revision_conflict",
+            409,
+            "conversation.feedback_revision_changed_before_update",
+        ),
+        (
+            "idempotency_conflict",
+            409,
+            "conversation.feedback_idempotency_key_was_reused",
+        ),
+        (
+            "history_invalid",
+            503,
+            "conversation.feedback_history_is_invalid",
+        ),
+        ("not_found", 404, "conversation.was_not_found"),
+    ],
+)
+def test_update_turn_feedback_maps_owner_errors(
+    owner_reason: str, status_code: int, message_code: str
+) -> None:
+    application, _runtime, member = _feedback_application()
+
+    def reject(**_kwargs):
+        raise TurnFeedbackError(owner_reason)  # type: ignore[arg-type]
+
+    application._conversations.revise_turn_feedback = reject
+    with pytest.raises(WorkspaceTurnError) as error:
+        application.update_turn_feedback(
+            ACTOR,
+            CONVERSATION.conversation_id,
+            member.turn_id,
+            TurnFeedbackUpdateV1(
+                feedback="not_helpful",
+                expected_revision=1,
+                idempotency_key=f"feedback-{owner_reason}",
+            ),
+        )
+
+    assert error.value.status_code == status_code
+    assert error.value.message_code == message_code
+
+
+def test_update_turn_feedback_hides_foreign_archived_and_mismatched_targets() -> None:
+    application, _runtime, member = _feedback_application()
+    command = TurnFeedbackUpdateV1(
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="feedback-hidden",
+    )
+    foreign = UserRecord("actor-2", "Other", None, "user", None)
+    with pytest.raises(WorkspaceTurnError) as foreign_error:
+        application.update_turn_feedback(
+            foreign, CONVERSATION.conversation_id, member.turn_id, command
+        )
+    assert foreign_error.value.status_code == 404
+
+    application._conversations.member = member.model_copy(
+        update={"conversation_id": "conversation-other"}
+    )
+    with pytest.raises(WorkspaceTurnError) as mismatch_error:
+        application.update_turn_feedback(
+            ACTOR, CONVERSATION.conversation_id, member.turn_id, command
+        )
+    assert mismatch_error.value.status_code == 404
+
+    application._conversations.member = member
+    application._conversations.conversation = CONVERSATION.model_copy(
+        update={"status": "archived"}
+    )
+    with pytest.raises(WorkspaceTurnError) as archived_error:
+        application.update_turn_feedback(
+            ACTOR, CONVERSATION.conversation_id, member.turn_id, command
+        )
+    assert archived_error.value.status_code == 404
+
+
 @pytest.mark.parametrize(
     ("failure_point", "expected_staged"),
     [
@@ -983,6 +1188,31 @@ def test_workspace_projects_only_safe_deep_reasoning_timeline() -> None:
     workspace_payload = projection.model_dump(mode="json")
     assert "reasoning_trace" not in workspace_payload
     assert "score" not in str(workspace_payload).casefold()
+
+
+def test_workspace_projection_reads_shared_current_feedback_only() -> None:
+    application, runtime, _source = _app(Carrier())
+    accepted = application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(
+            input_text="question",
+            idempotency_key="feedback-projection",
+        ),
+    )
+    application._conversations.feedback = TurnFeedbackRevisionV1(
+        feedback="not_helpful",
+        revision=2,
+        updated_at=NOW,
+    )
+    member = application._conversations.member
+
+    projection = application._project_turn(
+        ACTOR.actor_id, member, runtime.snapshot(accepted.execution_id), None
+    )
+
+    assert projection.feedback == application._conversations.feedback
+    assert "feedback_history" not in projection.model_dump(mode="json")
 
 
 def test_workspace_displays_and_retries_original_while_context_stores_rewrite() -> None:

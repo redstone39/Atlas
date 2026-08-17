@@ -10,7 +10,10 @@ from atlas_production.infrastructure.persistence.audit_events import (
 from atlas_production.infrastructure.postgres_audit_adapter import (
     build_audit_event,
 )
-from atlas_production.modules.conversation.public import ConversationV1
+from atlas_production.modules.conversation.public import (
+    ConversationV1,
+    TurnFeedbackRevisionV1,
+)
 from atlas_production.modules.conversation_audit.contracts import ConversationAuditError
 from atlas_production.modules.conversation_audit.service import ConversationAuditService
 from atlas_production.modules.citation_preview.public import (
@@ -29,6 +32,7 @@ from atlas_production.modules.turn_runtime.public import (
 )
 from atlas_production.modules.workspace_turn.public import (
     WorkspaceConversationDetailV1,
+    WorkspaceTurnProjectionV1,
 )
 from tests.turn_runtime_fixtures import route_snapshot
 
@@ -149,7 +153,24 @@ class Workspace:
 
     def audit_get_conversation(self, *, actor_id: str, conversation_id: str) -> WorkspaceConversationDetailV1:
         self.detail_calls.append((actor_id, conversation_id))
-        return WorkspaceConversationDetailV1(conversation=self.items[-1], turns=[])
+        return WorkspaceConversationDetailV1(
+            conversation=self.items[-1],
+            turns=[
+                WorkspaceTurnProjectionV1(
+                    turn_id="turn-1",
+                    execution_id="execution-1",
+                    ordinal=1,
+                    user_input="question",
+                    execution_status=ExecutionState.TERMINAL_COMPLETED,
+                    feedback=TurnFeedbackRevisionV1(
+                        feedback="not_helpful",
+                        revision=2,
+                        updated_at=NOW,
+                    ),
+                    created_at=NOW,
+                )
+            ],
+        )
 
     def audit_execution(self, *, actor_id: str, conversation_id: str, turn_id: str):
         self.runtime_calls.append((actor_id, conversation_id, turn_id))
@@ -227,6 +248,12 @@ def test_admin_detail_delegates_to_request_time_workspace_projection() -> None:
     result = subject.get_admin(ADMIN, "conversation-1")
 
     assert result.conversation.conversation_id == "conversation-1"
+    assert result.turns[0].feedback == TurnFeedbackRevisionV1(
+        feedback="not_helpful",
+        revision=2,
+        updated_at=NOW,
+    )
+    assert "feedback_history" not in result.model_dump(mode="json")
     assert workspace.detail_calls == [("admin-1", "conversation-1")]
     assert writer.calls[0][1]["metadata"] == {
         "admin_global_history_access": True

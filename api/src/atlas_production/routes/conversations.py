@@ -24,7 +24,11 @@ from atlas_production.modules.workspace_turn.public import (
     WorkspaceTurnRetryV1,
     TurnAcceptedV1,
 )
-from atlas_production.modules.conversation.public import ConversationArchiveResultV1
+from atlas_production.modules.conversation.public import (
+    ConversationArchiveResultV1,
+    TurnFeedbackRevisionV1,
+    TurnFeedbackUpdateV1,
+)
 from atlas_production.modules.conversation_audit.public import (
     AdminConversationListResult,
     RuntimeTraceDetail,
@@ -129,6 +133,27 @@ def get_workspace_conversation(conversation_id: str, request: Request):
         return _workspace_turn_application(request).get_conversation(current_user(request), conversation_id)
     except WorkspaceTurnError as exc:
         return _workspace_turn_error(exc)
+@router.put(
+    "/api/v1/workspace/conversations/{conversation_id}/turns/{turn_id}/feedback",
+    response_model=TurnFeedbackRevisionV1,
+)
+def update_workspace_turn_feedback(
+    conversation_id: str,
+    turn_id: str,
+    payload: TurnFeedbackUpdateV1,
+    request: Request,
+):
+    try:
+        return _workspace_turn_application(request).update_turn_feedback(
+            current_user(request),
+            conversation_id,
+            turn_id,
+            payload,
+        )
+    except WorkspaceTurnError as exc:
+        return _workspace_turn_error(exc)
+
+
 
 
 @router.get(

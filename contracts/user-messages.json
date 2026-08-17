@@ -214,6 +214,18 @@
     "conversation.audit_cursor_is_invalid": {
       "params": {}
     },
+    "conversation.feedback_history_is_invalid": {
+      "params": {}
+    },
+    "conversation.feedback_idempotency_key_was_reused": {
+      "params": {}
+    },
+    "conversation.feedback_is_not_available": {
+      "params": {}
+    },
+    "conversation.feedback_revision_changed_before_update": {
+      "params": {}
+    },
     "conversation.payload_cannot_be_stored": {
       "params": {}
     },

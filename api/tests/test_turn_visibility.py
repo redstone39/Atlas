@@ -22,7 +22,11 @@ from atlas_production.modules.context_engineering.public import (
     ContextPackV3,
     TurnInputProjectionV1,
 )
-from atlas_production.modules.conversation.public import ConversationTurnMemberV1, ConversationV1
+from atlas_production.modules.conversation.public import (
+    ConversationTurnMemberV1,
+    ConversationV1,
+    TurnFeedbackRevisionV1,
+)
 from atlas_production.modules.result_governance.public import GovernedAnswerDraftV2
 from atlas_production.modules.retrieval.public import DeclaredEvidenceMappingV1
 from atlas_production.modules.retrieval.public import (
@@ -109,12 +113,18 @@ class _Conversations:
             role="user", ordinal=2, created_at=NOW,
         ),
     ]
+    def __init__(self):
+        self.feedback_by_turn = {}
+
 
     def candidate_turns(self, _conversation_id):
         return self.members
 
     def get_turn(self, turn_id):
         return next((item for item in self.members if item.turn_id == turn_id), None)
+    def current_turn_feedback(self, turn_id):
+        return self.feedback_by_turn.get(turn_id)
+
 
     def get(self, conversation_id):
         if conversation_id != "conversation-1":
@@ -537,6 +547,11 @@ def test_revocation_preserves_workspace_and_admin_detail_with_redacted_claim() -
         "kh_evidence_one",
         "kh_evidence_one",
     ]
+    app._conversations.feedback_by_turn["turn-1"] = TurnFeedbackRevisionV1(
+        feedback="helpful",
+        revision=1,
+        updated_at=NOW,
+    )
     actor = SimpleNamespace(actor_id="actor-1", active=True)
 
     workspace = app.get_conversation(actor, "conversation-1")
@@ -548,6 +563,12 @@ def test_revocation_preserves_workspace_and_admin_detail_with_redacted_claim() -
         assert [item.turn_id for item in detail.turns] == ["turn-1", "turn-2"]
         direct = detail.turns[0]
         assert direct.segments[0].text == "answer execution-1"
+        assert direct.feedback == TurnFeedbackRevisionV1(
+            feedback="helpful",
+            revision=1,
+            updated_at=NOW,
+        )
+        assert detail.turns[1].feedback is None
         assert direct.evidence_review_status == "questionable"
         assert direct.citations == []
         assert [

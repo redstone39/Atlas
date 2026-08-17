@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "d9cfcdcec4efa7bbaec1a05fe83ec035edad5e46ac6321057daa21608328af9e"
+    "8f42f5bf8d33d3c34cb93f6c8b0efd26ede3cba623362995f0acd12c227618b8"
 )
 
 
@@ -107,6 +107,14 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
         in paths
     )
     assert "/api/v1/admin/conversations/{conversation_id}/turns/{turn_id}/runtime" in paths
+    feedback_path = (
+        "/api/v1/workspace/conversations/{conversation_id}/turns/{turn_id}/feedback"
+    )
+    assert set(paths[feedback_path]) == {"put"}
+    assert not any(
+        path.startswith("/api/v1/admin/") and path.endswith("/feedback")
+        for path in paths
+    )
     for removed_path in (
         "/api/v1/workspace/conversations/{conversation_id}/turns/stream",
         "/api/v1/workspace/turn-requests/{turn_request_id}/stream",
@@ -142,6 +150,26 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
     assert "tag_refs" not in schemas["ConversationV1"]["properties"]
     assert "tag_refs" not in schemas["WorkspaceTurnCreateV1"]["properties"]
     assert "tag_refs" not in schemas["WorkspaceTurnRetryV1"]["properties"]
+    feedback_update = schemas["TurnFeedbackUpdateV1"]
+    feedback_revision = schemas["TurnFeedbackRevisionV1"]
+    assert feedback_update["additionalProperties"] is False
+    assert feedback_revision["additionalProperties"] is False
+    assert feedback_update["properties"]["feedback"]["enum"] == [
+        "helpful",
+        "not_helpful",
+    ]
+    assert feedback_revision["properties"]["feedback"]["enum"] == [
+        "helpful",
+        "not_helpful",
+    ]
+    assert feedback_update["properties"]["expected_revision"]["minimum"] == 0
+    assert feedback_revision["properties"]["revision"]["minimum"] == 1
+    assert schemas["WorkspaceTurnProjectionV1"]["properties"]["feedback"] == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/TurnFeedbackRevisionV1"},
+            {"type": "null"},
+        ]
+    }
     assert "CitationViewerManifest" not in schemas
 
 
