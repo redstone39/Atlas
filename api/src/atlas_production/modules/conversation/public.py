@@ -10,8 +10,38 @@ ResponseLanguage = Literal["zh-TW", "en"]
 ReasoningMode = Literal["standard", "deep"]
 
 
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+TurnFeedbackValue = Literal["helpful", "not_helpful"]
+
+
+class TurnFeedbackUpdateV1(_StrictModel):
+    feedback: TurnFeedbackValue
+    expected_revision: int = Field(ge=0)
+    idempotency_key: Identity
+
+
+class TurnFeedbackRevisionV1(_StrictModel):
+    feedback: TurnFeedbackValue
+    revision: int = Field(ge=1)
+    updated_at: AwareDatetime
+
+
+class TurnFeedbackError(RuntimeError):
+    def __init__(
+        self,
+        reason: Literal[
+            "not_found",
+            "revision_conflict",
+            "idempotency_conflict",
+            "history_invalid",
+        ],
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 
 class ConversationScopeTagV1(_StrictModel):
     tag_type: Literal["project", "team"]
@@ -124,6 +154,19 @@ class ConversationOwner(Protocol):
         conversation_id: Identity,
         command: ConversationArchiveV1,
     ) -> ConversationArchiveResultV1: ...
+    def revise_turn_feedback(
+        self,
+        *,
+        actor_id: Identity,
+        conversation_id: Identity,
+        turn_id: Identity,
+        command: TurnFeedbackUpdateV1,
+    ) -> TurnFeedbackRevisionV1: ...
+
+    def current_turn_feedback(
+        self, turn_id: Identity
+    ) -> TurnFeedbackRevisionV1 | None: ...
+
 
     def list_for_actor(self, actor_id: Identity) -> list[ConversationV1]: ...
 
@@ -167,4 +210,8 @@ __all__ = [
     "ResponseLanguage",
     "ReasoningMode",
     "TurnAcceptedV1",
+    "TurnFeedbackError",
+    "TurnFeedbackRevisionV1",
+    "TurnFeedbackUpdateV1",
+    "TurnFeedbackValue",
 ]

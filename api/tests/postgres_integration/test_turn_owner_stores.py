@@ -5,10 +5,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import delete, inspect
+from sqlalchemy import delete, event, inspect, select
 
 from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow
 from atlas_production.infrastructure.persistence.authorization import (
@@ -31,6 +31,7 @@ from atlas_production.infrastructure.persistence.conversation import (
     AtlasTurnConversationIdempotencyRow,
     AtlasTurnConversationMemberRow,
     AtlasTurnConversationRow,
+    AtlasTurnFeedbackRevisionRow,
 )
 from atlas_production.infrastructure.persistence.payload_policy import (
     PersistedPayloadPolicyError,
@@ -85,6 +86,8 @@ from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
     ConversationStoreConflict,
     CreateConversationInput,
     PostgresConversationV1Store,
+    ReviseTurnFeedbackInput,
+    TurnFeedbackStoreError,
 )
 from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
     CatalogDocumentInput,
@@ -146,6 +149,7 @@ def clean_owner_rows(postgres_runtime: PostgresRuntime):
         AtlasTurnAccessGrantReleaseRow,
         AtlasTurnAccessGrantRow,
         AtlasAuthorizationRevisionRow,
+        AtlasTurnFeedbackRevisionRow,
         AtlasTurnConversationIdempotencyRow,
         AtlasTurnConversationMemberRow,
         AtlasTurnConversationRow,
@@ -287,6 +291,293 @@ def test_conversation_create_replay_and_ordered_membership_cas(
         assert persisted_audit.actor_id == create.actor_id
         assert persisted_audit.target_ref == f"conversation:{create.conversation_id}"
 
+
+def _feedback_target(
+    store: PostgresConversationV1Store, suffix: str
+) -> tuple[CreateConversationInput, AppendTurnMemberInput]:
+    conversation = CreateConversationInput(
+        conversation_id=f"conversation-{PREFIX}-feedback-{suffix}",
+        actor_id=f"actor-{PREFIX}-feedback-{suffix}",
+        title="Feedback",
+        idempotency_key=f"create-feedback-{suffix}",
+        response_language="en",
+    )
+    store.create(conversation)
+    member = AppendTurnMemberInput(
+        conversation_id=conversation.conversation_id,
+        actor_id=conversation.actor_id,
+        turn_id=f"turn-{PREFIX}-feedback-{suffix}",
+        execution_id=f"execution-{PREFIX}-feedback-{suffix}",
+        role="user",
+        expected_next_ordinal=1,
+        idempotency_key=f"member-feedback-{suffix}",
+        reasoning_mode="standard",
+    )
+    store.append_turn_member(member)
+    return conversation, member
+
+
+def test_turn_feedback_revisions_are_immutable_exact_and_current(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    store = PostgresConversationV1Store(postgres_runtime.session_factory)
+    conversation, member = _feedback_target(store, "history")
+    first_command = ReviseTurnFeedbackInput(
+        conversation_id=conversation.conversation_id,
+        turn_id=member.turn_id,
+        actor_id=conversation.actor_id,
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="feedback-history-1",
+    )
+    first = store.revise_turn_feedback(first_command)
+    assert first.revision == 1
+    assert store.current_turn_feedback(member.turn_id) == first
+
+    second_command = replace(
+        first_command,
+        feedback="not_helpful",
+        expected_revision=1,
+        idempotency_key="feedback-history-2",
+    )
+    second = store.revise_turn_feedback(second_command)
+    assert second.revision == 2
+    assert store.current_turn_feedback(member.turn_id) == second
+    assert store.revise_turn_feedback(first_command) == first
+
+    same_value = store.revise_turn_feedback(
+        replace(
+            second_command,
+            expected_revision=2,
+            idempotency_key="feedback-history-same-value",
+        )
+    )
+    assert same_value == second
+    with pytest.raises(TurnFeedbackStoreError, match="idempotency_conflict"):
+        store.revise_turn_feedback(
+            replace(first_command, feedback="not_helpful")
+        )
+    with pytest.raises(TurnFeedbackStoreError, match="revision_conflict"):
+        store.revise_turn_feedback(
+            replace(
+                second_command,
+                expected_revision=1,
+                idempotency_key="feedback-history-stale",
+            )
+        )
+    with pytest.raises(TurnFeedbackStoreError, match="not_found"):
+        store.revise_turn_feedback(
+            replace(
+                second_command,
+                actor_id="foreign-actor",
+                expected_revision=2,
+                idempotency_key="feedback-history-foreign",
+            )
+        )
+
+    with postgres_runtime.session_factory() as session:
+        rows = session.scalars(
+            select(AtlasTurnFeedbackRevisionRow)
+            .where(AtlasTurnFeedbackRevisionRow.turn_id == member.turn_id)
+            .order_by(AtlasTurnFeedbackRevisionRow.revision)
+        ).all()
+        assert [(row.revision, row.feedback) for row in rows] == [
+            (1, "helpful"),
+            (2, "not_helpful"),
+        ]
+        idempotency_rows = session.scalars(
+            select(AtlasTurnConversationIdempotencyRow).where(
+                AtlasTurnConversationIdempotencyRow.operation
+                == "revise_turn_feedback",
+                AtlasTurnConversationIdempotencyRow.turn_id == member.turn_id,
+            )
+        ).all()
+        assert len(idempotency_rows) == 3
+
+    archive = ArchiveConversationInput(
+        conversation_id=conversation.conversation_id,
+        actor_id=conversation.actor_id,
+        expected_next_ordinal=2,
+        idempotency_key="feedback-history-archive",
+    )
+    audit = AuditEventRecord(
+        event_id=f"audit-{PREFIX}-feedback-history-archive",
+        event_type="conversation_archived",
+        actor_id=conversation.actor_id,
+        target_ref=f"conversation:{conversation.conversation_id}",
+        project_id=None,
+        message_code="conversation.was_archived",
+        metadata={"status": "archived"},
+        created_at=NOW.isoformat(),
+    )
+    store.archive(archive, audit_event=audit)
+    assert store.revise_turn_feedback(first_command) == first
+    with pytest.raises(TurnFeedbackStoreError, match="not_found"):
+        store.revise_turn_feedback(
+            replace(
+                second_command,
+                expected_revision=2,
+                idempotency_key="feedback-history-after-archive",
+            )
+        )
+
+
+def test_turn_feedback_current_read_uses_one_statement_snapshot(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    store = PostgresConversationV1Store(postgres_runtime.session_factory)
+    conversation, member = _feedback_target(store, "concurrent-read")
+    first_command = ReviseTurnFeedbackInput(
+        conversation_id=conversation.conversation_id,
+        turn_id=member.turn_id,
+        actor_id=conversation.actor_id,
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="feedback-concurrent-read-1",
+    )
+    first = store.revise_turn_feedback(first_command)
+    reader_selected = Event()
+    writer_committed = Event()
+
+    def pause_reader_after_feedback_select(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany: bool,
+    ) -> None:
+        if (
+            not reader_selected.is_set()
+            and statement.lstrip().upper().startswith("SELECT")
+            and "atlas_turn_feedback_revisions" in statement
+        ):
+            reader_selected.set()
+            assert writer_committed.wait(timeout=5)
+
+    event.listen(
+        postgres_runtime.engine,
+        "after_cursor_execute",
+        pause_reader_after_feedback_select,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reader = pool.submit(store.current_turn_feedback, member.turn_id)
+            assert reader_selected.wait(timeout=5)
+            second = store.revise_turn_feedback(
+                replace(
+                    first_command,
+                    feedback="not_helpful",
+                    expected_revision=1,
+                    idempotency_key="feedback-concurrent-read-2",
+                )
+            )
+            writer_committed.set()
+            observed = reader.result(timeout=5)
+    finally:
+        writer_committed.set()
+        event.remove(
+            postgres_runtime.engine,
+            "after_cursor_execute",
+            pause_reader_after_feedback_select,
+        )
+
+    assert observed == first
+    assert store.current_turn_feedback(member.turn_id) == second
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.add(
+            AtlasTurnFeedbackRevisionRow(
+                turn_id=member.turn_id,
+                revision=4,
+                feedback="helpful",
+                actor_id=conversation.actor_id,
+                created_at=NOW,
+            )
+        )
+    with pytest.raises(TurnFeedbackStoreError, match="history_invalid"):
+        store.current_turn_feedback(member.turn_id)
+
+
+
+def test_turn_feedback_concurrent_first_write_has_one_winner(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    store = PostgresConversationV1Store(postgres_runtime.session_factory)
+    conversation, member = _feedback_target(store, "concurrent-winner")
+    barrier = Barrier(2)
+
+    def write(feedback: str, key: str):
+        barrier.wait()
+        try:
+            return store.revise_turn_feedback(
+                ReviseTurnFeedbackInput(
+                    conversation_id=conversation.conversation_id,
+                    turn_id=member.turn_id,
+                    actor_id=conversation.actor_id,
+                    feedback=feedback,  # type: ignore[arg-type]
+                    expected_revision=0,
+                    idempotency_key=key,
+                )
+            )
+        except TurnFeedbackStoreError as error:
+            return error.reason
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda item: write(*item),
+                [("helpful", "concurrent-1"), ("not_helpful", "concurrent-2")],
+            )
+        )
+    assert sum(not isinstance(result, str) for result in results) == 1
+    assert results.count("revision_conflict") == 1
+    with postgres_runtime.session_factory() as session:
+        rows = session.scalars(
+            select(AtlasTurnFeedbackRevisionRow).where(
+                AtlasTurnFeedbackRevisionRow.turn_id == member.turn_id
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].revision == 1
+
+
+def test_turn_feedback_concurrent_exact_replay_is_single_revision(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    store = PostgresConversationV1Store(postgres_runtime.session_factory)
+    conversation, member = _feedback_target(store, "concurrent-replay")
+    command = ReviseTurnFeedbackInput(
+        conversation_id=conversation.conversation_id,
+        turn_id=member.turn_id,
+        actor_id=conversation.actor_id,
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="concurrent-replay-key",
+    )
+    barrier = Barrier(2)
+
+    def write():
+        barrier.wait()
+        return store.revise_turn_feedback(command)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = list(pool.map(lambda _: write(), range(2)))
+    assert first == second
+    with postgres_runtime.session_factory() as session:
+        revisions = session.scalars(
+            select(AtlasTurnFeedbackRevisionRow).where(
+                AtlasTurnFeedbackRevisionRow.turn_id == member.turn_id
+            )
+        ).all()
+        replays = session.scalars(
+            select(AtlasTurnConversationIdempotencyRow).where(
+                AtlasTurnConversationIdempotencyRow.operation
+                == "revise_turn_feedback",
+                AtlasTurnConversationIdempotencyRow.turn_id == member.turn_id,
+            )
+        ).all()
+        assert len(revisions) == 1
+        assert len(replays) == 1
 
 def test_authorization_grant_and_release_are_exact_replays(
     postgres_runtime: PostgresRuntime,

@@ -13,12 +13,13 @@ import hashlib
 import json
 from typing import Callable, Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.infrastructure.persistence.conversation import (
     AtlasTurnConversationIdempotencyRow,
+    AtlasTurnFeedbackRevisionRow,
     AtlasTurnConversationScopeTagRow,
     AtlasTurnConversationMemberRow,
     AtlasTurnConversationRow,
@@ -31,6 +32,20 @@ SessionFactory = Callable[[], Session]
 
 class ConversationStoreConflict(RuntimeError):
     """A replay identity or optimistic ordinal was reused with new meaning."""
+class TurnFeedbackStoreError(RuntimeError):
+    def __init__(
+        self,
+        reason: Literal[
+            "not_found",
+            "revision_conflict",
+            "idempotency_conflict",
+            "history_invalid",
+        ],
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 
 
 def _digest(value: object) -> str:
@@ -103,6 +118,25 @@ class ArchiveConversationInput:
 class ArchiveConversationResult:
     conversation: ConversationRecord
     audit_event_ref: str
+@dataclass(frozen=True, slots=True)
+class ReviseTurnFeedbackInput:
+    conversation_id: str
+    turn_id: str
+    actor_id: str
+    feedback: Literal["helpful", "not_helpful"]
+    expected_revision: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnFeedbackRecord:
+    turn_id: str
+    feedback: Literal["helpful", "not_helpful"]
+    revision: int
+    actor_id: str
+    updated_at: datetime
+
+
 
 
 def _conversation(row: AtlasTurnConversationRow) -> ConversationRecord:
@@ -131,6 +165,23 @@ def _member(
         created_at=row.created_at,
         retry_of_turn_id=retry_of_turn_id,
     )
+def _feedback(row: AtlasTurnFeedbackRevisionRow) -> TurnFeedbackRecord:
+    if (
+        row.feedback not in {"helpful", "not_helpful"}
+        or row.revision < 1
+        or not row.actor_id
+        or row.created_at.tzinfo is None
+    ):
+        raise TurnFeedbackStoreError("history_invalid")
+    return TurnFeedbackRecord(
+        turn_id=row.turn_id,
+        feedback=row.feedback,  # type: ignore[arg-type]
+        revision=row.revision,
+        actor_id=row.actor_id,
+        updated_at=row.created_at,
+    )
+
+
 
 
 class PostgresConversationV1Store:
@@ -369,6 +420,158 @@ class PostgresConversationV1Store:
                 audit_event_ref=audit_event.event_id,
             )
 
+    def revise_turn_feedback(
+        self, command: ReviseTurnFeedbackInput
+    ) -> TurnFeedbackRecord:
+        if command.expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        request_digest = _digest(asdict(command))
+        scope_ref = f"turn:{command.turn_id}"
+        with self._session_factory() as session, session.begin():
+            replay = self._feedback_replay(
+                session, command=command, request_digest=request_digest
+            )
+            if replay is not None:
+                return replay
+
+            conversation = session.scalar(
+                select(AtlasTurnConversationRow)
+                .where(
+                    AtlasTurnConversationRow.conversation_id
+                    == command.conversation_id
+                )
+                .with_for_update()
+            )
+            if (
+                conversation is None
+                or conversation.owner_actor_id != command.actor_id
+                or conversation.status != "active"
+            ):
+                raise TurnFeedbackStoreError("not_found")
+
+            replay = self._feedback_replay(
+                session, command=command, request_digest=request_digest
+            )
+            if replay is not None:
+                return replay
+
+            member = session.get(AtlasTurnConversationMemberRow, command.turn_id)
+            if member is None or member.conversation_id != command.conversation_id:
+                raise TurnFeedbackStoreError("not_found")
+
+            current = self._current_feedback(session, command.turn_id)
+            current_revision = 0 if current is None else current.revision
+            if command.expected_revision != current_revision:
+                raise TurnFeedbackStoreError("revision_conflict")
+
+            if current is None or current.feedback != command.feedback:
+                updated_at = _now()
+                current = TurnFeedbackRecord(
+                    turn_id=command.turn_id,
+                    feedback=command.feedback,
+                    revision=current_revision + 1,
+                    actor_id=command.actor_id,
+                    updated_at=updated_at,
+                )
+                session.add(
+                    AtlasTurnFeedbackRevisionRow(
+                        turn_id=current.turn_id,
+                        revision=current.revision,
+                        feedback=current.feedback,
+                        actor_id=current.actor_id,
+                        created_at=current.updated_at,
+                    )
+                )
+
+            session.add(
+                AtlasTurnConversationIdempotencyRow(
+                    scope_ref=scope_ref,
+                    operation="revise_turn_feedback",
+                    idempotency_key=command.idempotency_key,
+                    actor_id=command.actor_id,
+                    request_digest=request_digest,
+                    conversation_id=command.conversation_id,
+                    turn_id=command.turn_id,
+                    execution_id=None,
+                    response_payload=json.dumps(
+                        {
+                            "feedback": current.feedback,
+                            "revision": current.revision,
+                            "updated_at": current.updated_at.isoformat(),
+                        },
+                        separators=(",", ":"),
+                    ),
+                    created_at=_now(),
+                )
+            )
+            session.flush()
+            return current
+
+    def current_turn_feedback(self, turn_id: str) -> TurnFeedbackRecord | None:
+        with self._session_factory() as session:
+            return self._current_feedback(session, turn_id)
+
+    @staticmethod
+    def _current_feedback(
+        session: Session, turn_id: str
+    ) -> TurnFeedbackRecord | None:
+        result = session.execute(
+            select(
+                AtlasTurnFeedbackRevisionRow,
+                func.count().over(),
+            )
+            .where(AtlasTurnFeedbackRevisionRow.turn_id == turn_id)
+            .order_by(AtlasTurnFeedbackRevisionRow.revision.desc())
+            .limit(1)
+        ).one_or_none()
+        if result is None:
+            return None
+        row, count = result
+        if count != row.revision:
+            raise TurnFeedbackStoreError("history_invalid")
+        return _feedback(row)
+
+    @staticmethod
+    def _feedback_replay(
+        session: Session,
+        *,
+        command: ReviseTurnFeedbackInput,
+        request_digest: str,
+    ) -> TurnFeedbackRecord | None:
+        replay = session.get(
+            AtlasTurnConversationIdempotencyRow,
+            (f"turn:{command.turn_id}", "revise_turn_feedback", command.idempotency_key),
+        )
+        if replay is None:
+            return None
+        if (
+            replay.request_digest != request_digest
+            or replay.actor_id != command.actor_id
+            or replay.conversation_id != command.conversation_id
+            or replay.turn_id != command.turn_id
+        ):
+            raise TurnFeedbackStoreError("idempotency_conflict")
+        try:
+            payload = json.loads(replay.response_payload)
+            if set(payload) != {"feedback", "revision", "updated_at"}:
+                raise ValueError("unexpected feedback replay fields")
+            row = session.get(
+                AtlasTurnFeedbackRevisionRow,
+                (command.turn_id, payload["revision"]),
+            )
+            if row is None:
+                raise ValueError("feedback replay revision is missing")
+            record = _feedback(row)
+            if (
+                record.feedback != payload["feedback"]
+                or record.updated_at.isoformat() != payload["updated_at"]
+                or record.actor_id != command.actor_id
+            ):
+                raise ValueError("feedback replay evidence changed")
+            return record
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise TurnFeedbackStoreError("history_invalid") from error
+
     def get(self, conversation_id: str) -> ConversationRecord | None:
         with self._session_factory() as session:
             row = session.get(AtlasTurnConversationRow, conversation_id)
@@ -434,5 +637,8 @@ __all__ = [
     "ConversationStoreConflict",
     "CreateConversationInput",
     "PostgresConversationV1Store",
+    "ReviseTurnFeedbackInput",
+    "TurnFeedbackRecord",
+    "TurnFeedbackStoreError",
     "TurnMemberRecord",
 ]

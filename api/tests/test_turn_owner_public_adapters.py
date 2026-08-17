@@ -23,6 +23,8 @@ from atlas_production.infrastructure.postgres_owner.context_engineering import (
 from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
     ConversationRecord,
     ConversationStoreConflict,
+    TurnFeedbackRecord,
+    TurnFeedbackStoreError,
     TurnMemberRecord,
 )
 from atlas_production.infrastructure.postgres_owner.retrieval_v1 import (
@@ -44,6 +46,8 @@ from atlas_production.modules.conversation.public import (
     ConversationArchiveV1,
     ConversationCreateV1,
     ConversationTurnMemberV1,
+    TurnFeedbackError,
+    TurnFeedbackUpdateV1,
 )
 from atlas_production.modules.turn_runtime.public import TerminalOutcomeV1
 
@@ -61,6 +65,8 @@ class _ConversationStore:
         self.create_request = None
         self.append_request = None
         self.archive_request = None
+        self.feedback: TurnFeedbackRecord | None = None
+        self.feedback_request = None
 
     def create(self, command):
         if self.create_request is not None:
@@ -144,6 +150,30 @@ class _ConversationStore:
         if self.append_request is None or self.append_request.retry_of_turn_id is None:
             return {}
         return {self.append_request.turn_id: self.append_request.retry_of_turn_id}
+    def revise_turn_feedback(self, command):
+        if self.feedback_request is not None:
+            if command.idempotency_key == self.feedback_request.idempotency_key:
+                if command != self.feedback_request:
+                    raise TurnFeedbackStoreError("idempotency_conflict")
+                assert self.feedback is not None
+                return self.feedback
+            if command.expected_revision != self.feedback.revision:
+                raise TurnFeedbackStoreError("revision_conflict")
+        self.feedback_request = command
+        self.feedback = TurnFeedbackRecord(
+            turn_id=command.turn_id,
+            feedback=command.feedback,
+            revision=1 if self.feedback is None else self.feedback.revision + 1,
+            actor_id=command.actor_id,
+            updated_at=NOW,
+        )
+        return self.feedback
+
+    def current_turn_feedback(self, turn_id):
+        if self.feedback is None or self.feedback.turn_id != turn_id:
+            return None
+        return self.feedback
+
 
 
 class _ConversationSession:
@@ -209,6 +239,46 @@ def test_conversation_public_adapter_hides_ordinal_and_replays_exact_identity(mo
     assert "ordinal" not in AppendTurnMemberV1.model_fields
     assert "retry_of_turn_id" not in AppendTurnMemberV1.model_fields
     assert "retry_of_turn_id" not in ConversationTurnMemberV1.model_fields
+
+    feedback_command = TurnFeedbackUpdateV1(
+        feedback="helpful",
+        expected_revision=0,
+        idempotency_key="feedback-key",
+    )
+    feedback = adapter.revise_turn_feedback(
+        actor_id="actor-1",
+        conversation_id=first.conversation_id,
+        turn_id=first.turn_id,
+        command=feedback_command,
+    )
+    assert feedback.feedback == "helpful"
+    assert feedback.revision == 1
+    assert adapter.current_turn_feedback(first.turn_id) == feedback
+    assert adapter.revise_turn_feedback(
+        actor_id="actor-1",
+        conversation_id=first.conversation_id,
+        turn_id=first.turn_id,
+        command=feedback_command,
+    ) == feedback
+    with pytest.raises(TurnFeedbackError, match="idempotency_conflict"):
+        adapter.revise_turn_feedback(
+            actor_id="actor-1",
+            conversation_id=first.conversation_id,
+            turn_id=first.turn_id,
+            command=feedback_command.model_copy(update={"feedback": "not_helpful"}),
+        )
+    with pytest.raises(ValidationError):
+        TurnFeedbackUpdateV1(
+            feedback="invalid",
+            expected_revision=0,
+            idempotency_key="feedback-invalid",
+        )
+    with pytest.raises(ValidationError):
+        TurnFeedbackUpdateV1(
+            feedback="helpful",
+            expected_revision=-1,
+            idempotency_key="feedback-invalid-revision",
+        )
 
     archived = adapter.archive(
         actor_id="actor-1",

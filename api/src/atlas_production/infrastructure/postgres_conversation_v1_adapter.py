@@ -11,8 +11,11 @@ from atlas_production.infrastructure.postgres_owner.conversation_v1 import (
     ConversationStoreConflict,
     CreateConversationInput,
     PostgresConversationV1Store,
+    ReviseTurnFeedbackInput,
     SessionFactory,
     TurnMemberRecord,
+    TurnFeedbackRecord,
+    TurnFeedbackStoreError,
 )
 from atlas_production.modules.conversation.public import (
     AppendTurnMemberV1,
@@ -23,6 +26,9 @@ from atlas_production.modules.conversation.public import (
     ConversationMembershipConflict,
     ConversationTurnMemberV1,
     ConversationV1,
+    TurnFeedbackError,
+    TurnFeedbackRevisionV1,
+    TurnFeedbackUpdateV1,
 )
 from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 
@@ -53,6 +59,14 @@ def _turn(record: TurnMemberRecord) -> ConversationTurnMemberV1:
         ordinal=record.ordinal,
         created_at=record.created_at,
     )
+def _feedback(record: TurnFeedbackRecord) -> TurnFeedbackRevisionV1:
+    return TurnFeedbackRevisionV1(
+        feedback=record.feedback,
+        revision=record.revision,
+        updated_at=record.updated_at,
+    )
+
+
 
 
 class PostgresConversationV1Adapter:
@@ -133,6 +147,39 @@ class PostgresConversationV1Adapter:
             conversation=_conversation(result.conversation),
             audit_event_ref=result.audit_event_ref,
         )
+
+    def revise_turn_feedback(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        turn_id: str,
+        command: TurnFeedbackUpdateV1,
+    ) -> TurnFeedbackRevisionV1:
+        try:
+            return _feedback(
+                self._store.revise_turn_feedback(
+                    ReviseTurnFeedbackInput(
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        actor_id=actor_id,
+                        feedback=command.feedback,
+                        expected_revision=command.expected_revision,
+                        idempotency_key=command.idempotency_key,
+                    )
+                )
+            )
+        except TurnFeedbackStoreError as error:
+            raise TurnFeedbackError(error.reason) from error
+
+    def current_turn_feedback(
+        self, turn_id: str
+    ) -> TurnFeedbackRevisionV1 | None:
+        try:
+            record = self._store.current_turn_feedback(turn_id)
+        except TurnFeedbackStoreError as error:
+            raise TurnFeedbackError(error.reason) from error
+        return None if record is None else _feedback(record)
 
     def append_retry_turn_member(
         self,

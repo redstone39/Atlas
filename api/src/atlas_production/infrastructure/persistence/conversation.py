@@ -81,6 +81,32 @@ class AtlasTurnConversationMemberRow(OrmBase):
         CheckConstraint("ordinal >= 1", name="ck_atlas_turn_member_ordinal"),
         UniqueConstraint("conversation_id", "ordinal", name="uq_atlas_turn_member_ordinal"),
     )
+class AtlasTurnFeedbackRevisionRow(OrmBase):
+    __tablename__ = "atlas_turn_feedback_revisions"
+
+    turn_id: Mapped[str] = mapped_column(
+        String(200),
+        ForeignKey("atlas_turn_conversation_members.turn_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feedback: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "feedback IN ('helpful','not_helpful')",
+            name="ck_atlas_turn_feedback_value",
+        ),
+        CheckConstraint("revision >= 1", name="ck_atlas_turn_feedback_revision"),
+        CheckConstraint(
+            "char_length(actor_id) >= 1",
+            name="ck_atlas_turn_feedback_actor",
+        ),
+    )
+
+
 
 
 class AtlasTurnConversationIdempotencyRow(OrmBase):
@@ -99,7 +125,7 @@ class AtlasTurnConversationIdempotencyRow(OrmBase):
 
     __table_args__ = (
         CheckConstraint(
-            "operation IN ('create_conversation','create_turn','retry_turn','archive_conversation')",
+            "operation IN ('create_conversation','create_turn','retry_turn','archive_conversation','revise_turn_feedback')",
             name="ck_atlas_turn_conversation_idempotency_operation",
         ),
         CheckConstraint("char_length(scope_ref) >= 1", name="ck_atlas_turn_conversation_idempotency_scope"),
@@ -112,6 +138,7 @@ OWNER_TABLES = frozenset(
         AtlasTurnConversationRow.__tablename__,
         AtlasTurnConversationScopeTagRow.__tablename__,
         AtlasTurnConversationMemberRow.__tablename__,
+        AtlasTurnFeedbackRevisionRow.__tablename__,
         AtlasTurnConversationIdempotencyRow.__tablename__,
     }
 )

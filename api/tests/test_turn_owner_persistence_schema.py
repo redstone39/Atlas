@@ -68,7 +68,7 @@ def test_owner_tables_are_registered_once_and_partitioned() -> None:
         + len(audit_events.TURN_AUDIT_OWNER_TABLES)
     )
     assert expected <= set(OrmBase.metadata.tables)
-    assert len(expected) == 46
+    assert len(expected) == 47
 
 
 def test_owner_tables_have_no_cross_owner_foreign_keys() -> None:
@@ -100,6 +100,22 @@ def test_conversation_membership_and_idempotency_constraints() -> None:
     assert [column.name for column in idempotency.primary_key.columns] == [
         "scope_ref", "operation", "idempotency_key"
     ]
+    feedback = OrmBase.metadata.tables["atlas_turn_feedback_revisions"]
+    assert [column.name for column in feedback.primary_key.columns] == [
+        "turn_id",
+        "revision",
+    ]
+    assert {
+        "ck_atlas_turn_feedback_value",
+        "ck_atlas_turn_feedback_revision",
+        "ck_atlas_turn_feedback_actor",
+    } <= _constraint_names(feedback.name, CheckConstraint)
+    assert next(iter(feedback.c.turn_id.foreign_keys)).ondelete == "CASCADE"
+    assert feedback.c.created_at.type.timezone is True
+    assert {"idempotency_key", "request_digest", "response_payload"}.isdisjoint(
+        feedback.columns
+    )
+
 
 
 def test_immutable_owner_outputs_have_replay_uniqueness() -> None:
