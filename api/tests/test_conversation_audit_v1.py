@@ -171,7 +171,7 @@ class Workspace:
                 )
             }
         )
-        return runtime_snapshot, [event], [], 0
+        return runtime_snapshot, [event], [], 0, []
 
     def audit_read_declared_evidence(
         self,
@@ -253,6 +253,7 @@ def test_admin_runtime_returns_strict_snapshot_and_durable_events() -> None:
     assert result.model_visible_item_limit == 37
     assert result.model_visible_item_exceeded is True
     assert result.document_discovery == []
+    assert result.audit_steps == []
     assert [event.event_id for event in result.events] == ["event-1"]
     assert result.created_at == NOW
     assert workspace.runtime_calls == [("admin-1", "conversation-1", "turn-1")]

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from atlas_production.modules.authorization.public import VisibilityDecisionV1
-from atlas_production.modules.audit.public import TurnAuditDraftV2
+from atlas_production.modules.audit.public import TurnAuditDraftV2, TurnAuditStepV1
 from atlas_production.modules.citation_preview.public import (
     CitationBindingDraftV1,
     CitationBindingDraftV2,
@@ -417,7 +417,37 @@ class _Audits:
             ),
             evidence_review_status="questionable",
             terminal_status="terminal_completed",
-            steps=[],
+            steps=[
+                TurnAuditStepV1(
+                    ordinal=1,
+                    step_kind="model",
+                    operation="search_knowledge",
+                    status="completed",
+                    safe_input_digest="1" * 64,
+                    input_tokens=20,
+                    output_tokens=5,
+                ),
+                TurnAuditStepV1(
+                    ordinal=2,
+                    step_kind="tool",
+                    operation="search_knowledge",
+                    status="completed",
+                    safe_input_digest="2" * 64,
+                    result_ref=f"result-{execution_id}",
+                    result_digest="3" * 64,
+                    output_tokens=12,
+                    evidence_count=1,
+                ),
+                TurnAuditStepV1(
+                    ordinal=3,
+                    step_kind="model",
+                    operation="finalize_answer",
+                    status="completed",
+                    safe_input_digest="4" * 64,
+                    input_tokens=25,
+                    output_tokens=30,
+                ),
+            ],
             digest="f" * 64,
             created_at=NOW,
         )
@@ -586,7 +616,13 @@ def test_admin_runtime_restore_recomputes_visibility_before_returning_events() -
     authorization.visible = True
     app = _application(authorization)
 
-    snapshot, events, discovery, visual_capability_count = app.audit_execution(
+    (
+        snapshot,
+        events,
+        discovery,
+        visual_capability_count,
+        audit_steps,
+    ) = app.audit_execution(
         actor_id="admin-1",
         conversation_id="conversation-1",
         turn_id="turn-2",
@@ -596,6 +632,105 @@ def test_admin_runtime_restore_recomputes_visibility_before_returning_events() -
     assert events == ["event-execution-2"]
     assert discovery == []
     assert visual_capability_count == 0
+    assert [
+        (step.ordinal, step.step_kind, step.operation) for step in audit_steps
+    ] == [
+        (1, "model", "search_knowledge"),
+        (2, "tool", "search_knowledge"),
+        (3, "model", "finalize_answer"),
+    ]
+
+
+@pytest.mark.parametrize("draft_state", ["missing", "mismatched"])
+def test_admin_completed_runtime_fails_closed_without_matching_v2_audit_draft(
+    draft_state: str,
+) -> None:
+    authorization = _Authorization()
+    authorization.visible = True
+    app = _application(authorization)
+    draft = app._audits.read_v2("audit-execution-2")
+    if draft_state == "missing":
+        draft = None
+    else:
+        draft = draft.model_copy(update={"execution_id": "execution-other"})
+    app._audits.read_v2 = lambda _ref: draft
+
+    with pytest.raises(WorkspaceTurnError) as caught:
+        app.audit_execution(
+            actor_id="admin-1",
+            conversation_id="conversation-1",
+            turn_id="turn-2",
+        )
+
+    assert caught.value.error_code == "projection_incomplete"
+    assert caught.value.message_code == "common.rejected"
+    assert caught.value.status_code == 503
+
+
+def test_admin_failed_runtime_returns_no_synthetic_audit_steps() -> None:
+    authorization = _Authorization()
+    authorization.visible = True
+    app = _application(authorization)
+    app._runtime.snapshots = {
+        **app._runtime.snapshots,
+        "execution-2": app._runtime.snapshots["execution-2"].model_copy(
+            update={
+                "state": ExecutionState.TERMINAL_FAILED,
+                "terminal_failure_code": "execution_carrier_lost",
+            }
+        ),
+    }
+
+    *_, audit_steps = app.audit_execution(
+        actor_id="admin-1",
+        conversation_id="conversation-1",
+        turn_id="turn-2",
+    )
+
+    assert audit_steps == []
+
+
+def test_admin_runtime_binds_visibility_to_the_returned_execution_snapshot() -> None:
+    authorization = _Authorization()
+    app = _application(authorization)
+    runtime = app._runtime
+    completed_snapshot = runtime.snapshots["execution-1"]
+    materializing_snapshot = completed_snapshot.model_copy(
+        update={"state": ExecutionState.MATERIALIZING_TERMINAL}
+    )
+    original_outcome = runtime.terminal_outcome
+    completed_outcome = original_outcome("execution-1")
+    snapshot_calls = 0
+    outcome_calls = 0
+
+    def sequenced_snapshot(execution_id: str):
+        nonlocal snapshot_calls
+        if execution_id != "execution-1":
+            return runtime.snapshots[execution_id]
+        snapshot_calls += 1
+        return materializing_snapshot if snapshot_calls == 1 else completed_snapshot
+
+    def sequenced_outcome(execution_id: str):
+        nonlocal outcome_calls
+        if execution_id != "execution-1":
+            return original_outcome(execution_id)
+        outcome_calls += 1
+        return None if outcome_calls == 1 else completed_outcome
+
+    runtime.snapshot = sequenced_snapshot
+    runtime.terminal_outcome = sequenced_outcome
+
+    snapshot, *_, audit_steps = app.audit_execution(
+        actor_id="admin-1",
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+    )
+
+    assert snapshot.state == ExecutionState.MATERIALIZING_TERMINAL
+    assert audit_steps == []
+    assert snapshot_calls == 1
+    assert outcome_calls == 1
+    assert app._visible_turns("admin-1", "conversation-1") == []
 
 
 def test_protected_citation_read_recomputes_visibility_and_uses_exact_lineage() -> None:

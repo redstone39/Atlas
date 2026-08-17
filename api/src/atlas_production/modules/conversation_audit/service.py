@@ -102,6 +102,7 @@ class ConversationAuditService:
                 events,
                 document_discovery,
                 _,
+                audit_steps,
             ) = self.workspace.audit_execution(
                 actor_id=admin.actor_id,
                 conversation_id=conversation_id,
@@ -135,6 +136,7 @@ class ConversationAuditService:
             ),
             document_discovery=document_discovery,
             events=events,
+            audit_steps=audit_steps,
             created_at=snapshot.created_at,
             updated_at=snapshot.updated_at,
         )

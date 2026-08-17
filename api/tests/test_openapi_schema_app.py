@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "018d07107700fdf5a036d612ba0f63f7541cada034d9283dc3ce3365df964bbe"
+    "d9cfcdcec4efa7bbaec1a05fe83ec035edad5e46ac6321057daa21608328af9e"
 )
 
 
@@ -124,7 +124,14 @@ def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:
         "model_visible_item_count",
         "model_visible_item_limit",
         "model_visible_item_exceeded",
+        "audit_steps",
     }.issubset(schemas["RuntimeTraceDetail"]["required"])
+    audit_steps = schemas["RuntimeTraceDetail"]["properties"]["audit_steps"]
+    assert audit_steps["maxItems"] == 40
+    assert audit_steps["items"] == {
+        "$ref": "#/components/schemas/TurnAuditStepV1"
+    }
+    assert schemas["TurnAuditStepV1"]["additionalProperties"] is False
     assert schemas["ProtectedDeclaredEvidenceV1"]["additionalProperties"] is False
     assert set(
         schemas["WorkspaceConversationSummaryV1"]["properties"]["last_turn_status"][

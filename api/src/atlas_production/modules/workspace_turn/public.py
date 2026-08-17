@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 from atlas_production.modules.audit.public import (
     TurnAuditDraftOwner,
     TurnAuditDraftOwnerV2,
+    TurnAuditStepV1,
 )
 from atlas_production.modules.authorization.public import (
     AuthorizationOwner,
@@ -101,6 +102,7 @@ from atlas_production.modules.turn_runtime.public import (
     ReasoningProgressStatus,
     RuntimeEventV1,
     StageAcceptanceResourceV1,
+    TerminalOutcomeV1,
     TurnRuntimeReplayConflict,
     TurnRuntimeOwner,
 )
@@ -1398,16 +1400,41 @@ class WorkspaceTurnApplication:
         list[RuntimeEventV1],
         list[WorkspaceDiscoveryTraceV1],
         int,
+        list[TurnAuditStepV1],
     ]:
         member = self._conversations.get_turn(turn_id)
         if member is None or member.conversation_id != conversation_id:
             raise WorkspaceTurnError("not_found", "audit.runtime_trace_was_not_found", 404)
+        snapshot = self._runtime.snapshot(member.execution_id)
+        outcome = self._runtime.terminal_outcome(member.execution_id)
         visible_turn_ids = {
-            turn.turn_id for turn in self._visible_turns(actor_id, conversation_id)
+            turn.turn_id
+            for turn in self._visible_turns(
+                actor_id,
+                conversation_id,
+                execution_views={
+                    member.execution_id: (snapshot, outcome),
+                },
+            )
         }
         if turn_id not in visible_turn_ids:
             raise WorkspaceTurnError("not_found", "audit.runtime_trace_was_not_found", 404)
-        snapshot = self._runtime.snapshot(member.execution_id)
+        audit_steps: list[TurnAuditStepV1] = []
+        if snapshot.state == ExecutionState.TERMINAL_COMPLETED:
+            if (
+                outcome is None
+                or outcome.outcome != "completed"
+                or outcome.audit_draft_ref is None
+            ):
+                raise WorkspaceTurnError(
+                    "projection_incomplete", "common.rejected", 503
+                )
+            audit = self._audits.read_v2(outcome.audit_draft_ref)
+            if audit is None or audit.execution_id != snapshot.execution_id:
+                raise WorkspaceTurnError(
+                    "projection_incomplete", "common.rejected", 503
+                )
+            audit_steps = audit.steps
         traces = (
             self._retrieval.read_discovery_traces(
                 execution_id=snapshot.execution_id,
@@ -1428,6 +1455,7 @@ class WorkspaceTurnApplication:
                 if snapshot.catalog_ref is not None
                 else 0
             ),
+            audit_steps,
         )
 
     def _project_discovery_traces(
@@ -1534,12 +1562,25 @@ class WorkspaceTurnApplication:
         ]
 
     def _visible_turns(
-        self, actor_id: str, conversation_id: str
+        self,
+        actor_id: str,
+        conversation_id: str,
+        *,
+        execution_views: dict[
+            str, tuple[ExecutionSnapshotV1, TerminalOutcomeV1 | None]
+        ]
+        | None = None,
     ) -> list[WorkspaceTurnProjectionV1]:
         visible_ids: set[str] = set()
         projected: list[WorkspaceTurnProjectionV1] = []
+        pinned_views = execution_views or {}
         for member, edges in self._lineage_ordered_members(conversation_id):
-            snapshot = self._runtime.snapshot(member.execution_id)
+            view = pinned_views.get(member.execution_id)
+            if view is None:
+                snapshot = self._runtime.snapshot(member.execution_id)
+                outcome = self._runtime.terminal_outcome(member.execution_id)
+            else:
+                snapshot, outcome = view
             dependency_hidden = any(
                 edge.source_turn_id not in visible_ids for edge in edges
             )
@@ -1556,7 +1597,6 @@ class WorkspaceTurnApplication:
                 and edge.source_resource_kind in {"document", "evidence", "citation"}
                 and edge.lifecycle_epoch is not None
             ]
-            outcome = self._runtime.terminal_outcome(member.execution_id)
             if outcome is not None and outcome.outcome == "completed" and outcome.evidence_pack_ref:
                 pack = self._retrieval.read_evidence_pack(outcome.evidence_pack_ref)
                 if pack is None:

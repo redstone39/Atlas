@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from atlas_production.modules.audit.public import TurnAuditStepV1
 
 from atlas_production.modules.conversation.public import ConversationV1, ReasoningMode
 from atlas_production.modules.turn_runtime.public import (
@@ -50,5 +51,6 @@ class RuntimeTraceDetail(_StrictModel):
     model_visible_item_exceeded: bool
     document_discovery: list[WorkspaceDiscoveryTraceV1]
     events: list[RuntimeEventV1]
+    audit_steps: list[TurnAuditStepV1] = Field(max_length=40)
     created_at: AwareDatetime
     updated_at: AwareDatetime
