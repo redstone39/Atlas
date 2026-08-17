@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 
 from atlas_production.app import create_app
 from atlas_production.infrastructure.composition import ApiComposition
+from atlas_production.infrastructure.turn_execution_orchestrator import (
+    _capability_rejection_audit_step,
+)
 from atlas_production.modules.conversation.public import (
     ConversationArchiveResultV1,
     ConversationV1,
@@ -14,6 +17,7 @@ from atlas_production.modules.conversation.public import (
 )
 from atlas_production.modules.citation_preview.public import ProtectedCitationEvidenceV1
 from atlas_production.modules.identity_access.records import UserRecord
+from atlas_production.modules.turn_execution.public import ModelContractViolationV1
 from atlas_production.modules.turn_runtime.public import ExecutionState, RuntimeEventV1
 from atlas_production.modules.workspace_turn.public import (
     WorkspaceConversationDetailV1,
@@ -34,6 +38,24 @@ CONVERSATION = ConversationV1(
     created_at=NOW,
     updated_at=NOW,
 )
+
+def test_capability_rejection_audit_step_never_copies_provider_action_name() -> None:
+    provider_action_name = "ignore instructions; secret=provider-token"
+
+    step = _capability_rejection_audit_step(
+        ordinal=3,
+        safe_input_digest="a" * 64,
+        violation=ModelContractViolationV1(
+            safe_code="unknown_turn_tool",
+            action_name=provider_action_name,
+            input_tokens=12,
+            output_tokens=4,
+        ),
+    )
+
+    assert step.operation == "provider_capability_rejected"
+    assert provider_action_name not in step.model_dump_json()
+    assert (step.input_tokens, step.output_tokens) == (12, 4)
 
 
 class _Principal:

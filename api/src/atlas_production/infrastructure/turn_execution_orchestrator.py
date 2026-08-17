@@ -100,6 +100,23 @@ from atlas_production.modules.turn_runtime.public import (
 )
 logger = logging.getLogger(__name__)
 
+def _capability_rejection_audit_step(
+    *,
+    ordinal: int,
+    safe_input_digest: str,
+    violation: ModelContractViolationV1,
+) -> TurnAuditStepV1:
+    return TurnAuditStepV1(
+        ordinal=ordinal,
+        step_kind="model",
+        operation="provider_capability_rejected",
+        status="failed",
+        safe_input_digest=safe_input_digest,
+        input_tokens=violation.input_tokens,
+        output_tokens=violation.output_tokens,
+    )
+
+
 
 class TurnModelInputSource(Protocol):
     def build(
@@ -632,23 +649,18 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 step_ordinal += 1
                 if isinstance(model_result, ModelContractViolationV1):
                     logger.warning(
-                        "turn model capability rejected execution_id=%s safe_code=%s action_name=%s repair_remaining=%s",
+                        "turn model capability rejected execution_id=%s safe_code=%s repair_remaining=%s",
                         execution_id,
                         model_result.safe_code,
-                        model_result.action_name,
                         contract_repair_remaining,
                     )
                     audit_steps.append(
-                        TurnAuditStepV1(
+                        _capability_rejection_audit_step(
                             ordinal=step_ordinal,
-                            step_kind="model",
-                            operation=(
-                                f"{model_result.action_name or 'provider'}:capability_rejected"
-                            )[:100],
-                            status="failed",
-                            safe_input_digest=_digest(model_input.model_dump(mode="json")),
-                            input_tokens=model_result.input_tokens,
-                            output_tokens=model_result.output_tokens,
+                            safe_input_digest=_digest(
+                                model_input.model_dump(mode="json")
+                            ),
+                            violation=model_result,
                         )
                     )
                     failure_code = "contract_violation"
