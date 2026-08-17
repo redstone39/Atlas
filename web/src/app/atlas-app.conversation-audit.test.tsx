@@ -339,7 +339,7 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
       "/admin/audit/conversations/conv-supported-001/transcript",
     );
     mockApi(adminSession, readyReadiness);
-    const { container } = render(<App />);
+    const { container, unmount } = render(<App />);
 
     expect((await screen.findAllByText("Example conversation")).length).toBeGreaterThan(0);
     expect(container.querySelector('[data-slot="audit-conversation-layout"]')).toBeInTheDocument();
@@ -382,6 +382,26 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
     expect(screen.getByText(/Evaluation 1 · reason declared_evidence_insufficient/)).toBeInTheDocument();
     expect(screen.getAllByText(/research_then_revise/).length).toBeGreaterThan(0);
     expect(screen.getByText(/tool ordinals 2–3/)).toBeInTheDocument();
+    const activity = screen.getByRole("region", {
+      name: "Model and tool activity",
+    });
+    const activityRows = within(activity).getAllByRole("row").slice(1);
+    expect(activityRows).toHaveLength(3);
+    expect(activityRows[0]).toHaveTextContent(
+      /1.*Model decision.*search_knowledge.*completed/,
+    );
+    expect(activityRows[1]).toHaveTextContent(
+      /2.*Tool use.*search_knowledge.*completed.*result-discovery-001/,
+    );
+    expect(activityRows[2]).toHaveTextContent(
+      /3.*Model decision.*finalize_answer.*completed.*result-answer-001/,
+    );
+    expect(activity).toHaveTextContent(
+      "Safe action records identify selected actions and tool use; they are not model chain-of-thought.",
+    );
+    expect(activity).not.toHaveTextContent("8".repeat(64));
+    expect(activity).not.toHaveTextContent("9".repeat(64));
+    expect(activity).not.toHaveTextContent("0".repeat(64));
     expect(screen.queryByText(/accuracy score/i)).not.toBeInTheDocument();
     expect(screen.getByText("Answer guidance revision").parentElement).toHaveTextContent("3");
     expect(screen.getByText("Answer guidance digest")).toBeInTheDocument();
@@ -409,7 +429,7 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
     expect(await screen.findByText("exec-answer-001")).toBeInTheDocument();
     expect(await screen.findByText("execution_allocated")).toBeInTheDocument();
     expect((await screen.findAllByText("terminal_completed")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("result-answer-001")).toBeInTheDocument();
+    expect((await screen.findAllByText("result-answer-001")).length).toBeGreaterThan(0);
     expect(screen.queryByText("Redacted payloads")).not.toBeInTheDocument();
     expect(screen.queryByText(/provider.example/)).not.toBeInTheDocument();
     expect(screen.queryByText(/redacted prompt preview/)).not.toBeInTheDocument();
@@ -419,6 +439,78 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
         String(input).includes("/export"),
       ),
     ).toBe(false);
+    unmount();
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    const populatedRuntimeFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname.endsWith("/turns/turn-answer-001/runtime") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse({ ...runtimeTraceDetail, audit_steps: [] });
+      }
+      return populatedRuntimeFetch(input, init);
+    });
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "View runtime trace" }),
+    );
+    expect(
+      await screen.findByText(
+        "No model or tool action records are available for this execution.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+it("/admin/audit shows ordered safe actions for a Standard completed runtime", async () => {
+    // acceptance-scenario:SYS-08
+    window.history.pushState(
+      {},
+      "",
+      "/admin/audit/conversations/conv-supported-001/transcript",
+    );
+    mockApi(adminSession, readyReadiness);
+    const defaultFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname.endsWith("/turns/turn-answer-001/runtime") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse({
+          ...runtimeTraceDetail,
+          reasoning_mode: "standard",
+          reasoning_trace: null,
+        });
+      }
+      return defaultFetch(input, init);
+    });
+    render(<App />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "View runtime trace" }),
+    );
+
+    const activity = await screen.findByRole("region", {
+      name: "Model and tool activity",
+    });
+    const rows = within(activity).getAllByRole("row").slice(1);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent(/Model decision.*search_knowledge/);
+    expect(rows[1]).toHaveTextContent(/Tool use.*search_knowledge/);
+    expect(rows[2]).toHaveTextContent(/Model decision.*finalize_answer/);
+    expect(screen.getByText("standard")).toBeInTheDocument();
+    expect(screen.queryByText("Atlas structured reasoning record"))
+      .not.toBeInTheDocument();
+    expect(activity).not.toHaveTextContent("8".repeat(64));
+    expect(activity).not.toHaveTextContent("9".repeat(64));
+    expect(screen.queryByText(/provider.example/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/redacted prompt preview/)).not.toBeInTheDocument();
   });
 
 it("/admin/audit highlights model-visible item overflow using the execution-fixed limit", async () => {

@@ -47,6 +47,9 @@ export function ConversationRuntimeView({
   onDiscoveryPreviewChange: (preview: DiscoveryPreview | null) => void;
 }) {
   const { t } = useTranslation();
+  const displayedAuditSteps = selectedRuntime?.audit_steps.filter(
+    (step) => step.step_kind === "model" || step.step_kind === "tool",
+  ) ?? [];
   return (
 <div className="min-w-0 max-h-[min(42rem,70vh)] overflow-y-auto">
                   {selectedRuntimeTurn && (
@@ -137,6 +140,71 @@ export function ConversationRuntimeView({
                             </div>
                           )
                         ) : null}
+                        <section
+                          data-slot="audit-step-activity"
+                          aria-labelledby="audit-step-activity-title"
+                        >
+                          <div id="audit-step-activity-title" className="font-medium">
+                            {t("audit.modelToolActivity")}
+                          </div>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            {t("audit.modelToolActivityDescription")}
+                          </p>
+                          {displayedAuditSteps.length === 0 ? (
+                            <p className="mt-2 text-sm text-muted-foreground">
+                              {t("audit.noModelToolActivity")}
+                            </p>
+                          ) : (
+                            <Table className="mt-2">
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead>{t("audit.stepOrdinal")}</TableHead>
+                                  <TableHead>{t("audit.stepType")}</TableHead>
+                                  <TableHead>{t("audit.stepOperation")}</TableHead>
+                                  <TableHead>{t("audit.stepStatus")}</TableHead>
+                                  <TableHead>{t("audit.stepResultRef")}</TableHead>
+                                  <TableHead>{t("audit.stepUsage")}</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {displayedAuditSteps.map((step) => (
+                                  <TableRow
+                                    key={`${step.ordinal}:${step.step_kind}:${step.operation}`}
+                                  >
+                                    <TableCell>{step.ordinal}</TableCell>
+                                    <TableCell>
+                                      {t(
+                                        step.step_kind === "model"
+                                          ? "audit.modelDecision"
+                                          : "audit.toolUse",
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="font-mono text-xs">
+                                      {step.operation}
+                                    </TableCell>
+                                    <TableCell>
+                                      <Badge variant="outline">{step.status}</Badge>
+                                    </TableCell>
+                                    <TableCell className="font-mono text-xs">
+                                      {step.result_ref ?? "—"}
+                                    </TableCell>
+                                    <TableCell>
+                                      {step.step_kind === "model"
+                                        ? t("audit.modelStepUsage", {
+                                            input: step.input_tokens,
+                                            output: step.output_tokens,
+                                          })
+                                        : t("audit.toolStepUsage", {
+                                            output: step.output_tokens,
+                                            evidence: step.evidence_count,
+                                          })}
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          )}
+                        </section>
                         <div
                           data-slot="model-visible-item-diagnostic"
                           className={

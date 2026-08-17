@@ -113,6 +113,19 @@ export interface DocumentDiscoveryTrace {
   candidates: DiscoveryCandidateTrace[];
 }
 
+export interface AuditStep {
+  ordinal: number;
+  step_kind: "model" | "tool" | "governance" | "citation" | "terminal";
+  operation: string;
+  status: "completed" | "failed" | "replayed" | "skipped";
+  safe_input_digest: string;
+  result_ref: string | null;
+  result_digest: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  evidence_count: number;
+}
+
 export interface RuntimeTraceDetail {
   execution_id: string;
   conversation_id: string;
@@ -130,6 +143,7 @@ export interface RuntimeTraceDetail {
   model_visible_item_exceeded: boolean;
   document_discovery: DocumentDiscoveryTrace[];
   events: RuntimeEvent[];
+  audit_steps: AuditStep[];
   created_at: string;
   updated_at: string;
 }
