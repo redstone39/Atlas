@@ -28,14 +28,22 @@ initializer.
    evaluation, and revision.
 8. A terminal transaction publishes the answer, runtime events, safe reasoning
    progress, evidence review status, and protected evidence references.
-9. Every later protected read recomputes current authorization and checks exact
-   artifact lineage.
+9. The conversation owner may set or change `helpful|not_helpful` feedback for
+   an eligible completed, nonblank assistant answer. The Workspace shows the
+   server-confirmed current value; System Admin sees that value and its
+   last-modified time through the read-only audit transcript.
+10. Every later protected read recomputes current authorization and checks exact
+    artifact lineage.
 
 ## Authority
 
 - PostgreSQL owner repositories are authoritative for local and imported
   identities, directory configuration, projects, grants, documents, processing,
   conversations, turns, routing, audit, and terminal state.
+- `ConversationOwner` is the sole authority for append-only per-turn feedback
+  revisions. The Workspace turn application owns the owner-only nested mutation
+  and latest-only projection; feedback is not an input to model execution,
+  retrieval, evidence, citation, retry, or context construction.
 - PostgreSQL is also authoritative for scope-bound Notes, immutable revisions
   and savepoints, collaboration epochs, restore commits, settings, and
   attachment metadata. The WebSocket carrier keeps only reconstructible
@@ -79,6 +87,12 @@ Architecture ownership and dependency direction are executable in
 - Deleting a Workspace conversation is an owner-only `active -> archived`
   transition. Archived conversations are hidden from the member Workspace but
   retained for System Admin audit; Atlas does not physically delete them.
+- Archiving preserves feedback revisions. Workspace mutation remains limited to
+  an active conversation owned by the caller, while System Admin receives only
+  the current feedback value and update time for active or archived transcripts.
+- Feedback writes require an eligible terminal-completed turn with a matching
+  nonblank governed answer. Stale revisions, idempotency-key reuse, invalid
+  history, foreign turns, and execution mismatches fail closed.
 - Invalid authority, lineage, lease, configuration, or artifact checks fail
   closed and do not publish a fabricated successful result.
 - Protected previews do not provide public URLs, persistent viewer tokens, or
@@ -126,8 +140,13 @@ unless the persisted explicit default is currently eligible.
   Plans, drafts, prompts, Provider payloads, and Provider reasoning are not
   projected to members.
 - System Admin may inspect a bounded structured trace containing Atlas-owned
-  plan, evaluation, revision, termination, and digest metadata. Process scores
-  measure completion of configured steps, not factual correctness.
+  plan, evaluation, revision, termination, digest metadata, and authoritative
+  ordered safe model/tool actions for completed turns. The action projection
+  excludes prompts, raw arguments/results, Provider payloads, secrets, and
+  Provider reasoning. A completed turn whose governed audit draft is missing or
+  mismatched fails closed instead of reconstructing actions; noncompleted turns
+  expose no action rows. Process scores measure completion of configured steps,
+  not factual correctness.
 - Provisional evidence checks and the Process Evaluator remain independent.
   Runtime deterministically combines their correction requirements and can
   require another revision or mark the final answer questionable, but they do
@@ -155,11 +174,13 @@ unless the persisted explicit default is currently eligible.
   activity/revisions, savepoints, body-only restore, settings, and protected
   attachments.
 - Workspace: conversation routes, durable execution status, answers, soft
-  evidence review, and protected page evidence.
+  evidence review, protected page evidence, and owner-controlled current
+  helpful/not-helpful feedback on eligible answers.
 - System Admin: users, teams, projects, Provider/model routes with independent
   text/vision defaults, explicit LDAP/Active Directory transport and scoped
-  imports, Notes settings, plugins, agents/tokens, safe audit events, and
-  conversation runtime inspection.
+  imports, Notes settings, plugins, agents/tokens, safe audit events, ordered
+  completed-turn safe actions, and latest-only read-only feedback in
+  conversation inspection.
 - Agent query management exists, but `POST /api/v1/agent/queries` currently
   returns `501 feature_deferred`.
 

@@ -94,15 +94,23 @@ and revision loop under the selected model route's tool, Provider, token, and
 deadline limits.
 
 Workspace shows only durable, allowlisted progress phases. System Admin can
-inspect the bounded Atlas-owned plan/evaluation trace for incident review. These
-surfaces do not expose Provider reasoning or raw chain-of-thought, and their
-process status and scores are not truth, accuracy, or confidence guarantees.
+inspect the bounded Atlas-owned plan/evaluation trace and the authoritative,
+ordered model/tool actions recorded for a completed turn. Action projection is
+bounded and excludes prompts, raw tool or Provider payloads, secrets, Provider
+reasoning, and raw chain-of-thought. Process status and scores are not truth,
+accuracy, or confidence guarantees.
 
 Conversation history treats prior user text as user-provided context and prior
 assistant text as pending verification. Historical assistant text can help
 resolve dialogue references, but it is not factual evidence for a later answer.
 Evidence, page, visual, and navigation handles share one execution-fixed,
 deduplicated per-turn limit.
+
+The owner of a Workspace conversation can set or change the current
+`helpful`/`not_helpful` value for a completed, nonblank assistant answer.
+Feedback revisions are append-only. Workspace reloads the current value, while
+System Admin sees only that value and its last-modified time through the
+read-only conversation audit surface; feedback history is not exposed there.
 
 Workspace members can remove an idle conversation from their history with the
 Delete action. This archives the conversation; it does not physically delete
