@@ -121,6 +121,21 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
     "atlas_processing_runs.payload": ("processing_metadata", GENERAL_METADATA_MAX_BYTES, "processing_run"),
     "atlas_processing_runtime_profiles.payload": ("routing_policy", RUNTIME_POLICY_MAX_BYTES, "processing_runtime_profile"),
     "atlas_promotion_decisions.payload": ("processing_metadata", GENERAL_METADATA_MAX_BYTES, "processing_promotion_decision"),
+    "atlas_prompt_skill_catalog_revisions.refs": (
+        "prompt_skill_catalog_refs",
+        1_048_576,
+        "atlas_prompt_skill_catalog_revision_refs_v1",
+    ),
+    "atlas_prompt_skill_idempotency.response_payload": (
+        "idempotency_response",
+        1_048_576,
+        "atlas_prompt_skill_mutation_replay_v1",
+    ),
+    "atlas_prompt_skill_revisions.skill_metadata": (
+        "prompt_skill_metadata",
+        32_768,
+        "atlas_prompt_skill_metadata_v1",
+    ),
     "atlas_source_regions.payload": ("processing_metadata", GENERAL_METADATA_MAX_BYTES, "processing_source_region"),
     "atlas_search_chunks.locator": ("search_projection", 8192, "search_chunk_locator"),
     "atlas_task_outbox.payload": ("processing_metadata", 4096, "celery_task_outbox"),
@@ -164,10 +179,20 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
         262_144,
         "turn_retrieval_observation",
     ),
+    "atlas_turn_executions.prompt_skill_catalogs": (
+        "prompt_skill_catalog_refs",
+        32_768,
+        "atlas_prompt_skill_catalog_refs_v1",
+    ),
+    "atlas_turn_executions.prompt_skill_selections": (
+        "prompt_skill_selection_refs",
+        32_768,
+        "atlas_execution_prompt_skill_selections_v1",
+    ),
     "atlas_turn_executions.reasoning_trace": (
         "reasoning_trace",
         32_768,
-        "atlas_reasoning_trace_v2",
+        "atlas_reasoning_trace_v4",
     ),
     "atlas_turn_runtime_events.message_params": (
         "user_message_params",

@@ -98,6 +98,18 @@ def _insert_existing_rows(runtime: PostgresRuntime) -> None:
                 input_digest="0" * 64,
                 response_language="zh-TW",
                 reasoning_mode="standard",
+                prompt_skill_catalogs=[
+                    {
+                        "category": "understanding",
+                        "catalog_revision": 1,
+                        "catalog_digest": "1" * 64,
+                    },
+                    {
+                        "category": "answer",
+                        "catalog_revision": 1,
+                        "catalog_digest": "2" * 64,
+                    },
+                ],
                 reasoning_trace=None,
                 applied_guidance_revision=0,
                 applied_guidance_digest=None,
@@ -118,7 +130,7 @@ def _insert_existing_rows(runtime: PostgresRuntime) -> None:
                 max_model_visible_items_per_turn=2,
                 max_retrieval_repairs=3,
                 max_selected_anchor_pages_per_round=20,
-                max_provider_invocations=8,
+                max_provider_invocations=11,
                 max_reasoning_revision_cycles=0,
                 max_schema_retries_per_turn=3,
                 context_token_budget=100,

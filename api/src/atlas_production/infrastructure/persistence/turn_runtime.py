@@ -26,6 +26,14 @@ class AtlasTurnExecutionRow(OrmBase):
     input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     response_language: Mapped[str] = mapped_column(String(10), nullable=False)
     reasoning_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    prompt_skill_catalogs: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    prompt_skill_selections: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
     reasoning_trace: Mapped[dict[str, object] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
@@ -115,6 +123,24 @@ class AtlasTurnExecutionRow(OrmBase):
             name="ck_atlas_turn_execution_reasoning_mode",
         ),
         CheckConstraint(
+            "jsonb_typeof(prompt_skill_catalogs) = 'array' AND "
+            "octet_length(prompt_skill_catalogs::text) <= 32768 AND ("
+            "(reasoning_mode = 'standard' AND jsonb_array_length(prompt_skill_catalogs) = 2 AND "
+            "prompt_skill_catalogs->0->>'category' = 'understanding' AND "
+            "prompt_skill_catalogs->1->>'category' = 'answer') OR "
+            "(reasoning_mode = 'deep' AND jsonb_array_length(prompt_skill_catalogs) = 3 AND "
+            "prompt_skill_catalogs->0->>'category' = 'understanding' AND "
+            "prompt_skill_catalogs->1->>'category' = 'planner' AND "
+            "prompt_skill_catalogs->2->>'category' = 'answer'))",
+            name="ck_atlas_turn_execution_prompt_skill_catalogs",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(prompt_skill_selections) = 'array' AND "
+            "jsonb_array_length(prompt_skill_selections) <= 6 AND "
+            "octet_length(prompt_skill_selections::text) <= 32768",
+            name="ck_atlas_turn_execution_prompt_skill_selections",
+        ),
+        CheckConstraint(
             "(reasoning_mode = 'standard' AND reasoning_trace IS NULL) OR "
             "(reasoning_mode = 'deep' AND "
             "(reasoning_trace IS NULL OR (jsonb_typeof(reasoning_trace) = 'object' AND "
@@ -176,7 +202,7 @@ class AtlasTurnExecutionRow(OrmBase):
             "max_reasoning_revision_cycles BETWEEN 0 AND 3 AND "
             "max_schema_retries_per_turn BETWEEN 1 AND 3 AND "
             "max_provider_invocations >= max_tool_invocations + "
-            "4 * max_reasoning_revision_cycles + 6",
+            "6 * max_reasoning_revision_cycles + 9",
             name="ck_atlas_turn_execution_provider_budget",
         ),
         CheckConstraint(
@@ -352,7 +378,7 @@ class AtlasTurnRuntimeEventRow(OrmBase):
     __table_args__ = (
         CheckConstraint("sequence >= 1", name="ck_atlas_turn_runtime_event_sequence"),
         CheckConstraint(f"state IN ({EXECUTION_STATES})", name="ck_atlas_turn_runtime_event_state"),
-        CheckConstraint("event_type IN ('execution_allocated','execution_accepted','context_ready','model_action_requested','reasoning_progressed','tool_started','tool_completed','governance_started','terminal_completed','terminal_failed')", name="ck_atlas_turn_runtime_event_type"),
+        CheckConstraint("event_type IN ('execution_allocated','execution_accepted','context_ready','model_action_requested','prompt_skill_selection_recorded','reasoning_progressed','tool_started','tool_completed','governance_started','terminal_completed','terminal_failed')", name="ck_atlas_turn_runtime_event_type"),
         CheckConstraint("invocation_ordinal IS NULL OR invocation_ordinal >= 1", name="ck_atlas_turn_runtime_event_invocation_ordinal"),
         CheckConstraint(
             "(event_type = 'reasoning_progressed' AND reasoning_phase IS NOT NULL "

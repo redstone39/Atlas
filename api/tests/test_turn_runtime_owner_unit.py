@@ -30,7 +30,7 @@ def _allocation(**changes: object) -> AllocateExecutionV1:
         "holder_id": "holder-1",
         "route_policy": RoutePolicyV1(
             max_tool_invocations=1,
-            max_provider_invocations=7,
+            max_provider_invocations=10,
             max_reasoning_revision_cycles=0,
         ),
         "route": route_snapshot(),
@@ -40,6 +40,18 @@ def _allocation(**changes: object) -> AllocateExecutionV1:
         "retry_of_turn_id": None,
             "input_digest": "0" * 64,
             "response_language": "zh-TW",
+            "prompt_skill_catalogs": [
+                {
+                    "category": "understanding",
+                    "catalog_revision": 1,
+                    "catalog_digest": "0" * 64,
+                },
+                {
+                    "category": "answer",
+                    "catalog_revision": 1,
+                    "catalog_digest": "2" * 64,
+                },
+            ],
             "applied_guidance_revision": 0,
             "applied_guidance_digest": None,
     }
@@ -52,7 +64,26 @@ def test_allocation_digest_is_exact_and_deterministic() -> None:
     assert _digest_model(command) == _digest_model(command.model_copy(deep=True))
     assert _digest_model(command) != _digest_model(_allocation(holder_id="holder-2"))
     assert _digest_model(command) != _digest_model(
-        _allocation(reasoning_mode="deep")
+        _allocation(
+            reasoning_mode="deep",
+            prompt_skill_catalogs=[
+                {
+                    "category": "understanding",
+                    "catalog_revision": 1,
+                    "catalog_digest": "0" * 64,
+                },
+                {
+                    "category": "planner",
+                    "catalog_revision": 1,
+                    "catalog_digest": "1" * 64,
+                },
+                {
+                    "category": "answer",
+                    "catalog_revision": 1,
+                    "catalog_digest": "2" * 64,
+                },
+            ],
+        )
     )
 
 

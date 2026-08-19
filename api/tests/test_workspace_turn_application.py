@@ -33,6 +33,7 @@ from atlas_production.modules.conversation.public import (
     TurnFeedbackUpdateV1,
 )
 from atlas_production.modules.identity_access.records import UserRecord
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.retrieval.public import KnowledgeCatalogSnapshotRefV1
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
@@ -114,6 +115,7 @@ class Runtime:
                 input_digest=command.input_digest,
                 response_language=command.response_language,
                 reasoning_mode=command.reasoning_mode,
+                prompt_skill_catalogs=command.prompt_skill_catalogs,
                 applied_guidance_revision=command.applied_guidance_revision,
                 applied_guidance_digest=command.applied_guidance_digest,
                 lease=lease,
@@ -416,6 +418,17 @@ class Carrier:
         self.launched.append(execution_id)
 
 
+class SelectionRecordingCarrier:
+    def __init__(self, selections):
+        self._selections = iter(selections)
+        self.launched = []
+        self.selection_trace_by_execution = {}
+
+    def launch(self, execution_id):
+        self.launched.append(execution_id)
+        self.selection_trace_by_execution[execution_id] = tuple(next(self._selections))
+
+
 class ModelRoutes:
     def __init__(self, vision_route=None):
         self.calls = 0
@@ -436,7 +449,7 @@ class ModelRoutes:
                 max_tool_result_tokens_per_execution=64000,
                 max_total_tokens_per_conversation=1000000,
                 max_tool_executions=12,
-                max_provider_invocations=26,
+                max_provider_invocations=33,
                 max_reasoning_revision_cycles=2,
                 max_schema_retries_per_turn=3,
                 max_catalog_pages=5,
@@ -455,17 +468,17 @@ class ModelRoutes:
 
 class ContextPreparer:
     def prepare(
-        self, command, _snapshot, *, catalog_document_count
+        self, command, snapshot, *, catalog_document_count
     ):
-        return command
+        return snapshot, command
 
 
 class RewritingContextPreparer:
     def __init__(self, rewritten: str) -> None:
         self.rewritten = rewritten
 
-    def prepare(self, command, _snapshot, *, catalog_document_count):
-        return command.model_copy(
+    def prepare(self, command, snapshot, *, catalog_document_count):
+        return snapshot, command.model_copy(
             update={
                 "model_user_input": ModelUserInputV3(
                     content_segments=[
@@ -501,6 +514,35 @@ class MutableAnswerBehavior:
         return self.value
 
 
+class PromptSkillCatalog:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.refs = {
+            category: PromptSkillCatalogRefV1(
+                category=category,
+                catalog_revision=1,
+                catalog_digest=digest * 64,
+            )
+            for category, digest in (
+                ("understanding", "0"),
+                ("planner", "1"),
+                ("answer", "2"),
+            )
+        }
+
+    @property
+    def ref(self):
+        return self.refs["planner"]
+
+    @ref.setter
+    def ref(self, value):
+        self.refs["planner"] = value
+
+    def current_catalog(self, category):
+        self.calls.append(category)
+        return self.refs[category]
+
+
 def _app(
     carrier,
     *,
@@ -513,6 +555,7 @@ def _app(
     conversation_usage=None,
     answer_behavior=None,
     conversations=None,
+    prompt_skill_catalog=None,
 ):
     runtime = Runtime()
     source = KnowledgeSource()
@@ -528,6 +571,7 @@ def _app(
         retrieval=retrieval or Retrieval(),
         generation_retention=generation_retention or GenerationRetention(),
         runtime=runtime,
+        prompt_skill_catalog=prompt_skill_catalog or PromptSkillCatalog(),
         results=SimpleNamespace(),
         citations=SimpleNamespace(),
         audits=SimpleNamespace(),
@@ -1060,7 +1104,7 @@ def test_exact_turn_replay_returns_same_execution_without_second_carrier() -> No
         "max_model_visible_items_per_turn": 40,
         "max_retrieval_repairs": 2,
         "max_selected_anchor_pages_per_round": 7,
-        "max_provider_invocations": 26,
+        "max_provider_invocations": 33,
         "max_reasoning_revision_cycles": 2,
         "max_schema_retries_per_turn": 3,
         "context_token_budget": 272000,
@@ -1439,19 +1483,122 @@ def test_execution_acceptance_pins_guidance_and_exact_replay_does_not_reread() -
     assert retry_snapshot.applied_guidance_revision == 2
     assert retry_snapshot.applied_guidance_digest == "2" * 64
 
+def test_acceptance_pins_mode_catalogs_and_retries_refresh_them() -> None:
+    catalog = PromptSkillCatalog()
+    application, runtime, _source = _app(
+        Carrier(),
+        prompt_skill_catalog=catalog,
+    )
+    standard = application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(
+            input_text="standard question",
+            idempotency_key="standard-no-prompt-catalog",
+        ),
+    )
+    assert runtime.executions[standard.execution_id].prompt_skill_catalogs == [
+        catalog.refs["understanding"],
+        catalog.refs["answer"],
+    ]
+    assert catalog.calls == ["understanding", "answer"]
 
-def test_submit_and_explicit_retries_scope_same_key_to_fresh_execution_semantics() -> None:
-    carrier = Carrier()
+    command = WorkspaceTurnCreateV1(
+        input_text="deep question",
+        idempotency_key="deep-prompt-catalog",
+        reasoning_mode="deep",
+    )
+    accepted = application.accept_turn(ACTOR, "conversation-1", command)
+    first = runtime.executions[accepted.execution_id]
+    replayed = application.accept_turn(ACTOR, "conversation-1", command)
+
+    assert replayed == accepted
+    assert catalog.calls == [
+        "understanding",
+        "answer",
+        "understanding",
+        "planner",
+        "answer",
+    ]
+    assert first.prompt_skill_catalogs == [
+        catalog.refs["understanding"],
+        catalog.refs["planner"],
+        catalog.refs["answer"],
+    ]
+
+    catalog.ref = PromptSkillCatalogRefV1(
+        category="planner",
+        catalog_revision=2,
+        catalog_digest="2" * 64,
+    )
+    retry_source = ConversationTurnMemberV1(
+        turn_id="catalog-source",
+        conversation_id="conversation-1",
+        execution_id="catalog-source-execution",
+        role="user",
+        ordinal=1,
+        created_at=NOW,
+    )
+    runtime.executions[retry_source.execution_id] = first.model_copy(
+        update={
+            "execution_id": retry_source.execution_id,
+            "turn_id": retry_source.turn_id,
+        }
+    )
+    retried = application.accept_turn(
+        ACTOR,
+        "conversation-1",
+        WorkspaceTurnCreateV1(
+            input_text="deep question",
+            idempotency_key="deep-prompt-catalog-retry",
+            reasoning_mode="deep",
+        ),
+        retry_of=retry_source,
+    )
+
+    assert catalog.calls == [
+        "understanding",
+        "answer",
+        "understanding",
+        "planner",
+        "answer",
+        "understanding",
+        "planner",
+        "answer",
+    ]
+    assert runtime.executions[retried.execution_id].prompt_skill_catalogs == [
+        catalog.refs["understanding"],
+        catalog.refs["planner"],
+        catalog.refs["answer"],
+    ]
+
+
+def test_explicit_retries_record_independent_selections_and_exact_replay_skips_selector_carrier() -> None:
+    carrier = SelectionRecordingCarrier(
+        [(), ("skill-a:1",), ("skill-b:1",)]
+    )
     application, runtime, _source = _app(carrier)
-    command = WorkspaceTurnCreateV1(input_text="question", idempotency_key="same-key")
+    command = WorkspaceTurnCreateV1(
+        input_text="question",
+        idempotency_key="same-key",
+        reasoning_mode="deep",
+    )
     submitted = application.accept_turn(ACTOR, "conversation-1", command)
     source_a = ConversationTurnMemberV1(
-        turn_id="source-turn-a", conversation_id="conversation-1",
-        execution_id="source-execution-a", role="user", ordinal=1, created_at=NOW,
+        turn_id="source-turn-a",
+        conversation_id="conversation-1",
+        execution_id="source-execution-a",
+        role="user",
+        ordinal=1,
+        created_at=NOW,
     )
-    source_b = source_a.model_copy(update={
-        "turn_id": "source-turn-b", "execution_id": "source-execution-b", "ordinal": 2,
-    })
+    source_b = source_a.model_copy(
+        update={
+            "turn_id": "source-turn-b",
+            "execution_id": "source-execution-b",
+            "ordinal": 2,
+        }
+    )
     submitted_snapshot = runtime.snapshot(submitted.execution_id)
     for source in (source_a, source_b):
         runtime.executions[source.execution_id] = submitted_snapshot.model_copy(
@@ -1464,17 +1611,26 @@ def test_submit_and_explicit_retries_scope_same_key_to_fresh_execution_semantics
     retried_a = application.accept_turn(
         ACTOR, "conversation-1", command, retry_of=source_a
     )
-    replayed_a = application.accept_turn(
-        ACTOR, "conversation-1", command, retry_of=source_a
-    )
     retried_b = application.accept_turn(
         ACTOR, "conversation-1", command, retry_of=source_b
     )
+    selector_invocations_before_replay = len(carrier.selection_trace_by_execution)
+    replayed_a = application.accept_turn(
+        ACTOR, "conversation-1", command, retry_of=source_a
+    )
 
     assert len({submitted.execution_id, retried_a.execution_id, retried_b.execution_id}) == 3
+    assert carrier.selection_trace_by_execution == {
+        submitted.execution_id: (),
+        retried_a.execution_id: ("skill-a:1",),
+        retried_b.execution_id: ("skill-b:1",),
+    }
     assert replayed_a == retried_a
+    assert len(carrier.selection_trace_by_execution) == selector_invocations_before_replay
     assert carrier.launched == [
-        submitted.execution_id, retried_a.execution_id, retried_b.execution_id,
+        submitted.execution_id,
+        retried_a.execution_id,
+        retried_b.execution_id,
     ]
 
 
@@ -1660,7 +1816,7 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
             _completed({"rewritten_question": "current"}, 2),
         ]
     )
-    rewritten = ProviderTurnInputProjector(
+    _, rewritten = ProviderTurnInputProjector(
         middleware_routing, _Projections()
     ).project(
         snapshot=_snapshot(),
@@ -1721,6 +1877,12 @@ def test_context_collapses_retry_chain_and_preserves_user_assistant_exchange() -
     session = StrictProviderTurnModel(
         answer_routing, record_invocations=False
     ).open_session(model_input)
+    session.begin_answer_candidate(
+        model_input,
+        candidate_ordinal=1,
+        candidate_kind="normal",
+        selected_skills=(),
+    )
     session.next_action(model_input, finalize_only=False)
     assert sentinel not in repr(answer_routing.requests[0])
 

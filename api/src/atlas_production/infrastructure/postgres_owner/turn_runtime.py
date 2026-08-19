@@ -25,6 +25,7 @@ from atlas_production.infrastructure.persistence.turn_runtime import (
     AtlasTurnToolLedgerRow,
     AtlasTurnModelVisibleItemLedgerRow,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     AcceptExecutionV1,
     AllocateExecutionV1,
@@ -37,12 +38,14 @@ from atlas_production.modules.turn_runtime.public import (
     CompleteReleaseIntentV1,
     CompleteToolInvocationV1,
     ExecutionLeaseV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     ExecutionState,
     FailCarrierExecutionV1,
     FinalizeExpiredExecutionV1,
     PrepareTerminalV1,
-    ReasoningTraceV3,
+    ReasoningTraceV4,
+    RecordExecutionPromptSkillSelectionV1,
     RecordReasoningProgressV1,
     ReleaseIntentV1,
     RenewExecutionLeaseV1,
@@ -298,8 +301,16 @@ class PostgresTurnRuntimeOwner:
             reasoning_trace=(
                 None
                 if execution.reasoning_trace is None
-                else ReasoningTraceV3.model_validate(execution.reasoning_trace)
+                else ReasoningTraceV4.model_validate(execution.reasoning_trace)
             ),
+            prompt_skill_catalogs=[
+                PromptSkillCatalogRefV1.model_validate(item)
+                for item in execution.prompt_skill_catalogs
+            ],
+            prompt_skill_selections=[
+                ExecutionPromptSkillSelectionTraceV1.model_validate(item)
+                for item in execution.prompt_skill_selections
+            ],
             applied_guidance_revision=execution.applied_guidance_revision,
             applied_guidance_digest=execution.applied_guidance_digest,
             lease=_lease_model(lease),
@@ -517,7 +528,12 @@ class PostgresTurnRuntimeOwner:
                     input_digest=command.input_digest,
                     response_language=command.response_language,
                     reasoning_mode=command.reasoning_mode,
+                    prompt_skill_catalogs=[
+                        item.model_dump(mode="json")
+                        for item in command.prompt_skill_catalogs
+                    ],
                     reasoning_trace=None,
+                    prompt_skill_selections=[],
                     applied_guidance_revision=command.applied_guidance_revision,
                     applied_guidance_digest=command.applied_guidance_digest,
                     state=ExecutionState.ALLOCATED.value,
@@ -598,6 +614,73 @@ class PostgresTurnRuntimeOwner:
             session.flush()
             return self._snapshot(session, command.execution_id)
 
+    def record_prompt_skill_selection(
+        self,
+        command: RecordExecutionPromptSkillSelectionV1,
+    ) -> ExecutionSnapshotV1:
+        with self._session_factory() as session, session.begin():
+            current = session.get(AtlasTurnExecutionRow, command.execution_id)
+            if current is None:
+                raise TurnRuntimeCurrentnessConflict("execution does not exist")
+            existing = [
+                ExecutionPromptSkillSelectionTraceV1.model_validate(item)
+                for item in current.prompt_skill_selections
+            ]
+            selection = command.selection
+            if selection.node == "resolver":
+                if current.state != ExecutionState.ACCEPTED.value or existing:
+                    raise TurnRuntimeCurrentnessConflict(
+                        "Resolver selection requires accepted execution before context bind"
+                    )
+            else:
+                if current.state not in {
+                    ExecutionState.CONTEXT_READY.value,
+                    ExecutionState.AWAITING_MODEL_ACTION.value,
+                    ExecutionState.TOOL_COMPLETED.value,
+                }:
+                    raise TurnRuntimeCurrentnessConflict(
+                        "Answer selection requires context-ready execution"
+                    )
+                if not existing or existing[0].node != "resolver":
+                    raise TurnRuntimeReplayConflict(
+                        "Answer selection requires the Resolver selection"
+                    )
+                expected_ordinal = len(existing)
+                if selection.candidate_ordinal != expected_ordinal:
+                    raise TurnRuntimeReplayConflict(
+                        "Answer candidate selection ordinal is not contiguous"
+                    )
+            appended = [
+                *existing,
+                selection,
+            ]
+            if len(appended) > 6:
+                raise TurnRuntimeReplayConflict(
+                    "execution prompt skill selection limit exceeded"
+                )
+            changed = self._cas_execution(
+                session,
+                execution_id=command.execution_id,
+                expected_version=command.expected_version,
+                fencing_token=command.fencing_token,
+                from_states=(current.state,),
+                to_state=current.state,
+                values={
+                    "prompt_skill_selections": [
+                        item.model_dump(mode="json") for item in appended
+                    ]
+                },
+            )
+            self._append_event(
+                session,
+                execution_id=command.execution_id,
+                sequence=changed.version,
+                event_type="prompt_skill_selection_recorded",
+                state=changed.state,
+            )
+            session.flush()
+            return self._snapshot(session, command.execution_id)
+
     def record_reasoning_progress(
         self, command: RecordReasoningProgressV1
     ) -> ExecutionSnapshotV1:
@@ -607,8 +690,15 @@ class PostgresTurnRuntimeOwner:
                 raise TurnRuntimeCurrentnessConflict(
                     "reasoning progress requires a deep execution"
                 )
+            planner_catalog = PromptSkillCatalogRefV1.model_validate(
+                current.prompt_skill_catalogs[1]
+            )
+            if command.trace.prompt_skill_catalog != planner_catalog:
+                raise TurnRuntimeReplayConflict(
+                    "reasoning trace planner catalog does not match execution pin"
+                )
             if current.reasoning_trace is not None:
-                prior = ReasoningTraceV3.model_validate(current.reasoning_trace)
+                prior = ReasoningTraceV4.model_validate(current.reasoning_trace)
                 if (
                     command.trace.trace_revision != prior.trace_revision + 1
                     or command.trace.parent_trace_digest != prior.trace_digest

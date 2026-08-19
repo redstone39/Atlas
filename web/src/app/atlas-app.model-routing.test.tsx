@@ -375,7 +375,7 @@ it("/admin/models keeps the original minimal prefills without a tested default r
     ).not.toBeInTheDocument();
     expect(within(dialog).getByLabelText("Tokenizer profile")).toHaveValue("cl100k_base");
     expect(within(dialog).getByLabelText("Maximum tool executions")).toHaveValue(12);
-    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(26);
+    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(29);
     expect(
       within(dialog).getByLabelText("Maximum deep-reasoning revision cycles"),
     ).toHaveValue(2);

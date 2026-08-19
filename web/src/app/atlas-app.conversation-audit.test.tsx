@@ -451,6 +451,69 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
       "/admin/audit/conversations/conv-supported-001/transcript",
     );
     mockApi(adminSession, readyReadiness);
+    const sensitiveMarkers = {
+      instruction: "SENSITIVE_SKILL_INSTRUCTION_MARKER",
+      body: "SENSITIVE_SKILL_BODY_MARKER",
+      candidate: "SENSITIVE_SELECTOR_CANDIDATE_MARKER",
+      providerPayload: "SENSITIVE_PROVIDER_PAYLOAD_MARKER",
+    };
+    const canonicalReasoningTrace = runtimeTraceDetail.reasoning_trace;
+    if (!canonicalReasoningTrace) {
+      throw new Error("The canonical runtime trace fixture must include deep reasoning.");
+    }
+    const runtimeTraceWithSensitiveMarkers = {
+      ...runtimeTraceDetail,
+      prompt_skill_selections: runtimeTraceDetail.prompt_skill_selections.map(
+        (selection, index) => ({
+          ...selection,
+          ...(index === 0
+            ? {
+                candidates: [{
+                  selection_id: "execution-candidate-sensitive-001",
+                  name: sensitiveMarkers.candidate,
+                }],
+                provider_payload: { raw: sensitiveMarkers.providerPayload },
+                selected_skills: selection.selected_skills.map((skill) => ({
+                  ...skill,
+                  instructions: sensitiveMarkers.instruction,
+                  body: sensitiveMarkers.body,
+                })),
+              }
+            : {}),
+        }),
+      ),
+      reasoning_trace: {
+        ...canonicalReasoningTrace,
+        skill_selections: canonicalReasoningTrace.skill_selections.map((selection, index) => ({
+          ...selection,
+          ...(index === 0
+            ? {
+                candidates: [{
+                  selection_id: "candidate-sensitive-001",
+                  name: sensitiveMarkers.candidate,
+                }],
+                provider_payload: { raw: sensitiveMarkers.providerPayload },
+                selected_skills: selection.selected_skills.map((skill) => ({
+                  ...skill,
+                  instructions: sensitiveMarkers.instruction,
+                  body: sensitiveMarkers.body,
+                })),
+              }
+            : {}),
+        })),
+      },
+    };
+    const runtimeTraceFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname.endsWith("/turns/turn-answer-001/runtime") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(runtimeTraceWithSensitiveMarkers);
+      }
+      return runtimeTraceFetch(input, init);
+    });
     const { container, unmount } = render(<App />);
 
     expect((await screen.findAllByText("Example conversation")).length).toBeGreaterThan(0);
@@ -488,6 +551,67 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
     expect(screen.getByText(/not accuracy, confidence, or factual guarantees/i))
       .toBeInTheDocument();
     expect(screen.getByText("provider_unavailable")).toBeInTheDocument();
+    const catalogs = screen.getByText("Pinned Skill catalogs").closest("section");
+    expect(catalogs).not.toBeNull();
+    expect(within(catalogs as HTMLElement).getByText("understanding")).toBeInTheDocument();
+    expect(within(catalogs as HTMLElement).getByText("planner")).toBeInTheDocument();
+    expect(within(catalogs as HTMLElement).getByText("answer")).toBeInTheDocument();
+    expect(within(catalogs as HTMLElement).getByText("Catalog revision 3"))
+      .toBeInTheDocument();
+    expect(within(catalogs as HTMLElement).getByText("8".repeat(64)))
+      .toBeInTheDocument();
+
+    const executionSelections = screen
+      .getByText("Resolver and Answer Skill selections")
+      .closest("section");
+    expect(executionSelections).not.toBeNull();
+    expect(within(executionSelections as HTMLElement).getByText("Resolver"))
+      .toBeInTheDocument();
+    expect(
+      within(executionSelections as HTMLElement).getByText(
+        "Answer candidate 1 · normal",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(executionSelections as HTMLElement).getByText(
+        "Answer candidate 2 · normal",
+      ),
+    ).toBeInTheDocument();
+    expect(executionSelections).toHaveTextContent(
+      `evidence-answer · r2 · ${"4".repeat(64)}`,
+    );
+    expect(executionSelections).toHaveTextContent(
+      "1 · insufficient · revised",
+    );
+    expect(executionSelections).toHaveTextContent("selector_unavailable");
+
+    const skillSelections = screen.getByText("Planner skill selections").parentElement;
+    expect(skillSelections).not.toBeNull();
+    const selectionNodes = within(skillSelections as HTMLElement).getAllByText(
+      /^deep_(?:initial_planner|replanner)$/,
+    );
+    expect(selectionNodes.map((node) => node.textContent)).toEqual([
+      "deep_initial_planner",
+      "deep_replanner",
+    ]);
+
+    const initialSelection = selectionNodes[0].closest(".rounded-md.border.p-3");
+    expect(initialSelection).not.toBeNull();
+    expect(initialSelection).toHaveTextContent(/Plan generation\s*1/);
+    expect(initialSelection).toHaveTextContent(/Selection status\s*selected/);
+    expect(initialSelection).toHaveTextContent(
+      `evidence-review · r2 · ${"9".repeat(64)}`,
+    );
+
+    const replannerSelection = selectionNodes[1].closest(".rounded-md.border.p-3");
+    expect(replannerSelection).not.toBeNull();
+    expect(replannerSelection).toHaveTextContent(/Plan generation\s*2/);
+    expect(replannerSelection).toHaveTextContent(/Selection status\s*baseline_fallback/);
+    expect(replannerSelection).toHaveTextContent(/Fallback code\s*selector_unavailable/);
+    expect(container).not.toHaveTextContent(sensitiveMarkers.instruction);
+    expect(container).not.toHaveTextContent(sensitiveMarkers.body);
+    expect(container).not.toHaveTextContent(sensitiveMarkers.candidate);
+    expect(container).not.toHaveTextContent(sensitiveMarkers.providerPayload);
     expect(screen.getByText("Plan generation 2")).toBeInTheDocument();
     expect(screen.getByText("Provisional declared-evidence checks")).toBeInTheDocument();
     expect(screen.getByText(/Check 1 · normal · insufficient · revised/)).toBeInTheDocument();

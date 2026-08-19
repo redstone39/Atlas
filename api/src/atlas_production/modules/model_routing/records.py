@@ -92,12 +92,12 @@ class ModelRouteRuntimePolicyInput:
             raise ValueError("reasoning revision cycle limit must be between zero and three")
         required_provider_invocations = (
             self.max_tool_executions
-            + 4 * self.max_reasoning_revision_cycles
-            + 6
+            + 6 * self.max_reasoning_revision_cycles
+            + 9
         )
         if self.max_provider_invocations < required_provider_invocations:
             raise ValueError(
-                "provider invocation limit must cover tools, planning, evaluation, revisions, and terminal actions"
+                "provider invocation limit must cover tools, selectors, planning, evaluation, revisions, and terminal actions"
             )
         if self.max_retrieval_repairs > 3:
             raise ValueError("retrieval repair limit cannot exceed three")

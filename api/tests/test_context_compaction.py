@@ -129,7 +129,7 @@ class _Projector:
 
     def project(self, **kwargs):
         self.calls.append(kwargs)
-        return self.rewritten
+        return kwargs["snapshot"], self.rewritten
 
 
 def test_below_85_percent_reuses_uncompacted_tail() -> None:
@@ -142,7 +142,7 @@ def test_below_85_percent_reuses_uncompacted_tail() -> None:
         answer_behavior=NullAnswerBehavior(),
     )
 
-    prepared = compactor.prepare(
+    _, prepared = compactor.prepare(
         command, Runtime().snapshot_value, catalog_document_count=2
     )
 
@@ -163,7 +163,7 @@ def test_initial_projection_uses_execution_retrieval_repair_remaining() -> None:
         policy=RoutePolicyV1(max_retrieval_repairs=3)
     ).snapshot_value
 
-    prepared = compactor.prepare(command, snapshot, catalog_document_count=2)
+    _, prepared = compactor.prepare(command, snapshot, catalog_document_count=2)
 
     assert prepared == command
     assert sizer.model_inputs[0].capabilities.contract_repair_remaining == 3
@@ -195,7 +195,7 @@ def test_85_percent_compacts_eligible_history_and_keeps_last_two_exchanges() -> 
         answer_behavior=NullAnswerBehavior(),
     )
 
-    prepared = compactor.prepare(
+    _, prepared = compactor.prepare(
         command, Runtime().snapshot_value, catalog_document_count=2
     )
 
@@ -229,7 +229,7 @@ def test_tool_followup_headroom_compacts_below_85_percent() -> None:
         answer_behavior=NullAnswerBehavior(),
     )
 
-    prepared = compactor.prepare(
+    _, prepared = compactor.prepare(
         command, Runtime().snapshot_value, catalog_document_count=2
     )
 
@@ -353,7 +353,7 @@ def test_raw_context_above_hard_cap_still_compacts_before_enforcement() -> None:
         answer_behavior=NullAnswerBehavior(),
     )
 
-    prepared = compactor.prepare(
+    _, prepared = compactor.prepare(
         command, Runtime().snapshot_value, catalog_document_count=2
     )
 

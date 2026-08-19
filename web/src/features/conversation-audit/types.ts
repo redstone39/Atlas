@@ -134,6 +134,8 @@ export interface RuntimeTraceDetail {
   version: number;
   reasoning_mode: ReasoningMode;
   reasoning_trace: ReasoningTrace | null;
+  prompt_skill_catalogs: PromptSkillCatalogRef[];
+  prompt_skill_selections: ExecutionPromptSkillSelectionTrace[];
   failure_code: string | null;
   applied_guidance_revision: number;
   applied_guidance_digest: string | null;
@@ -147,6 +149,44 @@ export interface RuntimeTraceDetail {
   created_at: string;
   updated_at: string;
 }
+
+export interface PromptSkillCatalogRef {
+  category: "understanding" | "planner" | "answer";
+  catalog_revision: number;
+  catalog_digest: string;
+}
+
+export interface PromptSkillRef {
+  category: "understanding" | "planner" | "answer";
+  name: string;
+  revision: number;
+  content_digest: string;
+}
+
+export interface PromptSkillSelectionTrace {
+  node: "deep_initial_planner" | "deep_replanner";
+  plan_generation: number;
+  status: "not_applicable" | "selected" | "baseline_fallback";
+  selected_skills: PromptSkillRef[];
+  fallback_code:
+    | "selector_unavailable"
+    | "selector_contract_invalid"
+    | "selection_outside_catalog"
+    | "selected_skill_integrity_error"
+    | "selected_skill_context_exceeded"
+    | "selected_skill_trace_exceeded"
+    | null;
+}
+export interface ExecutionPromptSkillSelectionTrace {
+  category: "understanding" | "answer";
+  node: "resolver" | "answer_candidate";
+  candidate_ordinal: number | null;
+  candidate_kind: "normal" | "limit_final" | null;
+  status: "not_applicable" | "selected" | "baseline_fallback";
+  selected_skills: PromptSkillRef[];
+  fallback_code: PromptSkillSelectionTrace["fallback_code"];
+}
+
 
 export interface ReasoningPlanItem {
   item_id: string;
@@ -190,7 +230,9 @@ export interface ReasoningCorrection {
 }
 
 export interface ReasoningTrace {
-  schema_version: "atlas-reasoning-trace-v3";
+  schema_version: "atlas-reasoning-trace-v4";
+  prompt_skill_catalog: PromptSkillCatalogRef;
+  skill_selections: PromptSkillSelectionTrace[];
   trace_revision: number;
   trace_digest: string;
   parent_trace_digest: string | null;

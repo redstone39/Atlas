@@ -7,6 +7,10 @@ from typing import Annotated, Literal, Protocol
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from atlas_production.modules.conversation.public import ReasoningMode, ResponseLanguage
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalogRefV1,
+    PromptSkillRefV1,
+)
 
 
 Identity = Annotated[str, Field(min_length=1, max_length=200)]
@@ -79,7 +83,7 @@ class RoutePolicyV1(_StrictModel):
     max_model_visible_items_per_turn: int = Field(default=40, ge=0)
     max_retrieval_repairs: int = Field(default=3, ge=1, le=3)
     max_selected_anchor_pages_per_round: int = Field(default=20, ge=1, le=20)
-    max_provider_invocations: int = Field(default=26, ge=6)
+    max_provider_invocations: int = Field(default=33, ge=6)
     max_reasoning_revision_cycles: int = Field(default=2, ge=0, le=3)
     max_schema_retries_per_turn: int = Field(default=1, ge=1, le=3)
     context_token_budget: int = Field(default=272000, ge=1)
@@ -89,10 +93,10 @@ class RoutePolicyV1(_StrictModel):
 
     @model_validator(mode="after")
     def reserve_provider_rounds_for_initial_and_terminal_actions(self) -> "RoutePolicyV1":
-        required = self.max_tool_invocations + 4 * self.max_reasoning_revision_cycles + 6
+        required = self.max_tool_invocations + 6 * self.max_reasoning_revision_cycles + 9
         if self.max_provider_invocations < required:
             raise ValueError(
-                "provider invocation budget must cover tools, planning, evaluation, revisions, and terminal actions"
+                "provider invocation budget must cover tools, selectors, planning, evaluation, revisions, and terminal actions"
             )
         if self.tool_execution_timeout_seconds > self.deadline_seconds:
             raise ValueError("turn deadline is shorter than tool timeout")
@@ -246,8 +250,93 @@ class ProvisionalEvidenceCheckV1(_StrictModel):
         return self
 
 
-class ReasoningTraceV3(_StrictModel):
-    schema_version: Literal["atlas-reasoning-trace-v3"] = "atlas-reasoning-trace-v3"
+PromptSkillSelectionFallbackCode = Literal[
+    "selector_unavailable",
+    "selector_contract_invalid",
+    "selection_outside_catalog",
+    "selected_skill_integrity_error",
+    "selected_skill_context_exceeded",
+    "selected_skill_trace_exceeded",
+]
+
+
+class PromptSkillSelectionTraceV1(_StrictModel):
+    node: Literal["deep_initial_planner", "deep_replanner"]
+    plan_generation: int = Field(ge=1, le=4)
+    status: Literal["not_applicable", "selected", "baseline_fallback"]
+    selected_skills: list[PromptSkillRefV1] = Field(default_factory=list)
+    fallback_code: PromptSkillSelectionFallbackCode | None = None
+
+    @model_validator(mode="after")
+    def require_status_shape(self) -> "PromptSkillSelectionTraceV1":
+        if self.status == "baseline_fallback":
+            if self.fallback_code is None:
+                raise ValueError("baseline fallback requires a fallback code")
+        elif self.fallback_code is not None:
+            raise ValueError("non-fallback selection cannot have a fallback code")
+        if self.status != "selected" and self.selected_skills:
+            raise ValueError("only selected status may include selected skills")
+        identities = [
+            (skill.category, skill.name, skill.revision, skill.content_digest)
+            for skill in self.selected_skills
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("selected skill refs must be unique and ordered")
+        if any(skill.category != "planner" for skill in self.selected_skills):
+            raise ValueError("planner selections require planner skill refs")
+        return self
+class ExecutionPromptSkillSelectionTraceV1(_StrictModel):
+    category: Literal["understanding", "answer"]
+    node: Literal["resolver", "answer_candidate"]
+    candidate_ordinal: int | None = Field(default=None, ge=1, le=5)
+    candidate_kind: Literal["normal", "limit_final"] | None = None
+    status: Literal["not_applicable", "selected", "baseline_fallback"]
+    selected_skills: list[PromptSkillRefV1] = Field(default_factory=list)
+    fallback_code: PromptSkillSelectionFallbackCode | None = None
+
+    @model_validator(mode="after")
+    def require_execution_selection_shape(
+        self,
+    ) -> "ExecutionPromptSkillSelectionTraceV1":
+        if self.node == "resolver":
+            if (
+                self.category != "understanding"
+                or self.candidate_ordinal is not None
+                or self.candidate_kind is not None
+            ):
+                raise ValueError("resolver selection requires understanding identity only")
+        elif (
+            self.category != "answer"
+            or self.candidate_ordinal is None
+            or self.candidate_kind is None
+        ):
+            raise ValueError("answer selection requires candidate identity")
+        if self.status == "baseline_fallback":
+            if self.fallback_code is None:
+                raise ValueError("baseline fallback requires a fallback code")
+        elif self.fallback_code is not None:
+            raise ValueError("non-fallback selection cannot have a fallback code")
+        if self.status != "selected" and self.selected_skills:
+            raise ValueError("only selected status may include selected skills")
+        identities = [
+            (skill.category, skill.name, skill.revision, skill.content_digest)
+            for skill in self.selected_skills
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("selected skill refs must be unique and ordered")
+        if any(skill.category != self.category for skill in self.selected_skills):
+            raise ValueError("selected skill refs must match the selection category")
+        return self
+
+
+
+
+class ReasoningTraceV4(_StrictModel):
+    schema_version: Literal["atlas-reasoning-trace-v4"] = "atlas-reasoning-trace-v4"
+    prompt_skill_catalog: PromptSkillCatalogRefV1
+    skill_selections: list[PromptSkillSelectionTraceV1] = Field(
+        default_factory=list, max_length=4
+    )
     trace_revision: int = Field(ge=1)
     trace_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     parent_trace_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -273,7 +362,9 @@ class ReasoningTraceV3(_StrictModel):
     ] | None = None
 
     @model_validator(mode="after")
-    def require_bounded_trace(self) -> "ReasoningTraceV3":
+    def require_bounded_trace(self) -> "ReasoningTraceV4":
+        if self.prompt_skill_catalog.category != "planner":
+            raise ValueError("reasoning trace requires a planner skill catalog")
         encoded = json.dumps(
             self.model_dump(mode="json"),
             ensure_ascii=False,
@@ -308,6 +399,19 @@ class ReasoningTraceV3(_StrictModel):
             range(1, len(self.corrections) + 1)
         ):
             raise ValueError("corrections must be contiguous and ordered")
+        if [
+            selection.plan_generation for selection in self.skill_selections
+        ] != list(range(1, len(self.skill_selections) + 1)):
+            raise ValueError("skill selection generations must be contiguous and ordered")
+        if self.skill_selections:
+            first = self.skill_selections[0]
+            if first.node != "deep_initial_planner":
+                raise ValueError("first skill selection must be the initial planner")
+            if any(
+                selection.node != "deep_replanner"
+                for selection in self.skill_selections[1:]
+            ):
+                raise ValueError("subsequent skill selections must be replanner entries")
         if [check.ordinal for check in self.provisional_evidence_checks] != list(
             range(1, len(self.provisional_evidence_checks) + 1)
         ):
@@ -392,6 +496,24 @@ class ExecutionLeaseV1(_StrictModel):
     expires_at: AwareDatetime
 
 
+def _require_prompt_skill_catalog_shape(
+    reasoning_mode: ReasoningMode,
+    catalogs: list[PromptSkillCatalogRefV1],
+    *,
+    subject: str,
+) -> None:
+    expected = (
+        ["understanding", "answer"]
+        if reasoning_mode == "standard"
+        else ["understanding", "planner", "answer"]
+    )
+    categories = [catalog.category for catalog in catalogs]
+    if categories != expected:
+        raise ValueError(
+            f"{subject} requires prompt skill catalogs in canonical mode order"
+        )
+
+
 class ExecutionSnapshotV1(_StrictModel):
     execution_id: Identity
     turn_id: Identity
@@ -404,7 +526,13 @@ class ExecutionSnapshotV1(_StrictModel):
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_language: ResponseLanguage
     reasoning_mode: ReasoningMode = "standard"
-    reasoning_trace: ReasoningTraceV3 | None = None
+    reasoning_trace: ReasoningTraceV4 | None = None
+    prompt_skill_catalogs: list[PromptSkillCatalogRefV1] = Field(
+        min_length=2, max_length=3
+    )
+    prompt_skill_selections: list[ExecutionPromptSkillSelectionTraceV1] = Field(
+        default_factory=list, max_length=6
+    )
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(
         pattern=r"^[0-9a-f]{64}$"
@@ -421,13 +549,66 @@ class ExecutionSnapshotV1(_StrictModel):
     updated_at: AwareDatetime
 
     @model_validator(mode="after")
-    def require_guidance_snapshot_shape(self) -> "ExecutionSnapshotV1":
+    def require_snapshot_shape(self) -> "ExecutionSnapshotV1":
         if (self.applied_guidance_revision == 0) != (
             self.applied_guidance_digest is None
         ):
             raise ValueError(
                 "guidance revision zero requires null digest and positive revision requires digest"
             )
+        _require_prompt_skill_catalog_shape(
+            self.reasoning_mode,
+            self.prompt_skill_catalogs,
+            subject="execution",
+        )
+        if self.reasoning_mode == "standard" and self.reasoning_trace is not None:
+            raise ValueError("standard execution cannot carry a reasoning trace")
+        if (
+            self.reasoning_mode == "deep"
+            and self.reasoning_trace is not None
+            and self.reasoning_trace.prompt_skill_catalog
+            != self.prompt_skill_catalogs[1]
+        ):
+            raise ValueError(
+                "deep reasoning trace must match the execution planner catalog"
+            )
+        if self.prompt_skill_selections:
+            if self.prompt_skill_selections[0].node != "resolver":
+                raise ValueError("execution skill selections must begin with Resolver")
+            if any(
+                selection.node == "resolver"
+                for selection in self.prompt_skill_selections[1:]
+            ):
+                raise ValueError("execution can record Resolver selection only once")
+            answer_ordinals = [
+                selection.candidate_ordinal
+                for selection in self.prompt_skill_selections[1:]
+            ]
+            if answer_ordinals != list(range(1, len(answer_ordinals) + 1)):
+                raise ValueError(
+                    "answer candidate skill selections must be contiguous and ordered"
+                )
+        encoded = json.dumps(
+            [
+                selection.model_dump(mode="json")
+                for selection in self.prompt_skill_selections
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 32768:
+            raise ValueError("execution prompt skill selections exceed 32 KiB")
+        missing_required_resolver_selection = (
+            self.state not in {ExecutionState.ALLOCATED, ExecutionState.ACCEPTED}
+            and not (
+                self.state is ExecutionState.TERMINAL_FAILED
+                and self.context_pack_ref is None
+            )
+            and not self.prompt_skill_selections
+        )
+        if missing_required_resolver_selection:
+            raise ValueError("context-ready execution requires Resolver selection")
         return self
 
 
@@ -446,6 +627,9 @@ class AllocateExecutionV1(_StrictModel):
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_language: ResponseLanguage
     reasoning_mode: ReasoningMode = "standard"
+    prompt_skill_catalogs: list[PromptSkillCatalogRefV1] = Field(
+        min_length=2, max_length=3
+    )
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(
         pattern=r"^[0-9a-f]{64}$"
@@ -461,6 +645,11 @@ class AllocateExecutionV1(_StrictModel):
             raise ValueError(
                 "guidance revision zero requires null digest and positive revision requires digest"
             )
+        _require_prompt_skill_catalog_shape(
+            self.reasoning_mode,
+            self.prompt_skill_catalogs,
+            subject="allocation",
+        )
         return self
 
 
@@ -528,7 +717,7 @@ class RecordReasoningProgressV1(_StrictModel):
     execution_id: Identity
     expected_version: int = Field(ge=1)
     fencing_token: int = Field(ge=1)
-    trace: ReasoningTraceV3
+    trace: ReasoningTraceV4
     phase: ReasoningPhase
     progress_status: ReasoningProgressStatus
     cycle: int | None = Field(default=None, ge=1, le=4)
@@ -536,6 +725,13 @@ class RecordReasoningProgressV1(_StrictModel):
     message_params: dict[Identity, MessageParamValue] = Field(
         default_factory=dict, max_length=12
     )
+
+
+class RecordExecutionPromptSkillSelectionV1(_StrictModel):
+    execution_id: Identity
+    expected_version: int = Field(ge=1)
+    fencing_token: int = Field(ge=1)
+    selection: ExecutionPromptSkillSelectionTraceV1
 
 
 class BeginToolInvocationV1(_StrictModel):
@@ -665,6 +861,7 @@ class RuntimeEventV1(_StrictModel):
         "governance_started",
         "terminal_completed",
         "terminal_failed",
+        "prompt_skill_selection_recorded",
     ]
     state: ExecutionState
     invocation_ordinal: int | None = Field(default=None, ge=1)
@@ -743,6 +940,10 @@ class TurnRuntimeOwner(Protocol):
 
     def claim_schema_retry(self, command: ClaimSchemaRetryV1) -> ExecutionSnapshotV1: ...
 
+    def record_prompt_skill_selection(
+        self, command: RecordExecutionPromptSkillSelectionV1
+    ) -> ExecutionSnapshotV1: ...
+
     def record_reasoning_progress(
         self, command: RecordReasoningProgressV1
     ) -> ExecutionSnapshotV1: ...
@@ -790,7 +991,10 @@ __all__ = [
     "ReasoningCorrectionV2",
     "ReasoningLimitFinalizationV2",
     "ProvisionalEvidenceCheckV1",
-    "ReasoningTraceV3",
+    "PromptSkillSelectionFallbackCode",
+    "PromptSkillSelectionTraceV1",
+    "ExecutionPromptSkillSelectionTraceV1",
+    "ReasoningTraceV4",
     "TurnRouteSnapshotV2",
     "VisionRouteSnapshotV1",
     "BudgetSnapshotV1",
@@ -803,6 +1007,7 @@ __all__ = [
     "RequestModelActionV1",
     "ClaimSchemaRetryV1",
     "RecordReasoningProgressV1",
+    "RecordExecutionPromptSkillSelectionV1",
     "BeginToolInvocationV1",
     "CompleteToolInvocationV1",
     "BeginResultGovernanceV1",

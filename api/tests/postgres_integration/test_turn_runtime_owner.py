@@ -30,6 +30,7 @@ from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
 from atlas_production.infrastructure.turn_execution_orchestrator import (
     _next_reasoning_trace,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     AcceptExecutionV1,
     AllocateExecutionV1,
@@ -40,15 +41,18 @@ from atlas_production.modules.turn_runtime.public import (
     CommitTerminalV1,
     CompleteReleaseIntentV1,
     CompleteToolInvocationV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionState,
     FailCarrierExecutionV1,
     FinalizeExpiredExecutionV1,
     LeasePolicyV1,
     PrepareTerminalV1,
     ReasoningEvaluationV1,
+    PromptSkillSelectionTraceV1,
     ReasoningCorrectionV2,
     ReasoningPlanItemV2,
     ReasoningPlanV2,
+    RecordExecutionPromptSkillSelectionV1,
     RecordReasoningProgressV1,
     RenewExecutionLeaseV1,
     RequestModelActionV1,
@@ -145,7 +149,9 @@ def _allocate(
                     max_selected_anchor_pages_per_round
                 ),
                 max_provider_invocations=(
-                    max_tools + (4 if reasoning_mode == "deep" else 0) + 6
+                    max_tools
+                    + 6 * (1 if reasoning_mode == "deep" else 0)
+                    + 9
                 ),
                 max_reasoning_revision_cycles=(1 if reasoning_mode == "deep" else 0),
                 max_schema_retries_per_turn=max_schema_retries,
@@ -162,6 +168,29 @@ def _allocate(
             input_digest="0" * 64,
             response_language="zh-TW",
             reasoning_mode=reasoning_mode,
+            prompt_skill_catalogs=[
+                PromptSkillCatalogRefV1(
+                    category="understanding",
+                    catalog_revision=1,
+                    catalog_digest="1" * 64,
+                ),
+                *(
+                    [
+                        PromptSkillCatalogRefV1(
+                            category="planner",
+                            catalog_revision=1,
+                            catalog_digest="0" * 64,
+                        )
+                    ]
+                    if reasoning_mode == "deep"
+                    else []
+                ),
+                PromptSkillCatalogRefV1(
+                    category="answer",
+                    catalog_revision=1,
+                    catalog_digest="2" * 64,
+                ),
+            ],
             applied_guidance_revision=0,
             applied_guidance_digest=None,
         )
@@ -201,6 +230,12 @@ def test_reasoning_revision_started_trace_and_event_commit_atomically(
         )],
         evaluations=[evaluation],
         corrections=[],
+        prompt_skill_catalog=snapshot.prompt_skill_catalogs[1],
+        appended_skill_selection=PromptSkillSelectionTraceV1(
+            node="deep_initial_planner",
+            plan_generation=1,
+            status="not_applicable",
+        ),
     )
 
     progressed = owner.record_reasoning_progress(
@@ -290,8 +325,34 @@ def test_reasoning_trace_v2_generations_and_standard_null_persist_atomically(
             },
         ),
     ]
-    trace = _next_reasoning_trace(
+    initial_trace = _next_reasoning_trace(
         None,
+        status="running",
+        plans=[first],
+        evaluations=[evaluations[0]],
+        corrections=[],
+        prompt_skill_catalog=snapshot.prompt_skill_catalogs[1],
+        appended_skill_selection=PromptSkillSelectionTraceV1(
+            node="deep_initial_planner",
+            plan_generation=1,
+            status="not_applicable",
+        ),
+    )
+    started = owner.record_reasoning_progress(
+        RecordReasoningProgressV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            trace=initial_trace,
+            phase="evaluating",
+            progress_status="completed",
+            cycle=1,
+            message_code="reasoning.evaluation_completed",
+            message_params={"cycle": 1},
+        )
+    )
+    trace = _next_reasoning_trace(
+        initial_trace,
         status="completed",
         plans=[first, second],
         evaluations=evaluations,
@@ -308,13 +369,18 @@ def test_reasoning_trace_v2_generations_and_standard_null_persist_atomically(
                 summary="Researched the missing evidence and revised the candidate.",
             )
         ],
+        appended_skill_selection=PromptSkillSelectionTraceV1(
+            node="deep_replanner",
+            plan_generation=2,
+            status="not_applicable",
+        ),
         termination_reason="completed",
     )
 
     progressed = owner.record_reasoning_progress(
         RecordReasoningProgressV1(
             execution_id=snapshot.execution_id,
-            expected_version=snapshot.version,
+            expected_version=started.version,
             fencing_token=snapshot.lease.fencing_token,
             trace=trace,
             phase="evaluating",
@@ -359,6 +425,18 @@ def _accept_and_bind(owner: PostgresTurnRuntimeOwner, snapshot: object):
             catalog_ref="catalog-1",
         )
     )
+    accepted = owner.record_prompt_skill_selection(
+        RecordExecutionPromptSkillSelectionV1(
+            execution_id=accepted.execution_id,
+            expected_version=accepted.version,
+            fencing_token=accepted.lease.fencing_token,
+            selection=ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="not_applicable",
+            ),
+        )
+    )
     return owner.bind_context(
         BindContextV1(
             execution_id=accepted.execution_id,
@@ -367,6 +445,86 @@ def _accept_and_bind(owner: PostgresTurnRuntimeOwner, snapshot: object):
             context_pack_ref="context-1",
         )
     )
+
+
+def test_prompt_skill_selection_commits_safe_event_and_jsonb(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "prompt-skill-selection-event"),
+    )
+
+    assert snapshot.prompt_skill_selections == [
+        ExecutionPromptSkillSelectionTraceV1(
+            category="understanding",
+            node="resolver",
+            status="not_applicable",
+        )
+    ]
+    events = owner.events(snapshot.execution_id)
+    event = next(
+        item
+        for item in events
+        if item.event_type == "prompt_skill_selection_recorded"
+    )
+    assert event.state is ExecutionState.ACCEPTED
+    assert event.invocation_ordinal is None
+    assert event.result_ref is None
+    assert event.failure_code is None
+    with postgres_runtime.session_factory() as session:
+        row = session.get(AtlasTurnExecutionRow, snapshot.execution_id)
+        assert row is not None
+        assert row.prompt_skill_selections == [
+            {
+                "category": "understanding",
+                "node": "resolver",
+                "candidate_ordinal": None,
+                "candidate_kind": None,
+                "status": "not_applicable",
+                "selected_skills": [],
+                "fallback_code": None,
+            }
+        ]
+
+
+def test_reasoning_progress_rejects_trace_from_unpinned_planner_catalog(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(owner, "wrong-planner-pin", reasoning_mode="deep"),
+    )
+    wrong_trace = _next_reasoning_trace(
+        None,
+        status="planning",
+        plans=[],
+        evaluations=[],
+        corrections=[],
+        prompt_skill_catalog=PromptSkillCatalogRefV1(
+            category="planner",
+            catalog_revision=2,
+            catalog_digest="f" * 64,
+        ),
+    )
+
+    with pytest.raises(
+        TurnRuntimeReplayConflict,
+        match="planner catalog does not match",
+    ):
+        owner.record_reasoning_progress(
+            RecordReasoningProgressV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                trace=wrong_trace,
+                phase="planning",
+                progress_status="started",
+                message_code="reasoning.planning_started",
+            )
+        )
 
 
 def _tool_cycle(
@@ -465,7 +623,7 @@ def test_allocation_exact_replay_conflict_and_competing_cas(
         holder_id="other-holder",
         route_policy=RoutePolicyV1(
             max_tool_invocations=2,
-            max_provider_invocations=8,
+            max_provider_invocations=11,
             max_reasoning_revision_cycles=0,
         ),
         route=route_snapshot(),
@@ -475,6 +633,7 @@ def test_allocation_exact_replay_conflict_and_competing_cas(
         retry_of_turn_id=None,
         input_digest="1" * 64,
         response_language="zh-TW",
+        prompt_skill_catalogs=first.prompt_skill_catalogs,
         applied_guidance_revision=0,
         applied_guidance_digest=None,
     )
@@ -592,6 +751,58 @@ def test_contract_repair_admission_is_execution_fixed_durable_and_bounded(
     reloaded = owner.snapshot(snapshot.execution_id)
     assert reloaded.version == second.version
     assert reloaded.budget.retrieval_repairs == 2
+
+
+def test_schema_retry_model_action_remains_independent_after_retrieval_repair_exhaustion(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _accept_and_bind(
+        owner,
+        _allocate(
+            owner,
+            "schema-retry-after-retrieval-exhaustion",
+            max_retrieval_repairs=1,
+            max_schema_retries=1,
+        ),
+    )
+    initial = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            context_tokens=1,
+        )
+    )
+    exhausted = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=initial.version,
+            fencing_token=initial.lease.fencing_token,
+            context_tokens=1,
+            contract_repair=True,
+        )
+    )
+    claimed = owner.claim_schema_retry(
+        ClaimSchemaRetryV1(
+            execution_id=snapshot.execution_id,
+            fencing_token=exhausted.lease.fencing_token,
+            claim_key="deep-replan-repair-2",
+            origin_error_code="deep_reasoning_replan_invalid",
+        )
+    )
+
+    repaired = owner.request_model_action(
+        RequestModelActionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=claimed.version,
+            fencing_token=claimed.lease.fencing_token,
+            context_tokens=1,
+            contract_repair=False,
+        )
+    )
+    assert repaired.budget.retrieval_repairs == 1
+    assert repaired.budget.schema_retries == 1
 
 
 def test_competing_schema_retry_claims_cannot_overspend(

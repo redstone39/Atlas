@@ -75,6 +75,19 @@ def test_conversation_scope_tags_are_normalized_owner_state() -> None:
     } >= {"ck_atlas_turn_conversation_scope_tag_type"}
 
 
+def test_runtime_schema_admits_safe_prompt_skill_selection_events() -> None:
+    execution_table = turn_runtime.AtlasTurnExecutionRow.__table__
+    event_table = turn_runtime.AtlasTurnRuntimeEventRow.__table__
+    assert execution_table.c.prompt_skill_selections.nullable is False
+    assert execution_table.c.prompt_skill_selections.server_default is not None
+    event_constraint = next(
+        constraint
+        for constraint in event_table.constraints
+        if constraint.name == "ck_atlas_turn_runtime_event_type"
+    )
+    assert "prompt_skill_selection_recorded" in str(event_constraint.sqltext)
+
+
 def test_development_baseline_remains_the_single_root_revision() -> None:
     assert baseline.revision == "20260711_0001"
     assert baseline.down_revision is None

@@ -27,6 +27,7 @@ from atlas_production.modules.conversation.public import (
     ConversationV1,
     TurnFeedbackRevisionV1,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.result_governance.public import GovernedAnswerDraftV2
 from atlas_production.modules.retrieval.public import DeclaredEvidenceMappingV1
 from atlas_production.modules.retrieval.public import (
@@ -41,6 +42,7 @@ from atlas_production.modules.retrieval.public import (
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
     ExecutionLeaseV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     ExecutionState,
     RoutePolicyV1,
@@ -69,6 +71,32 @@ def _snapshot(turn: str, execution: str, context_ref: str) -> ExecutionSnapshotV
         route=route_snapshot(),
         input_digest="0" * 64,
         response_language="zh-TW",
+        prompt_skill_catalogs=[
+            PromptSkillCatalogRefV1(
+                category="understanding",
+                catalog_revision=1,
+                catalog_digest="1" * 64,
+            ),
+            PromptSkillCatalogRefV1(
+                category="answer",
+                catalog_revision=1,
+                catalog_digest="2" * 64,
+            ),
+        ],
+        prompt_skill_selections=[
+            ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="not_applicable",
+            ),
+            ExecutionPromptSkillSelectionTraceV1(
+                category="answer",
+                node="answer_candidate",
+                candidate_ordinal=1,
+                candidate_kind="normal",
+                status="not_applicable",
+            ),
+        ],
         applied_guidance_revision=0,
         applied_guidance_digest=None,
         lease=ExecutionLeaseV1(
@@ -517,6 +545,7 @@ def _application(authorization, citation_reader=None, declared_evidence_reader=N
         retrieval=_Retrieval(),
         generation_retention=SimpleNamespace(),
         runtime=_Runtime(),
+        prompt_skill_catalog=SimpleNamespace(),
         results=_Results(audits),
         citations=_Citations(),
         audits=audits,

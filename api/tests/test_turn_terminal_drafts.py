@@ -1068,14 +1068,14 @@ def test_evaluator_schema_repair_does_not_exceed_provider_invocation_budget() ->
     policy = RoutePolicyV1(
         max_tool_invocations=1,
         max_reasoning_revision_cycles=0,
-        max_provider_invocations=7,
+        max_provider_invocations=10,
     )
     runtime = Runtime(policy=policy)
     runtime.snapshot_value = runtime.snapshot_value.model_copy(
         update={
             "state": "awaiting_model_action",
             "budget": runtime.snapshot_value.budget.model_copy(
-                update={"provider_invocations": 7}
+                update={"provider_invocations": 10}
             ),
         }
     )
@@ -1094,7 +1094,7 @@ def test_evaluator_schema_repair_does_not_exceed_provider_invocation_budget() ->
     assert error.value.reason_code == "invalid_output"
     assert routing.calls == 1
     assert runtime.snapshot_value.budget.schema_retries == 1
-    assert runtime.snapshot_value.budget.provider_invocations == 7
+    assert runtime.snapshot_value.budget.provider_invocations == 10
 
 
 def test_evaluator_receives_exact_visual_evidence_without_persisting_semantics() -> None:

@@ -14,6 +14,10 @@ from atlas_production.modules.context_engineering.public import (
     ContextLineageGraphV3,
 )
 from atlas_production.modules.model_routing.api_models import ModelRouteCreateRequest
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalogRefV1,
+    PromptSkillRefV1,
+)
 from atlas_production.modules.retrieval.public import (
     FindKnowledgeDocumentsV1,
     KnowledgeSearchResultV1,
@@ -36,7 +40,8 @@ from atlas_production.modules.turn_runtime.public import (
     ProcessScoreV1,
     ReasoningPlanItemV2,
     ReasoningPlanV2,
-    ReasoningTraceV3,
+    PromptSkillSelectionTraceV1,
+    ReasoningTraceV4,
     RoutePolicyV1,
     TERMINAL_STATES,
 )
@@ -206,28 +211,28 @@ def test_policy_defaults_match_the_approved_hard_limits() -> None:
     assert policy.tool_execution_timeout_seconds == 45
     assert policy.deadline_seconds == 240
     assert policy.max_reasoning_revision_cycles == 2
-    assert policy.max_provider_invocations == 26
+    assert policy.max_provider_invocations == 33
     assert policy.max_provider_invocations >= (
         policy.max_tool_invocations
-        + 4 * policy.max_reasoning_revision_cycles
-        + 6
+        + 6 * policy.max_reasoning_revision_cycles
+        + 9
     )
     lease = LeasePolicyV1()
     assert (lease.heartbeat_interval_seconds, lease.ttl_seconds, lease.failure_sweep_interval_seconds) == (5, 15, 5)
     with pytest.raises(ValidationError):
-        RoutePolicyV1(max_tool_invocations=12, max_provider_invocations=19)
+        RoutePolicyV1(max_tool_invocations=12, max_provider_invocations=32)
     assert RoutePolicyV1(
         max_reasoning_revision_cycles=0,
-        max_provider_invocations=18,
-    ).max_provider_invocations == 18
+        max_provider_invocations=21,
+    ).max_provider_invocations == 21
     assert RoutePolicyV1(
         max_reasoning_revision_cycles=3,
-        max_provider_invocations=30,
-    ).max_provider_invocations == 30
+        max_provider_invocations=39,
+    ).max_provider_invocations == 39
     with pytest.raises(ValidationError):
         RoutePolicyV1(
             max_reasoning_revision_cycles=3,
-            max_provider_invocations=29,
+            max_provider_invocations=38,
         )
     with pytest.raises(ValidationError):
         RoutePolicyV1(max_retrieval_repairs=4)
@@ -237,6 +242,74 @@ def test_policy_defaults_match_the_approved_hard_limits() -> None:
         RoutePolicyV1(tool_execution_timeout_seconds=241)
     with pytest.raises(ValidationError):
         LeasePolicyV1(heartbeat_interval_seconds=15, ttl_seconds=15)
+
+
+def test_planner_trace_rejects_wrong_category_and_unpinned_catalog() -> None:
+    with pytest.raises(ValidationError, match="planner skill refs"):
+        PromptSkillSelectionTraceV1(
+            node="deep_initial_planner",
+            plan_generation=1,
+            status="selected",
+            selected_skills=[
+                PromptSkillRefV1(
+                    category="answer",
+                    name="wrong-category",
+                    revision=1,
+                    content_digest="a" * 64,
+                )
+            ],
+        )
+    with pytest.raises(ValidationError, match="planner skill catalog"):
+        ReasoningTraceV4(
+            prompt_skill_catalog=PromptSkillCatalogRefV1(
+                category="answer",
+                catalog_revision=1,
+                catalog_digest="b" * 64,
+            ),
+            trace_revision=1,
+            trace_digest="c" * 64,
+            status="running",
+        )
+
+    from tests.test_turn_model_loop import Runtime
+
+    snapshot = Runtime(reasoning_mode="deep").snapshot_value
+    wrong_pin_trace = ReasoningTraceV4(
+        prompt_skill_catalog=PromptSkillCatalogRefV1(
+            category="planner",
+            catalog_revision=2,
+            catalog_digest="d" * 64,
+        ),
+        trace_revision=1,
+        trace_digest="e" * 64,
+        status="running",
+    )
+    payload = snapshot.model_dump(mode="python")
+    payload["reasoning_trace"] = wrong_pin_trace
+    with pytest.raises(ValidationError, match="execution planner catalog"):
+        type(snapshot).model_validate(payload)
+
+
+def test_terminal_failure_requires_resolver_lineage_after_context_bind() -> None:
+    from tests.test_turn_model_loop import Runtime
+
+    snapshot = Runtime().snapshot_value
+    payload = snapshot.model_dump(mode="python")
+    payload.update(
+        {
+            "state": ExecutionState.TERMINAL_FAILED,
+            "prompt_skill_selections": [],
+            "context_pack_ref": None,
+            "terminal_failure_code": "resolver_failed",
+        }
+    )
+    failed_before_context = type(snapshot).model_validate(payload)
+    assert failed_before_context.prompt_skill_selections == []
+
+    payload["context_pack_ref"] = "context-1"
+    payload["terminal_failure_code"] = "provider_failed"
+    with pytest.raises(ValidationError, match="requires Resolver selection"):
+        type(snapshot).model_validate(payload)
 
 
 def test_reasoning_contracts_are_closed_bounded_and_do_not_claim_accuracy() -> None:
@@ -251,7 +324,12 @@ def test_reasoning_contracts_are_closed_bounded_and_do_not_claim_accuracy() -> N
     assert score.total == 7
     with pytest.raises(ValidationError):
         ProcessScoreV1.model_validate({**score.model_dump(), "accuracy": 0.9})
-    trace = ReasoningTraceV3(
+    trace = ReasoningTraceV4(
+        prompt_skill_catalog=PromptSkillCatalogRefV1(
+            category="planner",
+            catalog_revision=1,
+            catalog_digest="0" * 64,
+        ),
         trace_revision=1,
         trace_digest="a" * 64,
         status="running",
@@ -264,11 +342,12 @@ def test_reasoning_contracts_are_closed_bounded_and_do_not_claim_accuracy() -> N
     )
     assert len(trace.model_dump_json().encode("utf-8")) <= 32768
     with pytest.raises(ValidationError):
-        ReasoningTraceV3.model_validate(
+        ReasoningTraceV4.model_validate(
             {**trace.model_dump(), "raw_draft": "private model output"}
         )
     with pytest.raises(ValidationError):
-        ReasoningTraceV3(
+        ReasoningTraceV4(
+            prompt_skill_catalog=trace.prompt_skill_catalog,
             trace_revision=1,
             trace_digest="b" * 64,
             status="running",

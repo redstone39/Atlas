@@ -326,6 +326,7 @@ describe("frontend compatibility convergence", () => {
       "src/features/team-administration/ScopedTeamAdministrationFeature.tsx",
       "src/features/project-governance/ProjectGovernanceFeature.tsx",
       "src/features/model-routing/ModelRoutingFeature.tsx",
+      "src/features/prompt-skills/PromptSkillsFeature.tsx",
       "src/features/processing-plugins/ProcessingPluginsFeature.tsx",
       "src/features/agent-access/AgentStatusList.tsx",
       "src/features/conversation-audit/ConversationAuditPresentation.tsx",

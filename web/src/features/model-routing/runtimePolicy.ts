@@ -28,7 +28,7 @@ export type RuntimePolicyDraft = Record<
 
 export const createRuntimePolicyDraft: RuntimePolicyDraft = {
   tokenizer_profile: "cl100k_base", max_tool_executions: "12",
-  max_provider_invocations: "26", max_reasoning_revision_cycles: "2",
+  max_provider_invocations: "33", max_reasoning_revision_cycles: "2",
   max_catalog_pages: "5", max_search_rounds: "6",
   max_model_visible_items_per_turn: "40", max_retrieval_repairs: "3",
   max_schema_retries_per_turn: "3", max_selected_anchor_pages_per_round: "20",
@@ -66,7 +66,7 @@ export function parseRuntimePolicy(
   if (numericKeys.some((key) => !draft[key].trim() || !Number.isInteger(values[key]) ||
     (key === "max_reasoning_revision_cycles" ? values[key] < 0 : values[key] <= 0))) return null;
   if (values.max_reasoning_revision_cycles > 3 ||
-    values.max_provider_invocations < values.max_tool_executions + 4 * values.max_reasoning_revision_cycles + 6) return null;
+    values.max_provider_invocations < values.max_tool_executions + 6 * values.max_reasoning_revision_cycles + 9) return null;
   if (values.max_retrieval_repairs > 3 || values.max_schema_retries_per_turn > 3 ||
     values.max_selected_anchor_pages_per_round > 20) return null;
   if (values.max_input_tokens_per_invocation + values.max_output_tokens_per_invocation > values.context_window_tokens ||

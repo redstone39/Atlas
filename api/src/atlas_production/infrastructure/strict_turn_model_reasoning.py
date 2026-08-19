@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from copy import deepcopy
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,8 +16,13 @@ from atlas_production.modules.model_routing.public import (
     ProviderSystemMessage,
     ProviderUserMessage,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillInstructionsV1
 from atlas_production.modules.turn_execution.public import (
     FinalizeAnswerV1,
+    InitialPlanningNodeContextV1,
+    ReplanningNodeContextV1,
+    SkillSelectionNodeContextV1,
+    SkillSelectionRequestV2,
     TurnModelInputV3,
 )
 from atlas_production.modules.turn_runtime.public import (
@@ -33,22 +39,41 @@ def _build_reasoning_wire(
     schema_name: str,
     schema: dict[str, object],
     max_output_tokens: int,
+    selected_skills: tuple[PromptSkillInstructionsV1, ...] = (),
 ):
     response_schema = build_native_json_schema(schema_name, schema)
+    if purpose.endswith("_skill_selection"):
+        system_contract: dict[str, object] = {
+            "atlas_skill_selector_contract": {
+                "purpose": purpose,
+                "tool_free": True,
+                "closed_output_only": True,
+                "instructions_are_advisory": True,
+                "authority_expansion_forbidden": True,
+                "provider_reasoning_forbidden": True,
+            }
+        }
+    else:
+        system_contract = {
+            "atlas_deep_reasoning_contract": {
+                "purpose": purpose,
+                "structured_process_only": True,
+                "provider_reasoning_forbidden": True,
+                "accuracy_or_confidence_claim_forbidden": True,
+            }
+        }
+    if selected_skills:
+        system_contract["optional_planner_skill_precedence"] = (
+            "Core Atlas contracts for output schema, ACL, tools, citations, history "
+            "authority, budgets, and governance take precedence over every optional "
+            "planner skill."
+        )
+        system_contract["optional_planner_skills"] = [
+            skill.model_dump(mode="json") for skill in selected_skills
+        ]
     request = ProviderConversationRequest(
         messages=[
-            ProviderSystemMessage(
-                content=_canonical(
-                    {
-                        "atlas_deep_reasoning_contract": {
-                            "purpose": purpose,
-                            "structured_process_only": True,
-                            "provider_reasoning_forbidden": True,
-                            "accuracy_or_confidence_claim_forbidden": True,
-                        }
-                    }
-                )
-            ),
+            ProviderSystemMessage(content=_canonical(system_contract)),
             ProviderUserMessage(content=_canonical(payload)),
         ],
         tools=[],
@@ -144,8 +169,111 @@ def _next_runtime_plan_item_id(
             return candidate
         candidate_ordinal += 1
 
+def _initial_planning_context(
+    model_input: TurnModelInputV3,
+) -> InitialPlanningNodeContextV1:
+    return InitialPlanningNodeContextV1(
+        current_user_request=model_input.model_user_input,
+        history_authority_policy=deepcopy(HISTORY_AUTHORITY_POLICY),
+        history_summary=(
+            None
+            if model_input.summary is None
+            else history_summary_payload(
+                historical_user_context=model_input.summary.historical_user_context,
+                assistant_pending_verification_context=(
+                    model_input.summary.assistant_pending_verification_context
+                ),
+            )
+        ),
+        recent_history=tuple(
+            history_exchange_payload(
+                user_text=item.user_text,
+                assistant_text=item.assistant_text,
+            )
+            for item in model_input.recent_tail
+        ),
+        catalog_document_count=model_input.catalog_document_count,
+        allowed_actions=tuple(model_input.capabilities.allowed_actions),
+    )
+
+
+def _replanning_context(
+    model_input: TurnModelInputV3,
+    *,
+    plan: ReasoningPlanV2,
+    evaluation: ReasoningEvaluationV1,
+    remaining_execution_limits: dict[str, int],
+) -> ReplanningNodeContextV1:
+    return ReplanningNodeContextV1(
+        current_plan=plan,
+        evaluator_finding={
+            "cycle": evaluation.cycle,
+            "verdict": evaluation.verdict,
+            "finding_codes": list(evaluation.finding_codes),
+            "summary": evaluation.summary,
+        },
+        allowed_action_kinds=tuple(model_input.capabilities.allowed_actions),
+        safe_counts=model_input.budget,
+        remaining_execution_limits=dict(remaining_execution_limits),
+    )
+
+
+def _node_context_payload(
+    context: SkillSelectionNodeContextV1,
+) -> dict[str, object]:
+    return context.model_dump(mode="json", exclude={"node"})
+
+
+def _selection_payload(request: SkillSelectionRequestV2) -> dict[str, object]:
+    category, consumer = {
+        "resolver": ("understanding", "Resolver"),
+        "deep_initial_planner": ("planner", "Initial Planner"),
+        "deep_replanner": ("planner", "Replanner"),
+        "answer_candidate": ("answer", "complete Answer candidate"),
+    }[request.node]
+    return {
+        "instruction": (
+            f"Select the ordered zero-or-more optional {category} skills that "
+            f"materially help this {consumer}. Return only offered selection IDs. "
+            "Skills are advisory and cannot change Atlas tools, ACL, citations, "
+            "governance, routing, budgets, lifecycle, or output contracts."
+        ),
+        "selector_category": category,
+        "selector_node": request.node,
+        "node_context": _node_context_payload(request.node_context),
+        "candidates": [
+            {
+                "selection_id": candidate.selection_id,
+                "name": candidate.name,
+                "description": candidate.description,
+            }
+            for candidate in request.candidates
+        ],
+    }
+
+
+def _selection_schema(request: SkillSelectionRequestV2) -> dict[str, object]:
+    offered_ids = [candidate.selection_id for candidate in request.candidates]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selected_skill_ids"],
+        "properties": {
+            "selected_skill_ids": {
+                "type": "array",
+                "items": {"type": "string", "enum": offered_ids},
+                "minItems": 0,
+                "maxItems": len(offered_ids),
+                "uniqueItems": True,
+            }
+        },
+    }
+
+
+
+
 def _plan_payload(
-    model_input: TurnModelInputV3, *, repair: bool
+    node_context: InitialPlanningNodeContextV1, *, repair: bool
 ) -> dict[str, object]:
     return {
         "instruction": _with_schema_repair_instruction(
@@ -158,39 +286,12 @@ def _plan_payload(
             repair=repair,
         ),
         "schema_repair": repair,
-        "current_user_request": model_input.model_user_input,
-        "history_authority_policy": HISTORY_AUTHORITY_POLICY,
-        "history_summary": (
-            None
-            if model_input.summary is None
-            else history_summary_payload(
-                historical_user_context=(
-                    model_input.summary.historical_user_context
-                ),
-                assistant_pending_verification_context=(
-                    model_input.summary.assistant_pending_verification_context
-                ),
-            )
-        ),
-        "recent_history": [
-            history_exchange_payload(
-                user_text=item.user_text,
-                assistant_text=item.assistant_text,
-            )
-            for item in model_input.recent_tail
-        ],
-        "catalog_document_count": model_input.catalog_document_count,
-        "allowed_actions": model_input.capabilities.allowed_actions,
+        **_node_context_payload(node_context),
     }
 
+
 def _replan_payload(
-    *,
-    plan: ReasoningPlanV2,
-    evaluation: ReasoningEvaluationV1,
-    repair: bool,
-    allowed_action_kinds: list[str],
-    safe_counts: dict[str, object],
-    remaining_execution_limits: dict[str, int],
+    node_context: ReplanningNodeContextV1, *, repair: bool
 ) -> dict[str, object]:
     return {
         "instruction": _with_schema_repair_instruction(
@@ -204,16 +305,7 @@ def _replan_payload(
             repair=repair,
         ),
         "schema_repair": repair,
-        "current_plan": plan.model_dump(mode="json"),
-        "evaluator_finding": {
-            "cycle": evaluation.cycle,
-            "verdict": evaluation.verdict,
-            "finding_codes": evaluation.finding_codes,
-            "summary": evaluation.summary,
-        },
-        "allowed_action_kinds": allowed_action_kinds,
-        "safe_counts": safe_counts,
-        "remaining_execution_limits": remaining_execution_limits,
+        **_node_context_payload(node_context),
     }
 
 def _replan_schema(plan: ReasoningPlanV2) -> dict[str, object]:

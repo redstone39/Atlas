@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
+from copy import copy, deepcopy
 
 from pydantic import ValidationError
 
@@ -12,6 +12,7 @@ from atlas_production.infrastructure.strict_turn_model_capabilities import (
     _within_capabilities,
 )
 from atlas_production.infrastructure.strict_turn_model_messages import (
+    _answer_skill_system_message,
     _canonical,
     _digest,
     _initial_provider_messages,
@@ -26,10 +27,14 @@ from atlas_production.infrastructure.strict_turn_model_reasoning import (
     _build_reasoning_wire,
     _evaluation_payload,
     _evaluation_schema,
+    _initial_planning_context,
     _next_runtime_plan_item_id,
     _plan_payload,
     _replan_payload,
     _replan_schema,
+    _replanning_context,
+    _selection_payload,
+    _selection_schema,
     _usage_value,
 )
 from atlas_production.modules.model_routing.public import (
@@ -48,6 +53,7 @@ from atlas_production.modules.model_routing.public import (
     estimate_provider_wire,
     require_provider_wire_within_limits,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillInstructionsV1
 from atlas_production.modules.retrieval.public import (
     KnowledgeToolObservationEnvelopeV1,
     KnowledgeToolObservationV1,
@@ -61,15 +67,22 @@ from atlas_production.modules.turn_execution.public import (
     DeepReasoningPlanResultV1,
     FinalizeAnswerV1,
     GateCorrectionFeedbackV1,
+    InitialPlanningNodeContextV1,
     ModelActionResultV1,
     ModelContractViolationV1,
     ModelStepResultV1,
+    ReplanningNodeContextV1,
+    SkillSelectionDecisionV1,
+    SkillSelectionRequestV2,
+    SkillSelectionResultV1,
+    SkillSelectorModel,
     StrictTurnModel,
     StrictTurnModelSession,
     TurnModelInputV3,
 )
 from atlas_production.providers import ProviderError
 from atlas_production.modules.turn_runtime.public import (
+    ExecutionSnapshotV1,
     ProcessScoreV1,
     ReasoningEvaluationV1,
     ReasoningPlanV2,
@@ -146,7 +159,9 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self._last_input_digest: str | None = None
         self._pending_tool_call_id: str | None = None
         self._discarded = False
-        self._provider_ordinal = 0
+        self._candidate_ordinal = 0
+        self._candidate_provider_ordinal = 0
+        self._candidate_complete = False
         self._record_invocations = record_invocations
 
     def _attempt_for_request(self, request: ProviderConversationRequest):
@@ -186,6 +201,10 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             raise ProviderProtocolError(safe_code="turn_model_session_discarded")
         if model_input.execution_id != self._execution_id:
             raise ProviderProtocolError(safe_code="turn_model_execution_changed")
+        if self._candidate_ordinal == 0:
+            raise ProviderProtocolError(
+                safe_code="turn_model_answer_candidate_not_started"
+            )
         if (
             _digest(model_input.answer_behavior.model_dump(mode="json"))
             != self._answer_behavior_digest
@@ -196,8 +215,6 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         input_payload = model_input.model_dump(mode="json")
         input_digest = _digest(input_payload)
         messages = list(self._messages)
-        if self._last_input_digest is None:
-            messages.extend(_initial_provider_messages(model_input))
         capabilities = model_input.capabilities
         if (
             capabilities.execution_id != self._execution_id
@@ -245,6 +262,67 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             ),
         )
         return messages, request, final_schema, input_digest, estimate, attempt
+    def estimate_begin_answer_candidate_tokens(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        candidate_ordinal: int,
+        candidate_kind: str,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    ) -> int:
+        trial = copy(self)
+        trial._messages = list(self._messages)
+        trial.begin_answer_candidate(
+            model_input,
+            candidate_ordinal=candidate_ordinal,
+            candidate_kind=candidate_kind,
+            selected_skills=selected_skills,
+        )
+        return trial.estimate_next_request_tokens(
+            model_input,
+            finalize_only=candidate_kind == "limit_final",
+        )
+
+    def begin_answer_candidate(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        candidate_ordinal: int,
+        candidate_kind: str,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    ) -> None:
+        if self._discarded:
+            raise ProviderProtocolError(safe_code="turn_model_session_discarded")
+        if self._pending_tool_call_id is not None:
+            raise ProviderProtocolError(safe_code="turn_model_tool_result_missing")
+        if candidate_kind not in {"normal", "limit_final"}:
+            raise ProviderProtocolError(safe_code="invalid_answer_candidate_kind")
+        if candidate_ordinal != self._candidate_ordinal + 1:
+            raise ProviderProtocolError(
+                safe_code="answer_candidate_ordinal_not_contiguous"
+            )
+        if self._candidate_ordinal > 0 and not self._candidate_complete:
+            raise ProviderProtocolError(
+                safe_code="previous_answer_candidate_is_incomplete"
+            )
+        if model_input.execution_id != self._execution_id:
+            raise ProviderProtocolError(safe_code="turn_model_execution_changed")
+        if candidate_ordinal == 1:
+            self._messages = _initial_provider_messages(
+                model_input,
+                selected_skills=selected_skills,
+            )
+        else:
+            self._messages.append(
+                _answer_skill_system_message(
+                    selected_skills,
+                    replacement=True,
+                )
+            )
+        self._candidate_ordinal = candidate_ordinal
+        self._candidate_provider_ordinal = 0
+        self._candidate_complete = False
+
 
     def estimate_next_request_tokens(
         self, model_input: TurnModelInputV3, *, finalize_only: bool
@@ -287,8 +365,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         # Keep the carrier transcript distinct from the immutable request
         # snapshot retained by providers/tests for audit.
         self._messages = list(messages)
-        self._last_input_digest = input_digest
-        self._provider_ordinal += 1
+        self._candidate_provider_ordinal += 1
         handle = None
         if self._record_invocations:
             handle = self._routing.prepare_invocation(
@@ -297,9 +374,12 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 invocation_purpose="turn_execution",
                 subject_kind="turn_execution",
                 subject_ref=self._execution_id,
-                execution_key=f"{self._execution_id}:provider:{self._provider_ordinal}",
+                execution_key=(
+                    f"{self._execution_id}:answer-candidate:{self._candidate_ordinal}:"
+                    f"provider:{self._candidate_provider_ordinal}"
+                ),
                 prompt_digest=_digest([input_digest, finalize_only]),
-                attempt_ordinal=self._provider_ordinal,
+                attempt_ordinal=self._candidate_provider_ordinal,
                 repair_origin_error_codes=(
                     []
                     if repair_origin_error_code is None
@@ -388,6 +468,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
+            self._candidate_complete = True
             return ModelActionResultV1(
                 action=action,
                 input_tokens=input_tokens,
@@ -584,10 +665,11 @@ class ProviderTurnModelSession(StrictTurnModelSession):
     def discard(self) -> None:
         self._messages.clear()
         self._pending_tool_call_id = None
+        self._candidate_complete = False
         self._discarded = True
 
 
-class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
+class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel, SkillSelectorModel):
     def __init__(self, routing: ModelRoutingRuntime, *, record_invocations: bool = True) -> None:
         self._routing = routing
         self._record_invocations = record_invocations
@@ -601,13 +683,14 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
 
     def _reasoning_wire(
         self,
-        model_input: TurnModelInputV3,
+        model_input: TurnModelInputV3 | ExecutionSnapshotV1,
         *,
         purpose: str,
         payload: dict[str, object],
         schema_name: str,
         schema: dict[str, object],
         max_output_tokens: int,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...] = (),
     ):
         attempt = self._routing.open_tested_attempt(model_input.route.route_id)
         policy = attempt.route.runtime_policy
@@ -630,6 +713,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             max_output_tokens=min(
                 max_output_tokens, policy.max_output_tokens_per_invocation
             ),
+            selected_skills=selected_skills,
         )
         estimate = require_provider_wire_within_limits(
             policy=policy,
@@ -641,7 +725,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
 
     def _invoke_reasoning(
         self,
-        model_input: TurnModelInputV3,
+        model_input: TurnModelInputV3 | ExecutionSnapshotV1,
         *,
         purpose: str,
         ordinal: int,
@@ -650,6 +734,8 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         schema: dict[str, object],
         max_output_tokens: int,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...] = (),
+        execution_key: str | None = None,
     ) -> ProviderCompleted:
         attempt, request, response_schema, _estimate = self._reasoning_wire(
             model_input,
@@ -658,6 +744,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             schema_name=schema_name,
             schema=schema,
             max_output_tokens=max_output_tokens,
+            selected_skills=selected_skills,
         )
         handle = None
         if self._record_invocations:
@@ -667,7 +754,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
                 invocation_purpose=purpose,
                 subject_kind="turn_execution",
                 subject_ref=model_input.execution_id,
-                execution_key=f"{model_input.execution_id}:{purpose}:{ordinal}",
+                execution_key=execution_key or f"{model_input.execution_id}:{purpose}:{ordinal}",
                 prompt_digest=_digest(payload),
                 attempt_ordinal=ordinal,
                 repair_origin_error_codes=(
@@ -697,27 +784,132 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
         return outcome
 
     @staticmethod
+    def build_initial_planning_node_context(
+        model_input: TurnModelInputV3,
+    ) -> InitialPlanningNodeContextV1:
+        return _initial_planning_context(model_input)
+
+    @staticmethod
+    def build_replanning_node_context(
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        evaluation: ReasoningEvaluationV1,
+        remaining_execution_limits: dict[str, int],
+    ) -> ReplanningNodeContextV1:
+        return _replanning_context(
+            model_input,
+            plan=plan,
+            evaluation=evaluation,
+            remaining_execution_limits=remaining_execution_limits,
+        )
+    @staticmethod
+    def _selection_purpose(request: SkillSelectionRequestV2) -> str:
+        return {
+            "resolver": "context_understanding_skill_selection",
+            "deep_initial_planner": "deep_initial_planner_skill_selection",
+            "deep_replanner": "deep_replanner_skill_selection",
+            "answer_candidate": "answer_candidate_skill_selection",
+        }[request.node]
+
+    @staticmethod
+    def _selection_ordinal(request: SkillSelectionRequestV2) -> int:
+        if request.node == "resolver":
+            return 1
+        if request.node == "deep_initial_planner":
+            return 1
+        if request.node == "deep_replanner":
+            return request.node_context.current_plan.generation + 1
+        return request.node_context.candidate_ordinal
+
+    def estimate_selection_request_tokens(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        request: SkillSelectionRequestV2,
+    ) -> int:
+        return self._reasoning_wire(
+            snapshot,
+            purpose=self._selection_purpose(request),
+            payload=_selection_payload(request),
+            schema_name="atlas_skill_selection_v2",
+            schema=_selection_schema(request),
+            max_output_tokens=1000,
+        )[3].input_tokens
+
+    def select(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        request: SkillSelectionRequestV2,
+    ) -> SkillSelectionResultV1:
+        ordinal = self._selection_ordinal(request)
+        execution_key = (
+            f"{snapshot.execution_id}:answer-candidate:{ordinal}:skill-selection"
+            if request.node == "answer_candidate"
+            else f"{snapshot.execution_id}:{request.node}:skill-selection:{ordinal}"
+        )
+        outcome = self._invoke_reasoning(
+            snapshot,
+            purpose=self._selection_purpose(request),
+            ordinal=ordinal,
+            payload=_selection_payload(request),
+            schema_name="atlas_skill_selection_v2",
+            schema=_selection_schema(request),
+            max_output_tokens=1000,
+            execution_key=execution_key,
+        )
+        try:
+            decision = SkillSelectionDecisionV1.model_validate(outcome.output)
+        except ValidationError as error:
+            raise DeepReasoningContractError("selector_contract_invalid") from error
+        offered_ids = {candidate.selection_id for candidate in request.candidates}
+        if (
+            len(decision.selected_skill_ids) > len(request.candidates)
+            or any(
+                selection_id not in offered_ids
+                for selection_id in decision.selected_skill_ids
+            )
+        ):
+            raise DeepReasoningContractError("selection_outside_catalog")
+        return SkillSelectionResultV1(
+            decision=decision,
+            input_tokens=_usage_value(outcome.usage, "input_tokens", "prompt_tokens"),
+            output_tokens=_usage_value(
+                outcome.usage, "output_tokens", "completion_tokens"
+            ),
+        )
+
+
+
+    @staticmethod
     def _plan_payload(
-        model_input: TurnModelInputV3, *, repair: bool
+        node_context: InitialPlanningNodeContextV1, *, repair: bool
     ) -> dict[str, object]:
-        return _plan_payload(model_input, repair=repair)
+        return _plan_payload(node_context, repair=repair)
 
     def estimate_plan_request_tokens(
-        self, model_input: TurnModelInputV3, *, repair: bool
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        node_context: InitialPlanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+        repair: bool,
     ) -> int:
         return self._reasoning_wire(
             model_input,
             purpose="deep_reasoning_plan",
-            payload=self._plan_payload(model_input, repair=repair),
+            payload=self._plan_payload(node_context, repair=repair),
             schema_name="atlas_initial_plan_decision_v1",
             schema=_ProviderInitialPlanDecisionV1.model_json_schema(),
             max_output_tokens=4000,
+            selected_skills=selected_skills,
         )[3].input_tokens
 
     def plan(
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: InitialPlanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         repair: bool,
         schema_retry_ordinal: int = 0,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
@@ -726,11 +918,12 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             model_input,
             purpose="deep_reasoning_plan",
             ordinal=schema_retry_ordinal + 1,
-            payload=self._plan_payload(model_input, repair=repair),
+            payload=self._plan_payload(node_context, repair=repair),
             schema_name="atlas_initial_plan_decision_v1",
             schema=_ProviderInitialPlanDecisionV1.model_json_schema(),
             max_output_tokens=4000,
             repair_origin_error_code=repair_origin_error_code,
+            selected_skills=selected_skills,
         )
         try:
             decision = _ProviderInitialPlanDecisionV1.model_validate(outcome.output)
@@ -771,87 +964,85 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
 
     @staticmethod
     def _replan_payload(
-        model_input: TurnModelInputV3,
-        *,
-        plan: ReasoningPlanV2,
-        evaluation: ReasoningEvaluationV1,
-        repair: bool,
+        node_context: ReplanningNodeContextV1, *, repair: bool
     ) -> dict[str, object]:
-        remaining = {
-            "tool_invocations": max(
-                0,
-                model_input.policy.max_tool_invocations
-                - model_input.budget.tool_invocations,
-            ),
-            "provider_invocations": max(
-                0,
-                model_input.policy.max_provider_invocations
-                - model_input.budget.provider_invocations,
-            ),
-            "search_rounds": max(
-                0,
-                model_input.policy.max_search_rounds
-                - model_input.budget.search_rounds,
-            ),
-            "model_visible_items": max(
-                0,
-                model_input.policy.max_model_visible_items_per_turn
-                - model_input.budget.model_visible_items,
-            ),
-        }
-        return _replan_payload(
-            plan=plan,
-            evaluation=evaluation,
-            repair=repair,
-            allowed_action_kinds=model_input.capabilities.allowed_actions,
-            safe_counts=model_input.budget.model_dump(mode="json"),
-            remaining_execution_limits=remaining,
-        )
+        return _replan_payload(node_context, repair=repair)
 
     @staticmethod
     def _replan_schema(plan: ReasoningPlanV2) -> dict[str, object]:
         return _replan_schema(plan)
 
+    @staticmethod
+    def _require_matching_replan_context(
+        *,
+        node_context: ReplanningNodeContextV1,
+        plan: ReasoningPlanV2,
+        evaluation: ReasoningEvaluationV1,
+    ) -> None:
+        expected_finding = {
+            "cycle": evaluation.cycle,
+            "verdict": evaluation.verdict,
+            "finding_codes": evaluation.finding_codes,
+            "summary": evaluation.summary,
+        }
+        if (
+            node_context.current_plan != plan
+            or node_context.evaluator_finding != expected_finding
+        ):
+            raise DeepReasoningContractError("replanning_node_context_mismatch")
+
     def estimate_replan_request_tokens(
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: ReplanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
     ) -> int:
+        self._require_matching_replan_context(
+            node_context=node_context,
+            plan=plan,
+            evaluation=evaluation,
+        )
         return self._reasoning_wire(
             model_input,
             purpose="deep_reasoning_replan",
-            payload=self._replan_payload(
-                model_input, plan=plan, evaluation=evaluation, repair=repair
-            ),
+            payload=self._replan_payload(node_context, repair=repair),
             schema_name="atlas_replan_decision_v1",
             schema=self._replan_schema(plan),
             max_output_tokens=4000,
+            selected_skills=selected_skills,
         )[3].input_tokens
 
     def replan(
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: ReplanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
         schema_retry_ordinal: int = 0,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> DeepReasoningPlanResultV1:
+        self._require_matching_replan_context(
+            node_context=node_context,
+            plan=plan,
+            evaluation=evaluation,
+        )
         outcome = self._invoke_reasoning(
             model_input,
             purpose="deep_reasoning_replan",
             ordinal=plan.generation * 10 + schema_retry_ordinal,
-            payload=self._replan_payload(
-                model_input, plan=plan, evaluation=evaluation, repair=repair
-            ),
+            payload=self._replan_payload(node_context, repair=repair),
             schema_name="atlas_replan_decision_v1",
             schema=self._replan_schema(plan),
             max_output_tokens=4000,
             repair_origin_error_code=repair_origin_error_code,
+            selected_skills=selected_skills,
         )
         try:
             decision = _ProviderReplanDecisionV1.model_validate(outcome.output)
@@ -1049,6 +1240,12 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             model_input=model_input,
             record_invocations=False,
         )
+        session.begin_answer_candidate(
+            model_input,
+            candidate_ordinal=1,
+            candidate_kind="normal",
+            selected_skills=(),
+        )
         return session.estimate_next_request_tokens(
             model_input, finalize_only=False
         )
@@ -1060,6 +1257,12 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel):
             routing=self._routing,
             model_input=model_input,
             record_invocations=False,
+        )
+        session.begin_answer_candidate(
+            model_input,
+            candidate_ordinal=1,
+            candidate_kind="normal",
+            selected_skills=(),
         )
         return session.estimate_next_request_tokens_unchecked(
             model_input, finalize_only=False

@@ -20,15 +20,17 @@ from atlas_production.modules.citation_preview.public import (
     ProtectedDeclaredEvidenceV1,
 )
 from atlas_production.modules.identity_access.records import UserRecord
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
     ExecutionLeaseV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     ExecutionState,
     RoutePolicyV1,
     RuntimeEventV1,
     ReasoningEvaluationV1,
-    ReasoningTraceV3,
+    ReasoningTraceV4,
 )
 from atlas_production.modules.workspace_turn.public import (
     WorkspaceConversationDetailV1,
@@ -88,7 +90,36 @@ def snapshot() -> ExecutionSnapshotV1:
         input_digest="0" * 64,
         response_language="zh-TW",
         reasoning_mode="deep",
-        reasoning_trace=ReasoningTraceV3(
+        prompt_skill_catalogs=[
+            PromptSkillCatalogRefV1(
+                category="understanding",
+                catalog_revision=1,
+                catalog_digest="1" * 64,
+            ),
+            PromptSkillCatalogRefV1(
+                category="planner",
+                catalog_revision=1,
+                catalog_digest="0" * 64,
+            ),
+            PromptSkillCatalogRefV1(
+                category="answer",
+                catalog_revision=1,
+                catalog_digest="2" * 64,
+            ),
+        ],
+        prompt_skill_selections=[
+            ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="not_applicable",
+            )
+        ],
+        reasoning_trace=ReasoningTraceV4(
+            prompt_skill_catalog=PromptSkillCatalogRefV1(
+                category="planner",
+                catalog_revision=1,
+                catalog_digest="0" * 64,
+            ),
             trace_revision=2,
             trace_digest="b" * 64,
             parent_trace_digest="a" * 64,

@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Annotated, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillInstructionsV1,
+    PromptSkillSelectorCandidateV1,
+)
 from atlas_production.modules.answer_behavior import public as _answer_behavior
 
 from atlas_production.modules.retrieval.public import (
@@ -20,6 +24,7 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
+    ExecutionSnapshotV1,
     ReasoningEvaluationV1,
     ReasoningPlanV2,
     RoutePolicyV1,
@@ -343,16 +348,184 @@ class GateCorrectionFeedbackV1(_StrictModel):
             raise ValueError("gate correction segment ids must be unique")
         return self
 
+class _ImmutableStrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+SkillSelectionNode: TypeAlias = Literal[
+    "resolver", "deep_initial_planner", "deep_replanner", "answer_candidate"
+]
+
+
+class UnderstandingNodeContextV1(_ImmutableStrictModel):
+    node: Literal["resolver"] = "resolver"
+    original_user_input: str = Field(min_length=1, max_length=50000)
+    authorized_rewritten_context: dict[str, object]
+
+    @model_validator(mode="after")
+    def require_exact_authorized_context(self) -> "UnderstandingNodeContextV1":
+        if set(self.authorized_rewritten_context) != {
+            "summary",
+            "recent_exchanges",
+        }:
+            raise ValueError("understanding context must contain exact authorized history")
+        if not isinstance(
+            self.authorized_rewritten_context["recent_exchanges"], list
+        ):
+            raise ValueError("understanding recent exchanges must be an ordered list")
+        return self
+
+
+class InitialPlanningNodeContextV1(_ImmutableStrictModel):
+    node: Literal["deep_initial_planner"] = "deep_initial_planner"
+    current_user_request: str = Field(min_length=1, max_length=50000)
+    history_authority_policy: dict[str, object]
+    history_summary: dict[str, object] | None
+    recent_history: tuple[dict[str, object], ...]
+    catalog_document_count: int = Field(ge=0)
+    allowed_actions: tuple[KnowledgeActionName, ...]
+
+
+class ReplanningNodeContextV1(_ImmutableStrictModel):
+    node: Literal["deep_replanner"] = "deep_replanner"
+    current_plan: ReasoningPlanV2
+    evaluator_finding: dict[str, object]
+    allowed_action_kinds: tuple[KnowledgeActionName, ...]
+    safe_counts: BudgetSnapshotV1
+    remaining_execution_limits: dict[str, int]
+
+
+class AnswerCandidateNodeContextV1(_ImmutableStrictModel):
+    node: Literal["answer_candidate"] = "answer_candidate"
+    candidate_ordinal: int = Field(ge=1, le=5)
+    candidate_kind: Literal["normal", "limit_final"] = "normal"
+    current_user_request: str = Field(min_length=1, max_length=50000)
+    current_plan: ReasoningPlanV2 | None = None
+    correction_kind: Literal[
+        "revise_only", "research_then_revise", "limit_final"
+    ] | None = None
+    triggering_evaluation: ReasoningEvaluationV1 | None = None
+    gate_correction_feedback: GateCorrectionFeedbackV1 | None = None
+
+    @model_validator(mode="after")
+    def require_candidate_boundary_context(self) -> "AnswerCandidateNodeContextV1":
+        correction_fields = (
+            self.correction_kind,
+            self.triggering_evaluation,
+            self.gate_correction_feedback,
+        )
+        if self.candidate_ordinal == 1:
+            if self.candidate_kind != "normal" or any(
+                value is not None for value in correction_fields
+            ):
+                raise ValueError("initial answer candidate cannot carry correction input")
+            return self
+        if self.triggering_evaluation is None or self.correction_kind is None:
+            raise ValueError("later answer candidate requires triggering correction input")
+        if self.candidate_kind == "limit_final":
+            if self.correction_kind != "limit_final":
+                raise ValueError("limit-final candidate requires limit-final correction")
+        elif self.correction_kind == "limit_final":
+            raise ValueError("normal candidate cannot carry limit-final correction")
+        return self
+
+
+SkillSelectionNodeContextV1: TypeAlias = Annotated[
+    UnderstandingNodeContextV1
+    | InitialPlanningNodeContextV1
+    | ReplanningNodeContextV1
+    | AnswerCandidateNodeContextV1,
+    Field(discriminator="node"),
+]
+
+
+class SkillSelectionRequestV2(_ImmutableStrictModel):
+    node: SkillSelectionNode
+    node_context: SkillSelectionNodeContextV1
+    candidates: tuple[PromptSkillSelectorCandidateV1, ...]
+
+    @model_validator(mode="after")
+    def require_matching_node_context_and_category(self) -> "SkillSelectionRequestV2":
+        if self.node != self.node_context.node:
+            raise ValueError("selector node must match its node context")
+        required_category = {
+            "resolver": "understanding",
+            "deep_initial_planner": "planner",
+            "deep_replanner": "planner",
+            "answer_candidate": "answer",
+        }[self.node]
+        if any(
+            candidate.ref.category != required_category
+            for candidate in self.candidates
+        ):
+            raise ValueError("selector candidates must match the node category")
+        selection_ids = [candidate.selection_id for candidate in self.candidates]
+        if (
+            len(selection_ids) != len(set(selection_ids))
+            or selection_ids != sorted(selection_ids)
+        ):
+            raise ValueError("selector candidate IDs must be ordered and unique")
+        return self
+
+
+class SkillSelectionDecisionV1(_ImmutableStrictModel):
+    selected_skill_ids: list[str]
+
+    @model_validator(mode="after")
+    def require_ordered_unique_selection(self) -> "SkillSelectionDecisionV1":
+        if len(self.selected_skill_ids) != len(set(self.selected_skill_ids)):
+            raise ValueError("selected skill IDs must be unique")
+        return self
+
+
+class SkillSelectionResultV1(_ImmutableStrictModel):
+    decision: SkillSelectionDecisionV1
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
+class SkillSelectorModel(Protocol):
+    def estimate_selection_request_tokens(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        request: SkillSelectionRequestV2,
+    ) -> int: ...
+
+    def select(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        request: SkillSelectionRequestV2,
+    ) -> SkillSelectionResultV1: ...
 
 class DeepReasoningModel(Protocol):
+    def build_initial_planning_node_context(
+        self, model_input: TurnModelInputV3
+    ) -> InitialPlanningNodeContextV1: ...
+
+    def build_replanning_node_context(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        plan: ReasoningPlanV2,
+        evaluation: ReasoningEvaluationV1,
+        remaining_execution_limits: dict[str, int],
+    ) -> ReplanningNodeContextV1: ...
+
     def estimate_plan_request_tokens(
-        self, model_input: TurnModelInputV3, *, repair: bool
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        node_context: InitialPlanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+        repair: bool,
     ) -> int: ...
 
     def plan(
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: InitialPlanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         repair: bool,
         schema_retry_ordinal: int = 0,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
@@ -362,6 +535,8 @@ class DeepReasoningModel(Protocol):
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: ReplanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
@@ -371,6 +546,8 @@ class DeepReasoningModel(Protocol):
         self,
         model_input: TurnModelInputV3,
         *,
+        node_context: ReplanningNodeContextV1,
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
         plan: ReasoningPlanV2,
         evaluation: ReasoningEvaluationV1,
         repair: bool,
@@ -430,6 +607,24 @@ class StrictTurnModelSession(Protocol):
     def estimate_next_request_tokens(
         self, model_input: TurnModelInputV3, *, finalize_only: bool
     ) -> int: ...
+    def estimate_begin_answer_candidate_tokens(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        candidate_ordinal: int,
+        candidate_kind: Literal["normal", "limit_final"],
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    ) -> int: ...
+
+    def begin_answer_candidate(
+        self,
+        model_input: TurnModelInputV3,
+        *,
+        candidate_ordinal: int,
+        candidate_kind: Literal["normal", "limit_final"],
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    ) -> None: ...
+
 
     def accept_tool_observation(
         self,
@@ -481,6 +676,9 @@ __all__ = [
     "ModelContractViolationV1",
     "ModelStepResultV1",
     "GateCorrectionFeedbackV1",
+    "UnderstandingNodeContextV1",
+    "InitialPlanningNodeContextV1",
+    "AnswerCandidateNodeContextV1",
     "StrictTurnModel",
     "StrictTurnModelSession",
     "TurnExecutionOrchestrator",
@@ -495,6 +693,13 @@ __all__ = [
     "TurnModelNavigationOptionV1",
     "TurnModelInputV3",
     "TurnModelRecentExchangeV3",
+    "ReplanningNodeContextV1",
+    "SkillSelectionNodeContextV1",
+    "SkillSelectionDecisionV1",
+    "SkillSelectionNode",
+    "SkillSelectionRequestV2",
+    "SkillSelectionResultV1",
+    "SkillSelectorModel",
     "finalize_answer_schema",
     "turn_action_schema",
 ]

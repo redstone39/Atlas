@@ -120,6 +120,8 @@ class ConversationAuditService:
             version=snapshot.version,
             reasoning_mode=snapshot.reasoning_mode,
             reasoning_trace=snapshot.reasoning_trace,
+            prompt_skill_catalogs=snapshot.prompt_skill_catalogs,
+            prompt_skill_selections=snapshot.prompt_skill_selections,
             failure_code=snapshot.terminal_failure_code,
             applied_guidance_revision=snapshot.applied_guidance_revision,
             applied_guidance_digest=snapshot.applied_guidance_digest,

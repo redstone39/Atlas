@@ -1,18 +1,56 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from atlas_production.infrastructure.turn_execution_foundation import _digest
 from atlas_production.modules.audit.public import TurnAuditStepV1
 from atlas_production.modules.result_governance.public import ProvisionalEvidenceAssessmentV1
 from atlas_production.modules.turn_execution.public import GateCorrectionFeedbackV1
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     ProvisionalEvidenceCheckV1,
+    PromptSkillSelectionTraceV1,
     ReasoningCorrectionV2,
     ReasoningEvaluationV1,
     ReasoningLimitFinalizationV2,
     ReasoningPlanV2,
-    ReasoningTraceV3,
+    ReasoningTraceV4,
+)
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+MAX_MINIMAL_SKILL_FALLBACK_BYTES = (
+    max(
+        len(
+            _canonical_json_bytes(
+                PromptSkillSelectionTraceV1(
+                    node=node,
+                    plan_generation=generation,
+                    status="baseline_fallback",
+                    fallback_code=fallback_code,
+                ).model_dump(mode="json")
+            )
+        )
+        for node in ("deep_initial_planner", "deep_replanner")
+        for generation in (1, 4)
+        for fallback_code in (
+            "selector_unavailable",
+            "selector_contract_invalid",
+            "selection_outside_catalog",
+            "selected_skill_integrity_error",
+            "selected_skill_context_exceeded",
+            "selected_skill_trace_exceeded",
+        )
+    )
+    + 1
 )
 
 _ReasoningTerminationReason = Literal[
@@ -62,17 +100,36 @@ def _merged_correction_kind(
 
 
 def _next_reasoning_trace(
-    previous: ReasoningTraceV3 | None,
+    previous: ReasoningTraceV4 | None,
     *,
     status: Literal["planning", "running", "completed", "degraded", "failed"],
     plans: list[ReasoningPlanV2],
     evaluations: list[ReasoningEvaluationV1],
     corrections: list[ReasoningCorrectionV2],
+    prompt_skill_catalog: PromptSkillCatalogRefV1 | None = None,
+    appended_skill_selection: PromptSkillSelectionTraceV1 | None = None,
+    remaining_possible_skill_selection_nodes: int = 0,
     provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] | None = None,
     limit_finalization: ReasoningLimitFinalizationV2 | None = None,
     termination_reason: _ReasoningTerminationReason | None = None,
-) -> ReasoningTraceV3:
+) -> ReasoningTraceV4:
+    if previous is None:
+        if prompt_skill_catalog is None:
+            raise ValueError("initial reasoning trace requires a prompt skill catalog")
+        skill_selections: list[PromptSkillSelectionTraceV1] = []
+    else:
+        if (
+            prompt_skill_catalog is not None
+            and prompt_skill_catalog != previous.prompt_skill_catalog
+        ):
+            raise ValueError("reasoning trace prompt skill catalog is immutable")
+        prompt_skill_catalog = previous.prompt_skill_catalog
+        skill_selections = list(previous.skill_selections)
+    if appended_skill_selection is not None:
+        skill_selections.append(appended_skill_selection)
     payload = {
+        "prompt_skill_catalog": prompt_skill_catalog,
+        "skill_selections": skill_selections,
         "trace_revision": 1 if previous is None else previous.trace_revision + 1,
         "trace_digest": "0" * 64,
         "parent_trace_digest": None if previous is None else previous.trace_digest,
@@ -88,10 +145,18 @@ def _next_reasoning_trace(
         "limit_finalization": limit_finalization,
         "termination_reason": termination_reason,
     }
-    provisional = ReasoningTraceV3.model_validate(payload)
+    provisional = ReasoningTraceV4.model_validate(payload)
     digest_payload = provisional.model_dump(mode="json")
     digest_payload.pop("trace_digest")
-    return provisional.model_copy(update={"trace_digest": _digest(digest_payload)})
+    result = provisional.model_copy(update={"trace_digest": _digest(digest_payload)})
+    encoded = _canonical_json_bytes(result.model_dump(mode="json"))
+    required_reserve = (
+        remaining_possible_skill_selection_nodes
+        * MAX_MINIMAL_SKILL_FALLBACK_BYTES
+    )
+    if len(encoded) + required_reserve > 32768:
+        raise ValueError("reasoning trace cannot preserve future skill selection reserve")
+    return result
 
 
 def _provisional_evidence_check(

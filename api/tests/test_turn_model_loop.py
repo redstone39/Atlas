@@ -44,6 +44,13 @@ from atlas_production.modules.result_governance.public import (
     PostHocAnswerAssessmentV2,
 )
 from atlas_production.modules.answer_behavior.public import AnswerBehaviorInputV1
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalogRefV1,
+    PromptSkillCatalogV1,
+    PromptSkillInstructionsV1,
+    PromptSkillRefV1,
+    PromptSkillSelectorCandidateV1,
+)
 from atlas_production.modules.retrieval.public import (
     DeclaredEvidenceItemV1,
     DeclaredEvidenceMappingV1,
@@ -72,13 +79,18 @@ from atlas_production.modules.turn_execution.public import (
     DeepReasoningEvaluationResultV1,
     DeepReasoningPlanResultV1,
     FinalizeAnswerV1,
+    InitialPlanningNodeContextV1,
     ModelActionResultV1,
     ModelContractViolationV1,
+    ReplanningNodeContextV1,
+    SkillSelectionDecisionV1,
+    SkillSelectionResultV1,
     TurnModelInputV3,
 )
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
     ExecutionLeaseV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     ExecutionState,
     ProcessScoreV1,
@@ -108,6 +120,22 @@ def _budget(**changes) -> BudgetSnapshotV1:
     )
     values.update(changes)
     return BudgetSnapshotV1(**values)
+def _prompt_skill_catalogs(reasoning_mode: str) -> list[PromptSkillCatalogRefV1]:
+    categories = (
+        ("understanding", "answer")
+        if reasoning_mode == "standard"
+        else ("understanding", "planner", "answer")
+    )
+    return [
+        PromptSkillCatalogRefV1(
+            category=category,
+            catalog_revision=1,
+            catalog_digest="0" * 64,
+        )
+        for category in categories
+    ]
+
+
 
 
 class Runtime:
@@ -131,6 +159,14 @@ class Runtime:
             input_digest="0" * 64,
             response_language="zh-TW",
             reasoning_mode=reasoning_mode,
+            prompt_skill_catalogs=_prompt_skill_catalogs(reasoning_mode),
+            prompt_skill_selections=[
+                ExecutionPromptSkillSelectionTraceV1(
+                    category="understanding",
+                    node="resolver",
+                    status="not_applicable",
+                )
+            ],
             applied_guidance_revision=0,
             applied_guidance_digest=None,
             lease=ExecutionLeaseV1(
@@ -142,6 +178,22 @@ class Runtime:
             context_pack_ref="context-1", deadline_at=NOW + timedelta(minutes=2),
             created_at=NOW, updated_at=NOW,
         )
+
+    def record_prompt_skill_selection(self, command):
+        assert command.expected_version == self.snapshot_value.version
+        moved = self._move(
+            self.snapshot_value.state,
+            budget=self.snapshot_value.budget,
+        )
+        self.snapshot_value = moved.model_copy(
+            update={
+                "prompt_skill_selections": [
+                    *moved.prompt_skill_selections,
+                    command.selection,
+                ]
+            }
+        )
+        return self.snapshot_value
 
     def snapshot(self, execution_id):
         assert execution_id == "exec-1"
@@ -302,6 +354,7 @@ class ScriptSession:
         self.discarded = False
         self.visual_images = []
         self.reasoning_feedback = []
+        self.answer_candidates = []
 
     def next_action(
         self, model_input, *, finalize_only, repair_origin_error_code=None
@@ -315,6 +368,31 @@ class ScriptSession:
         if isinstance(action, ModelContractViolationV1):
             return action
         return ModelActionResultV1(action=action)
+
+    def estimate_begin_answer_candidate_tokens(
+        self,
+        model_input,
+        *,
+        candidate_ordinal,
+        candidate_kind,
+        selected_skills,
+    ):
+        return self.estimate_next_request_tokens(
+            model_input,
+            finalize_only=candidate_kind == "limit_final",
+        )
+
+    def begin_answer_candidate(
+        self,
+        model_input,
+        *,
+        candidate_ordinal,
+        candidate_kind,
+        selected_skills,
+    ):
+        self.answer_candidates.append(
+            (candidate_ordinal, candidate_kind, selected_skills)
+        )
 
     def estimate_next_request_tokens(self, model_input, *, finalize_only):
         content = json.dumps(
@@ -360,6 +438,46 @@ class ScriptModel:
         return self.session
 
 
+class EmptyPromptSkillCatalog:
+    def read_catalog(self, ref):
+        return PromptSkillCatalogV1(ref=ref, skills=[])
+
+    def read_instructions(self, ref):
+        raise AssertionError("empty catalog cannot exact-read instructions")
+
+
+class ScriptPromptSkillCatalog:
+    def __init__(
+        self,
+        candidates: tuple[PromptSkillSelectorCandidateV1, ...],
+        *,
+        instructions: dict[str, PromptSkillInstructionsV1] | None = None,
+        read_error: Exception | None = None,
+    ) -> None:
+        self.candidates = candidates
+        self.instructions = instructions or {}
+        self.read_error = read_error
+        self.catalog_reads = 0
+        self.instruction_reads: list[PromptSkillRefV1] = []
+
+    def read_catalog(self, ref):
+        self.catalog_reads += 1
+        return PromptSkillCatalogV1(
+            ref=ref,
+            skills=[
+                candidate
+                for candidate in self.candidates
+                if candidate.ref.category == ref.category
+            ],
+        )
+
+    def read_instructions(self, ref):
+        self.instruction_reads.append(ref)
+        if self.read_error is not None:
+            raise self.read_error
+        return self.instructions[ref.name]
+
+
 class ScriptReasoningModel:
     def __init__(
         self,
@@ -367,26 +485,98 @@ class ScriptReasoningModel:
         evaluations=(),
         planner_failures=0,
         replanner_failures=0,
+        selections=(),
+        selection_errors=(),
+        selected_context_error: DeepReasoningContractError | None = None,
+        selected_repair_context_error: DeepReasoningContractError | None = None,
     ):
         self.plan_calls = []
+        self.plan_contract_calls = []
+        self.plan_estimate_calls = []
         self.evaluation_calls = []
         self.evaluations = list(evaluations)
         self.planner_failures = planner_failures
         self.replanner_failures = replanner_failures
         self.replan_calls = []
+        self.replan_contract_calls = []
+        self.replan_estimate_calls = []
+        self.selections = list(selections)
+        self.selection_errors = list(selection_errors)
+        self.selection_requests = []
+        self.selection_estimates = []
+        self.selected_context_error = selected_context_error
+        self.selected_repair_context_error = selected_repair_context_error
+        self.reasoning_calls = []
+    def build_initial_planning_node_context(self, model_input):
+        return InitialPlanningNodeContextV1(
+            current_user_request="Test request",
+            history_authority_policy={},
+            history_summary=None,
+            recent_history=(),
+            catalog_document_count=0,
+            allowed_actions=(),
+        )
 
-    def estimate_plan_request_tokens(self, model_input, *, repair):
+    def build_replanning_node_context(
+        self,
+        model_input,
+        *,
+        plan,
+        evaluation,
+        remaining_execution_limits,
+    ):
+        return ReplanningNodeContextV1(
+            current_plan=plan,
+            evaluator_finding=evaluation.model_dump(mode="json"),
+            allowed_action_kinds=(),
+            safe_counts=model_input.budget,
+            remaining_execution_limits=remaining_execution_limits,
+        )
+
+    def estimate_selection_request_tokens(self, model_input, request):
+        self.selection_estimates.append((model_input, request))
+        self.reasoning_calls.append("selector_estimate")
+        return 7
+
+    def select(self, model_input, request):
+        self.selection_requests.append((model_input, request))
+        self.reasoning_calls.append("selector_select")
+        if self.selection_errors:
+            raise self.selection_errors.pop(0)
+        selected_ids = self.selections.pop(0) if self.selections else []
+        if len(selected_ids) != len(set(selected_ids)):
+            decision = SimpleNamespace(selected_skill_ids=selected_ids)
+            return SimpleNamespace(decision=decision, input_tokens=3, output_tokens=2)
+        return SkillSelectionResultV1(
+            decision=SkillSelectionDecisionV1(selected_skill_ids=selected_ids),
+            input_tokens=3,
+            output_tokens=2,
+        )
+
+    def estimate_plan_request_tokens(
+        self, model_input, *, node_context, selected_skills, repair
+    ):
+        self.plan_estimate_calls.append((node_context, selected_skills, repair))
+        self.reasoning_calls.append(f"plan_estimate:{repair}")
+        if selected_skills and self.selected_context_error is not None:
+            raise self.selected_context_error
+        if selected_skills and repair and self.selected_repair_context_error is not None:
+            raise self.selected_repair_context_error
         return 10
 
     def plan(
         self,
         model_input,
         *,
+        node_context,
+        selected_skills,
         repair,
         schema_retry_ordinal=0,
         repair_origin_error_code=None,
     ):
         self.plan_calls.append(repair)
+        self.plan_contract_calls.append((node_context, selected_skills, repair))
+        self.reasoning_calls.append(f"plan:{repair}")
         if len(self.plan_calls) <= self.planner_failures:
             raise DeepReasoningContractError("deep_reasoning_plan_invalid")
         return DeepReasoningPlanResultV1(
@@ -407,13 +597,23 @@ class ScriptReasoningModel:
     def estimate_evaluation_request_tokens(self, *args, **kwargs):
         return 10
 
-    def estimate_replan_request_tokens(self, *args, **kwargs):
+    def estimate_replan_request_tokens(
+        self, model_input, *, node_context, selected_skills, plan, evaluation, repair
+    ):
+        self.replan_estimate_calls.append((node_context, selected_skills, repair))
+        self.reasoning_calls.append(f"replan_estimate:{repair}")
+        if selected_skills and self.selected_context_error is not None:
+            raise self.selected_context_error
+        if selected_skills and repair and self.selected_repair_context_error is not None:
+            raise self.selected_repair_context_error
         return 10
 
     def replan(
         self,
         model_input,
         *,
+        node_context,
+        selected_skills,
         plan,
         evaluation,
         repair,
@@ -421,6 +621,8 @@ class ScriptReasoningModel:
         repair_origin_error_code=None,
     ):
         self.replan_calls.append(repair)
+        self.replan_contract_calls.append((node_context, selected_skills, repair))
+        self.reasoning_calls.append(f"replan:{repair}")
         if len(self.replan_calls) <= self.replanner_failures:
             raise DeepReasoningContractError("deep_reasoning_replan_invalid")
         return DeepReasoningPlanResultV1(
@@ -437,6 +639,7 @@ class ScriptReasoningModel:
 
     def evaluate(self, model_input, **kwargs):
         self.evaluation_calls.append(kwargs["cycle"])
+        self.reasoning_calls.append("evaluate")
         outcome = self.evaluations.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -995,6 +1198,49 @@ def process_evaluation(cycle, verdict):
     )
 
 
+def _skill_candidate(
+    name: str,
+    *,
+    selection_id: str | None = None,
+    digest_character: str = "b",
+    description: str | None = None,
+    category: str = "planner",
+) -> PromptSkillSelectorCandidateV1:
+    ref = PromptSkillRefV1(
+        category=category,
+        name=name,
+        revision=1,
+        content_digest=digest_character * 64,
+    )
+    return PromptSkillSelectorCandidateV1(
+        selection_id=selection_id or f"{category}:{name}:1",
+        name=name,
+        description=description or f"Instructions for {name}.",
+        ref=ref,
+    )
+
+
+def _skill_catalog(
+    candidates: tuple[PromptSkillSelectorCandidateV1, ...],
+    *,
+    instruction_text: str = "Follow this optional planning method.",
+    read_error: Exception | None = None,
+) -> ScriptPromptSkillCatalog:
+    return ScriptPromptSkillCatalog(
+        candidates,
+        instructions={
+            candidate.name: PromptSkillInstructionsV1(
+                name=candidate.ref.name,
+                revision=candidate.ref.revision,
+                content_digest=candidate.ref.content_digest,
+                instructions=instruction_text,
+            )
+            for candidate in candidates
+        },
+        read_error=read_error,
+    )
+
+
 def _orchestrator(
     actions,
     *,
@@ -1006,6 +1252,11 @@ def _orchestrator(
     planner_failures=0,
     replanner_failures=0,
     assessment_outcomes=(),
+    prompt_skill_catalog=None,
+    selector_selections=(),
+    selector_errors=(),
+    selected_context_error=None,
+    selected_repair_context_error=None,
 ):
     runtime = Runtime(policy=policy, reasoning_mode=reasoning_mode)
     retrieval = Retrieval()
@@ -1015,6 +1266,10 @@ def _orchestrator(
         evaluations=reasoning_evaluations,
         planner_failures=planner_failures,
         replanner_failures=replanner_failures,
+        selections=selector_selections,
+        selection_errors=selector_errors,
+        selected_context_error=selected_context_error,
+        selected_repair_context_error=selected_repair_context_error,
     )
     evaluator = Evaluator(results, assessment_outcomes)
     orchestrator = StatelessTurnExecutionOrchestrator(
@@ -1022,11 +1277,318 @@ def _orchestrator(
         result_governance=Governance(order), citation=Citation(order), audit=Audit(order),
         evaluator=evaluator,
         reasoning_model=reasoning_model,
+        skill_selector_model=reasoning_model,
+        prompt_skill_catalog=prompt_skill_catalog or EmptyPromptSkillCatalog(),
+        prompt_skill_exact_reader=prompt_skill_catalog or EmptyPromptSkillCatalog(),
     )
     orchestrator.test_evaluator = evaluator
     orchestrator.test_reasoning_model = reasoning_model
     return orchestrator, runtime, retrieval, model, order
 
+
+
+def test_deep_initial_selector_preserves_order_context_and_exact_trace_refs() -> None:
+    skill_a = _skill_candidate("skill-a", digest_character="a")
+    skill_b = _skill_candidate("skill-b", digest_character="b")
+    catalog = _skill_catalog((skill_a, skill_b))
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        prompt_skill_catalog=catalog,
+        selector_selections=([skill_b.selection_id, skill_a.selection_id],),
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    selection_request = reasoning.selection_requests[0][1]
+    plan_context, selected_skills, repair = reasoning.plan_contract_calls[0]
+    trace_selection = runtime.snapshot_value.reasoning_trace.skill_selections[0]
+    assert reasoning.reasoning_calls[:5] == [
+        "selector_estimate",
+        "selector_select",
+        "plan_estimate:False",
+        "plan_estimate:True",
+        "plan_estimate:False",
+    ]
+    assert selection_request is reasoning.selection_estimates[0][1]
+    assert selection_request.node_context is plan_context
+    assert [skill.name for skill in selected_skills] == ["skill-b", "skill-a"]
+    assert repair is False
+    assert trace_selection.status == "selected"
+    assert trace_selection.selected_skills == [skill_b.ref, skill_a.ref]
+    assert catalog.instruction_reads == [skill_b.ref, skill_a.ref]
+    assert runtime.snapshot_value.budget.provider_invocations == 4
+
+
+@pytest.mark.parametrize(
+    ("candidates", "expected_status", "expected_selector_calls", "provider_count"),
+    [
+        ((), "not_applicable", 0, 3),
+        ((_skill_candidate("optional-skill"),), "selected", 1, 4),
+    ],
+)
+def test_deep_empty_catalog_and_empty_selection_have_distinct_trace_status(
+    candidates, expected_status, expected_selector_calls, provider_count
+) -> None:
+    catalog = _skill_catalog(candidates)
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        prompt_skill_catalog=catalog,
+        selector_selections=([],),
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    selection = runtime.snapshot_value.reasoning_trace.skill_selections[0]
+    assert selection.status == expected_status
+    assert selection.selected_skills == []
+    assert len(reasoning.selection_requests) == expected_selector_calls
+    assert runtime.snapshot_value.budget.provider_invocations == provider_count
+
+
+def test_deep_planner_repair_reuses_selection_and_node_context_without_rerun() -> None:
+    candidate = _skill_candidate("repair-skill")
+    catalog = _skill_catalog((candidate,))
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        planner_failures=1,
+        prompt_skill_catalog=catalog,
+        selector_selections=([candidate.selection_id],),
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    assert len(reasoning.selection_requests) == 1
+    assert reasoning.plan_calls == [False, True]
+    first_context, first_skills, _ = reasoning.plan_contract_calls[0]
+    repair_context, repair_skills, _ = reasoning.plan_contract_calls[1]
+    assert repair_context is first_context
+    assert repair_skills is first_skills
+    assert runtime.snapshot_value.reasoning_trace.skill_selections[0].selected_skills == [
+        candidate.ref
+    ]
+
+
+@pytest.mark.parametrize("node", ["deep_initial_planner", "deep_replanner"])
+def test_selected_repair_wire_overflow_falls_back_before_persisting_selection(
+    node,
+) -> None:
+    candidate = _skill_candidate("repair-overflow-skill")
+    catalog = _skill_catalog((candidate,))
+    replanner = node == "deep_replanner"
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        (
+            [finalize(), search("missing evidence"), finalize()]
+            if replanner
+            else [finalize()]
+        ),
+        reasoning_mode="deep",
+        reasoning_evaluations=(
+            [
+                process_evaluation(1, "research_then_revise"),
+                process_evaluation(2, "accept"),
+            ]
+            if replanner
+            else [process_evaluation(1, "accept")]
+        ),
+        planner_failures=0 if replanner else 1,
+        replanner_failures=1 if replanner else 0,
+        prompt_skill_catalog=catalog,
+        selector_selections=(
+            ([], [candidate.selection_id])
+            if replanner
+            else ([candidate.selection_id],)
+        ),
+        selected_repair_context_error=DeepReasoningContractError(
+            "context_limit_exceeded"
+        ),
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    matching_selections = [
+        selection
+        for selection in runtime.snapshot_value.reasoning_trace.skill_selections
+        if selection.node == node
+    ]
+    assert len(matching_selections) == 1
+    assert matching_selections[0].status == "baseline_fallback"
+    assert matching_selections[0].fallback_code == "selected_skill_context_exceeded"
+    assert len(
+        [request for _, request in reasoning.selection_requests if request.node == node]
+    ) == 1
+    contract_calls = (
+        reasoning.replan_contract_calls if replanner else reasoning.plan_contract_calls
+    )
+    assert [repair for _, _, repair in contract_calls] == [False, True]
+    assert all(selected_skills == () for _, selected_skills, _ in contract_calls)
+    assert runtime.snapshot_value.budget.schema_retries == 1
+    assert runtime.snapshot_value.budget.retrieval_repairs == 0
+    assert not any(runtime.model_action_repairs)
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("first_verdict", "expected_nodes"),
+    [
+        ("research_then_revise", ["deep_initial_planner", "deep_replanner"]),
+        ("revise_only", ["deep_initial_planner"]),
+    ],
+)
+def test_deep_replanner_selector_runs_only_for_research_then_revise(
+    first_verdict, expected_nodes
+) -> None:
+    candidate = _skill_candidate("replan-skill")
+    catalog = _skill_catalog((candidate,))
+    actions = (
+        [finalize(), search("missing evidence"), finalize()]
+        if first_verdict == "research_then_revise"
+        else [finalize(), finalize()]
+    )
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        actions,
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, first_verdict),
+            process_evaluation(2, "accept"),
+        ],
+        prompt_skill_catalog=catalog,
+        selector_selections=([], [candidate.selection_id]),
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    assert [request.node for _, request in reasoning.selection_requests] == expected_nodes
+    assert [
+        selection.node
+        for selection in runtime.snapshot_value.reasoning_trace.skill_selections
+    ] == expected_nodes
+    if first_verdict == "research_then_revise":
+        selector_context = reasoning.selection_requests[1][1].node_context
+        replan_context, selected_skills, _ = reasoning.replan_contract_calls[0]
+        assert selector_context is replan_context
+        assert [skill.name for skill in selected_skills] == ["replan-skill"]
+
+
+@pytest.mark.parametrize(
+    ("selected_ids", "integrity_mismatch", "context_error", "expected_code"),
+    [
+        (["skill:1", "skill:1"], False, None, "selector_contract_invalid"),
+        (["unknown:1"], False, None, "selection_outside_catalog"),
+        (["skill:1"], True, None, "selected_skill_integrity_error"),
+        (
+            ["skill:1"],
+            False,
+            DeepReasoningContractError("context_limit_exceeded"),
+            "selected_skill_context_exceeded",
+        ),
+    ],
+)
+def test_deep_selector_failures_discard_whole_set_and_plan_with_baseline(
+    selected_ids, integrity_mismatch, context_error, expected_code
+) -> None:
+    candidate = _skill_candidate("skill", selection_id="skill:1")
+    catalog = _skill_catalog((candidate,))
+    if integrity_mismatch:
+        catalog.instructions[candidate.name] = catalog.instructions[
+            candidate.name
+        ].model_copy(update={"content_digest": "c" * 64})
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        prompt_skill_catalog=catalog,
+        selector_selections=(selected_ids,),
+        selected_context_error=context_error,
+    )
+
+    orchestrator.run("exec-1")
+
+    reasoning = orchestrator.test_reasoning_model
+    selection = runtime.snapshot_value.reasoning_trace.skill_selections[0]
+    assert selection.status == "baseline_fallback"
+    assert selection.fallback_code == expected_code
+    assert selection.selected_skills == []
+    assert all(selected_skills == () for _, selected_skills, _ in reasoning.plan_contract_calls)
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert runtime.snapshot_value.budget.provider_invocations == 4
+
+@pytest.mark.parametrize(
+    ("selector_error", "read_error", "expected_code"),
+    [
+        (RuntimeError("selector unavailable"), None, "selector_unavailable"),
+        (
+            None,
+            RuntimeError("catalog revision unavailable"),
+            "selected_skill_integrity_error",
+        ),
+    ],
+)
+def test_deep_selector_provider_and_exact_catalog_failures_use_baseline(
+    selector_error, read_error, expected_code
+) -> None:
+    candidate = _skill_candidate("skill", selection_id="skill:1")
+    catalog = _skill_catalog((candidate,), read_error=read_error)
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        prompt_skill_catalog=catalog,
+        selector_selections=([candidate.selection_id],),
+        selector_errors=(() if selector_error is None else (selector_error,)),
+    )
+
+    orchestrator.run("exec-1")
+
+    selection = runtime.snapshot_value.reasoning_trace.skill_selections[0]
+    reasoning = orchestrator.test_reasoning_model
+    assert selection.status == "baseline_fallback"
+    assert selection.fallback_code == expected_code
+    assert selection.selected_skills == []
+    assert all(
+        selected_skills == ()
+        for _, selected_skills, _ in reasoning.plan_contract_calls
+    )
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+
+
+def test_deep_oversized_selected_trace_falls_back_without_partial_instructions() -> None:
+    candidates = tuple(
+        _skill_candidate(
+            f"skill-{index:03d}",
+            selection_id=f"selection-{index:03d}",
+            description="d" * 1024,
+        )
+        for index in range(300)
+    )
+    catalog = _skill_catalog(candidates)
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "accept")],
+        prompt_skill_catalog=catalog,
+        selector_selections=([candidate.selection_id for candidate in candidates],),
+    )
+
+    orchestrator.run("exec-1")
+
+    selection = runtime.snapshot_value.reasoning_trace.skill_selections[0]
+    reasoning = orchestrator.test_reasoning_model
+    assert selection.status == "baseline_fallback"
+    assert selection.fallback_code == "selected_skill_trace_exceeded"
+    assert selection.selected_skills == []
+    assert reasoning.plan_contract_calls[0][1] == ()
+    assert len(catalog.instruction_reads) == len(candidates)
 
 def test_repeated_interleaved_multicall_and_terminal_materialization_order():
     actions = [
@@ -1046,6 +1608,7 @@ def test_repeated_interleaved_multicall_and_terminal_materialization_order():
     ]
     assert runtime.snapshot_value.state == ExecutionState.TERMINAL_COMPLETED
     assert order == ["governance", "citation", "audit"]
+
     assert orchestrator._audit.command.claimed_evidence_handles == [
         "kh_evidence_B",
         "kh_evidence_B",
@@ -1081,7 +1644,189 @@ def test_standard_mode_does_not_call_planner_or_process_evaluator() -> None:
     assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
     assert orchestrator.test_reasoning_model.plan_calls == []
     assert orchestrator.test_reasoning_model.evaluation_calls == []
+    assert orchestrator.test_reasoning_model.selection_requests == []
     assert runtime.reasoning_events == []
+
+
+def test_standard_answer_selection_is_fixed_across_repair_tool_and_finalize() -> None:
+    answer_skill = _skill_candidate(
+        "concise-answer",
+        category="answer",
+        digest_character="c",
+    )
+    catalog = _skill_catalog(
+        (answer_skill,),
+        instruction_text="Keep the complete answer concise.",
+    )
+    violation = ModelContractViolationV1(
+        safe_code="selection_outside_capabilities",
+        action_name="search_knowledge",
+    )
+    list_action = {
+        "action": "list_knowledge_documents",
+        "cursor": None,
+        "page_size": 1,
+        "max_output_tokens": 256,
+    }
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [violation, list_action, finalize()],
+        prompt_skill_catalog=catalog,
+        selector_selections=([answer_skill.selection_id],),
+    )
+
+    orchestrator.run("exec-1")
+
+    requests = [
+        request
+        for _, request in orchestrator.test_reasoning_model.selection_requests
+    ]
+    assert [request.node for request in requests] == ["answer_candidate"]
+    assert [candidate[:2] for candidate in model.session.answer_candidates] == [
+        (1, "normal")
+    ]
+    assert model.session.answer_candidates[0][2][0].instructions == (
+        "Keep the complete answer concise."
+    )
+    assert runtime.snapshot_value.prompt_skill_selections[-1].selected_skills == [
+        answer_skill.ref
+    ]
+    assert runtime.snapshot_value.budget.schema_retries == 0
+    assert runtime.snapshot_value.budget.retrieval_repairs == 1
+    assert runtime.snapshot_value.budget.tool_invocations == 1
+    assert catalog.instruction_reads == [answer_skill.ref]
+
+
+def test_revise_only_reselects_answer_without_planner_selection() -> None:
+    answer_skill = _skill_candidate("revise-answer", category="answer")
+    catalog = _skill_catalog((answer_skill,))
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize(), finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "revise_only"),
+            process_evaluation(2, "accept"),
+        ],
+        prompt_skill_catalog=catalog,
+        selector_selections=(
+            [answer_skill.selection_id],
+            [answer_skill.selection_id],
+        ),
+    )
+
+    orchestrator.run("exec-1")
+
+    assert [
+        request.node
+        for _, request in orchestrator.test_reasoning_model.selection_requests
+    ] == ["answer_candidate", "answer_candidate"]
+    assert [candidate[:2] for candidate in model.session.answer_candidates] == [
+        (1, "normal"),
+        (2, "normal"),
+    ]
+    assert [
+        selection.candidate_ordinal
+        for selection in runtime.snapshot_value.prompt_skill_selections[1:]
+    ] == [1, 2]
+
+
+def test_research_then_revise_selects_planner_then_next_answer() -> None:
+    planner_skill = _skill_candidate("research-plan", category="planner")
+    answer_skill = _skill_candidate("evidence-answer", category="answer")
+    catalog = _skill_catalog((answer_skill, planner_skill))
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize(), finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "research_then_revise"),
+            process_evaluation(2, "accept"),
+        ],
+        prompt_skill_catalog=catalog,
+        selector_selections=(
+            [planner_skill.selection_id],
+            [answer_skill.selection_id],
+            [planner_skill.selection_id],
+            [answer_skill.selection_id],
+        ),
+    )
+
+    orchestrator.run("exec-1")
+
+    assert [
+        request.node
+        for _, request in orchestrator.test_reasoning_model.selection_requests
+    ] == [
+        "deep_initial_planner",
+        "answer_candidate",
+        "deep_replanner",
+        "answer_candidate",
+    ]
+    assert [candidate[:2] for candidate in model.session.answer_candidates] == [
+        (1, "normal"),
+        (2, "normal"),
+    ]
+    assert runtime.snapshot_value.reasoning_trace.skill_selections[-1].node == (
+        "deep_replanner"
+    )
+
+
+def test_limit_final_candidate_reselects_answer_without_new_evaluator_cycle() -> None:
+    answer_skill = _skill_candidate("limit-answer", category="answer")
+    catalog = _skill_catalog((answer_skill,))
+    policy = RoutePolicyV1(max_reasoning_revision_cycles=0)
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize(), finalize()],
+        policy=policy,
+        reasoning_mode="deep",
+        reasoning_evaluations=[process_evaluation(1, "revise_only")],
+        prompt_skill_catalog=catalog,
+        selector_selections=(
+            [answer_skill.selection_id],
+            [answer_skill.selection_id],
+        ),
+    )
+
+    orchestrator.run("exec-1")
+
+    assert [candidate[:2] for candidate in model.session.answer_candidates] == [
+        (1, "normal"),
+        (2, "limit_final"),
+    ]
+    assert len(orchestrator.test_reasoning_model.evaluation_calls) == 1
+    trace = runtime.snapshot_value.reasoning_trace
+    assert len(trace.provisional_evidence_checks) == 2
+    assert trace.provisional_evidence_checks[-1].candidate_kind == "limit_final"
+    assert trace.provisional_evidence_checks[-1].linked_evaluation_cycle is None
+
+
+def test_answer_selector_failure_is_candidate_local_and_next_candidate_reselects() -> None:
+    answer_skill = _skill_candidate("fallback-answer", category="answer")
+    catalog = _skill_catalog((answer_skill,))
+    orchestrator, runtime, _retrieval, model, _order = _orchestrator(
+        [finalize(), finalize()],
+        reasoning_mode="deep",
+        reasoning_evaluations=[
+            process_evaluation(1, "revise_only"),
+            process_evaluation(2, "accept"),
+        ],
+        prompt_skill_catalog=catalog,
+        selector_selections=([answer_skill.selection_id],),
+        selector_errors=(
+            DeepReasoningContractError("selector_contract_invalid"),
+        ),
+    )
+
+    orchestrator.run("exec-1")
+
+    answer_selections = runtime.snapshot_value.prompt_skill_selections[1:]
+    assert [selection.status for selection in answer_selections] == [
+        "baseline_fallback",
+        "selected",
+    ]
+    assert answer_selections[0].fallback_code == "selector_contract_invalid"
+    assert answer_selections[1].selected_skills == [answer_skill.ref]
+    assert model.session.answer_candidates[0][2] == ()
+    assert model.session.answer_candidates[1][2][0].name == answer_skill.ref.name
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
 
 
 def test_deep_mode_plans_evaluates_and_persists_completed_trace() -> None:
@@ -1899,7 +2644,7 @@ def test_chinese_and_english_discovery_tokens_accumulate_from_actual_results() -
 def test_finalize_only_budget_gate_and_fabricated_handle_fails_before_backend():
     policy = RoutePolicyV1(
         max_tool_invocations=0,
-        max_provider_invocations=6,
+        max_provider_invocations=9,
         max_reasoning_revision_cycles=0,
     )
     orchestrator, runtime, _, model, _ = _orchestrator([finalize()], policy=policy)
@@ -2203,13 +2948,23 @@ def test_provider_adapter_uses_native_tools_single_call_and_typed_tool_result():
     )
     model_input = inputs.build(runtime.snapshot_value, observations=[catalog])
     session = model.open_session(model_input)
+    session.begin_answer_candidate(
+        model_input,
+        candidate_ordinal=1,
+        candidate_kind="normal",
+        selected_skills=(),
+    )
     first = session.next_action(model_input, finalize_only=False)
     assert first.action.action == "search_knowledge"
     assert routing.requests[0].parallel_tool_calls is False and len(routing.requests[0].tools) == 5
-    assert len(routing.requests[0].messages) == 3
+    assert len(routing.requests[0].messages) == 4
     assert isinstance(routing.requests[0].messages[0], ProviderSystemMessage)
-    assert isinstance(routing.requests[0].messages[1], ProviderUserMessage)
-    assert json.loads(routing.requests[0].messages[1].content) == {
+    assert isinstance(routing.requests[0].messages[1], ProviderSystemMessage)
+    assert json.loads(routing.requests[0].messages[1].content)[
+        "optional_answer_skills"
+    ] == []
+    assert isinstance(routing.requests[0].messages[2], ProviderUserMessage)
+    assert json.loads(routing.requests[0].messages[2].content) == {
         "available_knowledge": {
             "documents": [
                 {
@@ -2223,8 +2978,8 @@ def test_provider_adapter_uses_native_tools_single_call_and_typed_tool_result():
             ]
         }
     }
-    assert isinstance(routing.requests[0].messages[2], ProviderUserMessage)
-    assert routing.requests[0].messages[2].content == model_input.model_user_input
+    assert isinstance(routing.requests[0].messages[3], ProviderUserMessage)
+    assert routing.requests[0].messages[3].content == model_input.model_user_input
     session.accept_tool_observation(
         KnowledgeSearchResultV1(
             result_type="knowledge_search_result", evidence=[], next_cursor=None

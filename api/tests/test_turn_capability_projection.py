@@ -18,9 +18,11 @@ from atlas_production.modules.retrieval.public import (
     RelevantDocumentDiscoveryResultV1,
     VisualInspectionResultV1,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     BudgetSnapshotV1,
     ExecutionLeaseV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     RoutePolicyV1,
 )
@@ -63,6 +65,25 @@ def _snapshot(
         route=route_snapshot(),
         input_digest="0" * 64,
         response_language="zh-TW",
+        prompt_skill_catalogs=[
+            PromptSkillCatalogRefV1(
+                category="understanding",
+                catalog_revision=1,
+                catalog_digest="1" * 64,
+            ),
+            PromptSkillCatalogRefV1(
+                category="answer",
+                catalog_revision=1,
+                catalog_digest="2" * 64,
+            ),
+        ],
+        prompt_skill_selections=[
+            ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="not_applicable",
+            )
+        ],
         applied_guidance_revision=0,
         applied_guidance_digest=None,
         lease=ExecutionLeaseV1(

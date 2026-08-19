@@ -65,6 +65,7 @@ from atlas_production.modules.conversation.public import (
     TurnFeedbackRevisionV1,
     TurnFeedbackUpdateV1,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalog
 from atlas_production.modules.result_governance.public import (
     AssessmentReasonCodeV2,
     AssessmentStateV2,
@@ -411,7 +412,7 @@ class ContextCommandPreparer(Protocol):
         snapshot: ExecutionSnapshotV1,
         *,
         catalog_document_count: int,
-    ) -> MaterializeContextPackV3: ...
+    ) -> tuple[ExecutionSnapshotV1, MaterializeContextPackV3]: ...
 
 
 class ConversationTokenUsageReader(Protocol):
@@ -445,6 +446,7 @@ class WorkspaceTurnApplication:
         retrieval: RetrievalOwner,
         generation_retention: GenerationRetentionOwner,
         runtime: TurnRuntimeOwner,
+        prompt_skill_catalog: PromptSkillCatalog,
         results: ResultGovernanceDraftOwnerV2,
         citations: WorkspaceCitationDraftSource,
         audits: WorkspaceAuditDraftSource,
@@ -466,6 +468,7 @@ class WorkspaceTurnApplication:
         self._retrieval = retrieval
         self._generation_retention = generation_retention
         self._runtime = runtime
+        self._prompt_skill_catalog = prompt_skill_catalog
         self._results = results
         self._citations = citations
         self._audits = audits
@@ -646,6 +649,15 @@ class WorkspaceTurnApplication:
                     f"/api/v1/workspace/turn-executions/{replay.execution_id}/events"
                 ),
             )
+        prompt_skill_categories = (
+            ("understanding", "answer")
+            if reasoning_mode == "standard"
+            else ("understanding", "planner", "answer")
+        )
+        prompt_skill_catalogs = [
+            self._prompt_skill_catalog.current_catalog(category)
+            for category in prompt_skill_categories
+        ]
         route = self._model_routes.tested_route()
         vision_route = self._model_routes.tested_vision_default_route()
         if route is None:
@@ -681,6 +693,7 @@ class WorkspaceTurnApplication:
                     input_digest=input_digest,
                     response_language=conversation.response_language,
                     reasoning_mode=reasoning_mode,
+                    prompt_skill_catalogs=prompt_skill_catalogs,
                     applied_guidance_revision=answer_behavior.revision,
                     applied_guidance_digest=answer_behavior.guidance_digest,
                 )
@@ -892,7 +905,7 @@ class WorkspaceTurnApplication:
                 actor_id=actor_id,
                 input_text=input_text,
             )
-            context_command = self._context_preparer.prepare(
+            snapshot, context_command = self._context_preparer.prepare(
                 context_command,
                 snapshot,
                 catalog_document_count=catalog.document_count,

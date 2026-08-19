@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from atlas_production.infrastructure.strict_turn_model_adapter import StrictProviderTurnModel
+from atlas_production.infrastructure.strict_turn_model_reasoning import (
+    _selection_schema,
+)
 from atlas_production.modules.model_routing.public import (
     ProviderAssistantMessage,
     ProviderAssistantToolCallMessage,
@@ -23,6 +26,11 @@ from atlas_production.modules.model_routing.provider_contracts import (
     validate_json_schema_value,
 )
 from atlas_production.modules.answer_behavior.public import AnswerBehaviorInputV1
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillInstructionsV1,
+    PromptSkillRefV1,
+    PromptSkillSelectorCandidateV1,
+)
 from atlas_production.modules.retrieval.public import (
     DiscoverRelevantDocumentsV1,
     KnowledgeCatalogPageV1,
@@ -39,6 +47,7 @@ from atlas_production.modules.turn_execution.public import (
     FinalizeAnswerV1,
     GateCorrectionFeedbackV1,
     ModelContractViolationV1,
+    SkillSelectionRequestV2,
     TurnModelHistorySummaryV4,
     TurnModelRecentExchangeV3,
 )
@@ -49,6 +58,17 @@ from atlas_production.modules.turn_runtime.public import (
 )
 
 from tests.test_turn_model_loop import Inputs, Runtime, _budget, search
+def _open_answer_session(model, model_input):
+    session = model.open_session(model_input)
+    session.begin_answer_candidate(
+        model_input,
+        candidate_ordinal=1,
+        candidate_kind="normal",
+        selected_skills=(),
+    )
+    return session
+
+
 
 
 class CapturingRouting:
@@ -75,6 +95,9 @@ class CapturingRouting:
         self.open_route_ids = []
         self.invoke_route_ids = []
 
+        self.invocation_purposes = []
+        self.success_usages = []
+        self.execution_keys = []
     def open_tested_attempt(self, route_id=None):
         selected_route_id = route_id or "r1"
         self.open_route_ids.append(selected_route_id)
@@ -105,6 +128,32 @@ class CapturingRouting:
         self.requests.append(request)
         self.schemas.append(response_schema)
         return self.outcomes.pop(0)
+
+    def prepare_invocation(
+        self,
+        route,
+        response_schema,
+        *,
+        invocation_purpose,
+        subject_kind,
+        subject_ref,
+        execution_key,
+        prompt_digest,
+        attempt_ordinal,
+        repair_origin_error_codes,
+    ):
+        self.invocation_purposes.append(invocation_purpose)
+        self.execution_keys.append(execution_key)
+        return SimpleNamespace()
+
+    def record_invocation_started(self, handle):
+        return None
+
+    def record_invocation_success(self, handle, usage):
+        self.success_usages.append(usage)
+
+    def record_invocation_failure(self, handle, safe_code):
+        return None
 
 
 def _tool_outcome(call_id: str, name: str, arguments: dict) -> ProviderToolCall:
@@ -180,6 +229,301 @@ def _provider_process_score() -> dict:
     score.pop("total")
     return score
 
+def _initial_contract(model, model_input):
+    return {
+        "node_context": model.build_initial_planning_node_context(model_input),
+        "selected_skills": (),
+    }
+
+
+def _remaining_limits(model_input):
+    return {
+        "tool_invocations": max(
+            0,
+            model_input.policy.max_tool_invocations
+            - model_input.budget.tool_invocations,
+        ),
+        "provider_invocations": max(
+            0,
+            model_input.policy.max_provider_invocations
+            - model_input.budget.provider_invocations,
+        ),
+        "search_rounds": max(
+            0,
+            model_input.policy.max_search_rounds - model_input.budget.search_rounds,
+        ),
+        "model_visible_items": max(
+            0,
+            model_input.policy.max_model_visible_items_per_turn
+            - model_input.budget.model_visible_items,
+        ),
+    }
+
+
+def _replan_contract(model, model_input, plan, evaluation):
+    return {
+        "node_context": model.build_replanning_node_context(
+            model_input,
+            plan=plan,
+            evaluation=evaluation,
+            remaining_execution_limits=_remaining_limits(model_input),
+        ),
+        "selected_skills": (),
+    }
+
+
+
+def test_planner_selector_wire_is_tool_free_closed_and_preserves_selected_order() -> None:
+    routing = CapturingRouting(
+        [
+            _completed({"selected_skill_ids": ["skill-b:1", "skill-a:1"]}),
+            _completed(
+                {
+                    "next_objective": "Review the request.",
+                    "completion_condition": "The request is covered.",
+                    "item_summaries": ["Review the request."],
+                }
+            ),
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=True)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    node_context = model.build_initial_planning_node_context(model_input)
+    candidates = tuple(
+        PromptSkillSelectorCandidateV1(
+            selection_id=f"{name}:1",
+            name=name,
+            description=f"Description for {name}.",
+            ref=PromptSkillRefV1(
+                category="planner",
+                name=name,
+                revision=1,
+                content_digest=digest_character * 64,
+            ),
+        )
+        for name, digest_character in (("skill-a", "a"), ("skill-b", "b"))
+    )
+    selection_request = SkillSelectionRequestV2(
+        node="deep_initial_planner",
+        node_context=node_context,
+        candidates=candidates,
+    )
+
+    estimated_tokens = model.estimate_selection_request_tokens(
+        model_input, selection_request
+    )
+    selection = model.select(model_input, selection_request)
+
+    selector_wire = routing.requests[0]
+    selector_payload = json.loads(selector_wire.messages[1].content)
+    provider_selector_schema = routing.schemas[0].schema["properties"][
+        "selected_skill_ids"
+    ]
+    application_selector_schema = _selection_schema(selection_request)["properties"][
+        "selected_skill_ids"
+    ]
+    assert estimated_tokens > 0
+    assert selector_wire.tools == []
+    assert selector_wire.tool_choice == "none"
+    assert selector_wire.parallel_tool_calls is False
+    assert isinstance(selector_wire.messages[0], ProviderSystemMessage)
+    assert isinstance(selector_wire.messages[1], ProviderUserMessage)
+    assert selector_payload["node_context"] == node_context.model_dump(
+        mode="json", exclude={"node"}
+    )
+    assert selector_payload["candidates"] == [
+        {
+            "selection_id": "skill-a:1",
+            "name": "skill-a",
+            "description": "Description for skill-a.",
+        },
+        {
+            "selection_id": "skill-b:1",
+            "name": "skill-b",
+            "description": "Description for skill-b.",
+        },
+    ]
+    assert application_selector_schema == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["skill-a:1", "skill-b:1"]},
+        "minItems": 0,
+        "maxItems": 2,
+        "uniqueItems": True,
+    }
+    assert provider_selector_schema == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["skill-a:1", "skill-b:1"]},
+    }
+    assert "SELECTOR_BODY_MUST_NOT_LEAK" not in "\n".join(
+        message.content for message in selector_wire.messages
+    )
+    assert selection.decision.selected_skill_ids == ["skill-b:1", "skill-a:1"]
+    assert routing.invocation_purposes == ["deep_initial_planner_skill_selection"]
+    assert routing.success_usages == [{"input_tokens": 11, "output_tokens": 7}]
+
+    selected_skills = tuple(
+        PromptSkillInstructionsV1(
+            name=candidate.name,
+            revision=candidate.ref.revision,
+            content_digest=candidate.ref.content_digest,
+            instructions=f"SELECTOR_BODY_MUST_NOT_LEAK::{candidate.name}",
+        )
+        for candidate in reversed(candidates)
+    )
+    model.plan(
+        model_input,
+        node_context=node_context,
+        selected_skills=selected_skills,
+        repair=False,
+    )
+
+    plan_wire = routing.requests[1]
+    system_contract = json.loads(plan_wire.messages[0].content)
+    plan_payload = json.loads(plan_wire.messages[1].content)
+    assert list(system_contract) == [
+        "atlas_deep_reasoning_contract",
+        "optional_planner_skill_precedence",
+        "optional_planner_skills",
+    ]
+    assert "ACL, tools, citations, history authority, budgets, and governance" in (
+        system_contract["optional_planner_skill_precedence"]
+    )
+    assert [
+        skill["name"] for skill in system_contract["optional_planner_skills"]
+    ] == ["skill-b", "skill-a"]
+    assert [
+        skill["instructions"] for skill in system_contract["optional_planner_skills"]
+    ] == [
+        "SELECTOR_BODY_MUST_NOT_LEAK::skill-b",
+        "SELECTOR_BODY_MUST_NOT_LEAK::skill-a",
+    ]
+    assert {
+        key: value
+        for key, value in plan_payload.items()
+        if key not in {"instruction", "schema_repair"}
+    } == node_context.model_dump(mode="json", exclude={"node"})
+
+
+def test_replanner_selector_wire_matches_replanner_context_and_reuses_skills_on_repair() -> None:
+    routing = CapturingRouting(
+        [
+            _completed({"selected_skill_ids": ["skill-a:1"]}),
+            _completed(
+                {
+                    "next_objective": "Close the evidence gap.",
+                    "completion_condition": "The gap is resolved or disclosed.",
+                    "completed_item_ids": [],
+                    "skipped_item_ids": [],
+                    "new_item_summaries": ["Find the missing evidence."],
+                }
+            ),
+            _completed(
+                {
+                    "next_objective": "Close the evidence gap.",
+                    "completion_condition": "The gap is resolved or disclosed.",
+                    "completed_item_ids": [],
+                    "skipped_item_ids": [],
+                    "new_item_summaries": ["Find the missing evidence."],
+                }
+            ),
+        ]
+    )
+    model = StrictProviderTurnModel(routing, record_invocations=True)
+    model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
+    plan = ReasoningPlanV2(
+        generation=1,
+        next_objective="Review the request.",
+        completion_condition="The request is covered.",
+        items=[
+            {
+                "item_id": "plan-1",
+                "summary": "Review the request.",
+                "status": "pending",
+            }
+        ],
+    )
+    evaluation = ReasoningEvaluationV1(
+        cycle=1,
+        verdict="research_then_revise",
+        finding_codes=["evidence_gap"],
+        summary="Find support.",
+        score=ProcessScoreV1.model_validate(_process_score()),
+    )
+    node_context = model.build_replanning_node_context(
+        model_input,
+        plan=plan,
+        evaluation=evaluation,
+        remaining_execution_limits=_remaining_limits(model_input),
+    )
+    candidate = PromptSkillSelectorCandidateV1(
+        selection_id="skill-a:1",
+        name="skill-a",
+        description="Description for skill-a.",
+        ref=PromptSkillRefV1(
+            category="planner",
+            name="skill-a",
+            revision=1,
+            content_digest="a" * 64,
+        ),
+    )
+    selection_request = SkillSelectionRequestV2(
+        node="deep_replanner",
+        node_context=node_context,
+        candidates=(candidate,),
+    )
+
+    model.estimate_selection_request_tokens(model_input, selection_request)
+    selection = model.select(model_input, selection_request)
+    selected_skills = (
+        PromptSkillInstructionsV1(
+            name=candidate.name,
+            revision=candidate.ref.revision,
+            content_digest=candidate.ref.content_digest,
+            instructions="Use the selected replanning method.",
+        ),
+    )
+    model.replan(
+        model_input,
+        node_context=node_context,
+        selected_skills=selected_skills,
+        plan=plan,
+        evaluation=evaluation,
+        repair=False,
+    )
+    model.replan(
+        model_input,
+        node_context=node_context,
+        selected_skills=selected_skills,
+        plan=plan,
+        evaluation=evaluation,
+        repair=True,
+        schema_retry_ordinal=1,
+        repair_origin_error_code="provider_output_decode_error",
+    )
+
+    expected_context = node_context.model_dump(mode="json", exclude={"node"})
+    selector_payload = json.loads(routing.requests[0].messages[1].content)
+    first_replan_payload = json.loads(routing.requests[1].messages[1].content)
+    repair_replan_payload = json.loads(routing.requests[2].messages[1].content)
+    assert selector_payload["node_context"] == expected_context
+    assert {
+        key: value
+        for key, value in first_replan_payload.items()
+        if key not in {"instruction", "schema_repair"}
+    } == expected_context
+    assert {
+        key: value
+        for key, value in repair_replan_payload.items()
+        if key not in {"instruction", "schema_repair"}
+    } == expected_context
+    assert selection.decision.selected_skill_ids == ["skill-a:1"]
+    assert routing.invocation_purposes == [
+        "deep_replanner_skill_selection",
+        "deep_reasoning_replan",
+        "deep_reasoning_replan",
+    ]
+    assert "Use the selected replanning method." in routing.requests[1].messages[0].content
+    assert "Use the selected replanning method." in routing.requests[2].messages[0].content
 
 def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> None:
     routing = CapturingRouting(
@@ -231,7 +575,9 @@ def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> Non
         }
     )
 
-    plan_result = model.plan(model_input, repair=False)
+    plan_result = model.plan(
+        model_input, repair=False, **_initial_contract(model, model_input)
+    )
     evaluation_result = model.evaluate(
         model_input.model_copy(update={"reasoning_plan": plan_result.plan}),
         plan=plan_result.plan,
@@ -243,13 +589,18 @@ def test_deep_reasoning_adapter_uses_closed_plan_and_evaluation_schemas() -> Non
         observations=[],
         cycle=1,
     )
+    replan_input = model_input.model_copy(update={"reasoning_plan": plan_result.plan})
+    replan_evaluation = evaluation_result.evaluation.model_copy(
+        update={"verdict": "research_then_revise"}
+    )
     replan_result = model.replan(
-        model_input.model_copy(update={"reasoning_plan": plan_result.plan}),
+        replan_input,
         plan=plan_result.plan,
-        evaluation=evaluation_result.evaluation.model_copy(
-            update={"verdict": "research_then_revise"}
-        ),
+        evaluation=replan_evaluation,
         repair=False,
+        **_replan_contract(
+            model, replan_input, plan_result.plan, replan_evaluation
+        ),
     )
 
     assert plan_result.input_tokens == 11
@@ -395,8 +746,9 @@ def test_planner_and_replanner_schema_repairs_add_provider_visible_instruction()
     model = StrictProviderTurnModel(routing, record_invocations=False)
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
 
-    model.plan(model_input, repair=False)
-    plan = model.plan(model_input, repair=True).plan
+    initial_context = _initial_contract(model, model_input)
+    model.plan(model_input, repair=False, **initial_context)
+    plan = model.plan(model_input, repair=True, **initial_context).plan
     evaluation = ReasoningEvaluationV1(
         cycle=1,
         verdict="research_then_revise",
@@ -404,13 +756,14 @@ def test_planner_and_replanner_schema_repairs_add_provider_visible_instruction()
         summary="Find support.",
         score=ProcessScoreV1.model_validate(_process_score()),
     )
+    replan_context = _replan_contract(model, model_input, plan, evaluation)
     model.replan(
         model_input,
         plan=plan,
         evaluation=evaluation,
         repair=True,
+        **replan_context,
     )
-
     instructions = [
         json.loads(request.messages[1].content)["instruction"]
         for request in routing.requests
@@ -655,7 +1008,9 @@ def test_invalid_deep_plan_is_a_repairable_contract_error() -> None:
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
 
     with pytest.raises(DeepReasoningContractError) as error:
-        model.plan(model_input, repair=False)
+        model.plan(
+            model_input, repair=False, **_initial_contract(model, model_input)
+        )
 
     assert error.value.safe_code == "deep_reasoning_plan_invalid"
 
@@ -675,7 +1030,9 @@ def test_initial_planner_runtime_owns_ids_status_and_bounds() -> None:
     model = StrictProviderTurnModel(routing, record_invocations=False)
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
 
-    plan = model.plan(model_input, repair=False).plan
+    plan = model.plan(
+        model_input, repair=False, **_initial_contract(model, model_input)
+    ).plan
 
     assert plan.generation == 1
     assert plan.parent_generation is None
@@ -732,11 +1089,13 @@ def test_replanner_runtime_retains_unmentioned_pending_and_rejects_unknown_ids()
     model = StrictProviderTurnModel(routing, record_invocations=False)
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
 
+    replan_context = _replan_contract(model, model_input, plan, evaluation)
     replacement = model.replan(
         model_input,
         plan=plan,
         evaluation=evaluation,
         repair=False,
+        **replan_context,
     ).plan
 
     assert [(item.item_id, item.status) for item in replacement.items] == [
@@ -756,17 +1115,17 @@ def test_replanner_runtime_retains_unmentioned_pending_and_rejects_unknown_ids()
             plan=plan,
             evaluation=evaluation,
             repair=True,
+            **replan_context,
         )
-
     assert error.value.safe_code == "deep_reasoning_replan_invalid"
 
 
 def test_revision_feedback_is_structured_and_contains_no_accuracy_claim() -> None:
     routing = CapturingRouting([])
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(model_input)
+    ), model_input)
     evaluation = ReasoningEvaluationV1(
         cycle=1,
         verdict="revise_only",
@@ -792,9 +1151,9 @@ def test_revision_feedback_is_structured_and_contains_no_accuracy_claim() -> Non
 def test_gate_only_feedback_preserves_independent_evaluator_accept() -> None:
     routing = CapturingRouting([])
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(model_input)
+    ), model_input)
     evaluation = ReasoningEvaluationV1(
         cycle=1,
         verdict="accept",
@@ -823,9 +1182,9 @@ def test_gate_only_feedback_preserves_independent_evaluator_accept() -> None:
 def test_reasoning_limit_removes_unsupported_comparison_extensions() -> None:
     routing = CapturingRouting([])
     model_input = Inputs().build(Runtime(reasoning_mode="deep").snapshot_value)
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(model_input)
+    ), model_input)
     evaluation = ReasoningEvaluationV1(
         cycle=3,
         verdict="revise_only",
@@ -872,15 +1231,16 @@ def test_history_is_untrusted_and_below_system_authority() -> None:
             ],
         }
     )
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(initial)
+    ), initial)
 
     session.next_action(initial, finalize_only=False)
 
     request = routing.requests[0]
     assert isinstance(request.messages[0], ProviderSystemMessage)
-    assert [json.loads(message.content) for message in request.messages[1:3]] == [
+    assert json.loads(request.messages[1].content)["optional_answer_skills"] == []
+    assert [json.loads(message.content) for message in request.messages[2:4]] == [
         {
                 "untrusted_history_summary": {
                     "historical_user_context": {
@@ -974,9 +1334,9 @@ def test_answer_policy_snapshot_is_identical_for_initial_followup_and_finalize_o
     initial = inputs.build(runtime.snapshot_value).model_copy(
         update={"answer_behavior": behavior}
     )
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(initial)
+    ), initial)
     session.next_action(initial, finalize_only=False)
     catalog = KnowledgeCatalogPageV1(
         result_type="knowledge_catalog_page",
@@ -1042,9 +1402,9 @@ def test_answer_policy_snapshot_is_identical_for_initial_followup_and_finalize_o
             )
         ]
     )
-    finalize_session = StrictProviderTurnModel(
+    finalize_session = _open_answer_session(StrictProviderTurnModel(
         finalize_routing, record_invocations=False
-    ).open_session(initial)
+    ), initial)
     finalize_session.next_action(initial, finalize_only=True)
     finalize_policy = json.loads(
         finalize_routing.requests[0].messages[0].content
@@ -1067,9 +1427,9 @@ def test_initial_discovery_tool_has_only_strict_legal_application_arguments() ->
         ]
     )
     initial = Inputs().build(Runtime().snapshot_value)
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(initial)
+    ), initial)
 
     result = session.next_action(initial, finalize_only=False)
 
@@ -1107,9 +1467,9 @@ def test_discovery_preview_stays_in_tool_transcript_not_available_document_proje
     runtime = Runtime()
     inputs = Inputs()
     initial = inputs.build(runtime.snapshot_value)
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(initial)
+    ), initial)
     session.next_action(initial, finalize_only=False)
     discovery = RelevantDocumentDiscoveryResultV1(
         result_type="relevant_document_discovery_result",
@@ -1172,9 +1532,9 @@ def test_initial_answer_request_uses_plain_rewrite_and_contains_no_raw_input() -
             ),
         }
     )
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(model_input)
+    ), model_input)
 
     session.next_action(model_input, finalize_only=False)
 
@@ -1224,9 +1584,9 @@ def test_tool_result_growth_is_rechecked_before_next_provider_invoke() -> None:
             )
         }
     )
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(constrained)
+    ), constrained)
     session.next_action(constrained, finalize_only=False)
     result = KnowledgeSearchResultV1(
         result_type="knowledge_search_result",
@@ -1272,7 +1632,7 @@ def test_followup_provider_call_uses_tool_results_and_closed_enums_without_runti
     runtime = Runtime()
     inputs = Inputs()
     initial = inputs.build(runtime.snapshot_value)
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(initial)
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), initial)
 
     session.next_action(initial, finalize_only=False)
     catalog = KnowledgeCatalogPageV1(
@@ -1457,9 +1817,9 @@ def test_visual_tool_result_appends_exact_image_to_same_provider_session() -> No
         ),
         observations=[search_observation],
     )
-    session = StrictProviderTurnModel(
+    session = _open_answer_session(StrictProviderTurnModel(
         routing, record_invocations=False
-    ).open_session(current)
+    ), current)
 
     selected = session.next_action(current, finalize_only=False)
     assert selected.action.action == "inspect_visual"
@@ -1536,9 +1896,7 @@ def test_search_is_not_exposed_before_discovery_and_wire_null_is_rejected() -> N
     )
     runtime = Runtime()
     initial = Inputs().build(runtime.snapshot_value)
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        initial
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), initial)
 
     rejected = session.next_action(initial, finalize_only=False)
 
@@ -1571,9 +1929,7 @@ def test_wire_null_is_not_normalized_after_document_handles_are_surfaced() -> No
         next_cursor=None,
     )
     current = Inputs().build(runtime.snapshot_value, observations=[catalog])
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        current
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), current)
 
     rejected = session.next_action(current, finalize_only=False)
 
@@ -1607,7 +1963,7 @@ def test_outside_handle_gets_one_typed_repair_before_selected_document_search() 
         next_cursor=None,
     )
     current = inputs.build(runtime.snapshot_value, observations=[catalog])
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(current)
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), current)
 
     rejected = session.next_action(current, finalize_only=False)
     assert isinstance(rejected, ModelContractViolationV1)
@@ -1645,9 +2001,7 @@ def test_outside_handle_gets_one_typed_repair_before_selected_document_search() 
 def test_context_count_uses_the_carrier_bound_route_tokenizer() -> None:
     routing = CapturingRouting([])
     model_input = Inputs().build(Runtime().snapshot_value)
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        model_input
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), model_input)
     canonical = json.dumps(
         {"turn_model_input": model_input.model_dump(mode="json")},
         sort_keys=True,
@@ -1666,9 +2020,7 @@ def test_context_count_uses_the_carrier_bound_route_tokenizer() -> None:
 def test_followup_context_count_excludes_repeated_static_turn_input() -> None:
     routing = CapturingRouting([_tool_outcome("call-1", "search_knowledge", search("x"))])
     model_input = Inputs().build(Runtime().snapshot_value)
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        model_input
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), model_input)
     initial_tokens = session.estimate_next_request_tokens(
         model_input, finalize_only=False
     )
@@ -1894,9 +2246,7 @@ def test_finalize_only_retains_answer_output_budget_when_tool_output_budget_is_z
             )
         ]
     )
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        model_input
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), model_input)
 
     result = session.next_action(model_input, finalize_only=True)
 
@@ -1939,9 +2289,7 @@ def test_navigation_tool_closes_document_handle_and_keeps_locations_non_evidence
         next_cursor=None,
     )
     current = Inputs().build(Runtime().snapshot_value, observations=[catalog])
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        current
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), current)
 
     selected = session.next_action(current, finalize_only=False)
 
@@ -2024,11 +2372,76 @@ def test_tool_schema_projects_current_numeric_limits_without_unsupported_ranges(
     model_input = Inputs().build(Runtime().snapshot_value).model_copy(
         update={"capabilities": capabilities}
     )
-    session = StrictProviderTurnModel(routing, record_invocations=False).open_session(
-        model_input
-    )
+    session = _open_answer_session(StrictProviderTurnModel(routing, record_invocations=False), model_input)
     session.next_action(model_input, finalize_only=False)
     # Final-answer generation retains its pre-LCE-013 output budget. The
     # capability value above bounds knowledge-tool output and may become zero
     # when Runtime forces finalize-only.
     assert routing.requests[0].max_output_tokens == 16000
+
+def test_answer_candidate_skill_block_is_complete_and_replaced_only_at_boundary() -> None:
+    finalize_output = {
+        "action": "finalize_answer",
+        "segments": [{"segment_id": "s1", "text": "Answer."}],
+        "claimed_evidence_handles": [],
+    }
+    routing = CapturingRouting(
+        [_completed(finalize_output), _completed(finalize_output)]
+    )
+    model_input = Inputs().build(Runtime().snapshot_value)
+    session = StrictProviderTurnModel(
+        routing,
+        record_invocations=True,
+    ).open_session(model_input)
+    first_skill = PromptSkillInstructionsV1(
+        name="first-answer",
+        revision=1,
+        content_digest="1" * 64,
+        instructions="Use the first optional answer method.",
+    )
+    second_skill = PromptSkillInstructionsV1(
+        name="second-answer",
+        revision=2,
+        content_digest="2" * 64,
+        instructions="Use the replacement answer method.",
+    )
+
+    session.begin_answer_candidate(
+        model_input,
+        candidate_ordinal=1,
+        candidate_kind="normal",
+        selected_skills=(first_skill,),
+    )
+    session.next_action(model_input, finalize_only=True)
+    session.begin_answer_candidate(
+        model_input,
+        candidate_ordinal=2,
+        candidate_kind="normal",
+        selected_skills=(second_skill,),
+    )
+    session.next_action(model_input, finalize_only=True)
+
+    first_contract = json.loads(routing.requests[0].messages[1].content)
+    second_system_contracts = [
+        json.loads(message.content)
+        for message in routing.requests[1].messages
+        if isinstance(message, ProviderSystemMessage)
+    ]
+    replacement = next(
+        contract
+        for contract in second_system_contracts
+        if "optional_answer_skill_replacement_rule" in contract
+    )
+    assert first_contract["optional_answer_skills"] == [
+        first_skill.model_dump(mode="json")
+    ]
+    assert replacement["optional_answer_skills"] == [
+        second_skill.model_dump(mode="json")
+    ]
+    assert "replaces all optional answer Skill instructions" in replacement[
+        "optional_answer_skill_replacement_rule"
+    ]
+    assert routing.execution_keys == [
+        "exec-1:answer-candidate:1:provider:1",
+        "exec-1:answer-candidate:2:provider:1",
+    ]

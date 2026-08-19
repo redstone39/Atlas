@@ -1,5 +1,13 @@
 import { useTranslation } from "react-i18next";
 import { Badge } from "../../components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardFooter,
+  CardTitle,
+} from "../../components/ui/card";
 import { Button } from "../../components/ui/button";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -128,6 +136,13 @@ export function ConversationRuntimeView({
                             />
                           </div>
                         </div>
+                        <PromptSkillCatalogPanel
+                          catalogs={selectedRuntime.prompt_skill_catalogs}
+                        />
+                        <ExecutionSkillSelectionPanel
+                          selections={selectedRuntime.prompt_skill_selections}
+                          trace={selectedRuntime.reasoning_trace}
+                        />
                         {selectedRuntime.reasoning_mode === "deep" ? (
                           selectedRuntime.reasoning_trace ? (
                             <ReasoningTracePanel trace={selectedRuntime.reasoning_trace} />
@@ -416,6 +431,141 @@ export function ConversationRuntimeView({
   );
 }
 
+function PromptSkillCatalogPanel({
+  catalogs,
+}: {
+  catalogs: RuntimeTraceDetail["prompt_skill_catalogs"];
+}) {
+  const { t } = useTranslation();
+  return (
+    <section
+      className="flex flex-col gap-3"
+      aria-labelledby="prompt-skill-catalogs-title"
+    >
+      <div>
+        <div id="prompt-skill-catalogs-title" className="font-medium">
+          {t("audit.promptSkillCatalogs")}
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("audit.promptSkillCatalogsDescription")}
+        </p>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-3">
+        {catalogs.map((catalog) => (
+          <Card key={catalog.category}>
+            <CardHeader>
+              <CardTitle>{catalog.category}</CardTitle>
+              <CardDescription>
+                {t("audit.promptSkillCatalogRevisionValue", {
+                  revision: catalog.catalog_revision,
+                })}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AuditTraceValue
+                label={t("audit.promptSkillCatalogDigest")}
+                value={catalog.catalog_digest}
+              />
+            </CardContent>
+            <CardFooter>
+              <Badge variant="outline">
+                {t("audit.promptSkillCatalogPinned")}
+              </Badge>
+            </CardFooter>
+          </Card>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ExecutionSkillSelectionPanel({
+  selections,
+  trace,
+}: {
+  selections: RuntimeTraceDetail["prompt_skill_selections"];
+  trace: ReasoningTrace | null;
+}) {
+  const { t } = useTranslation();
+  return (
+    <section
+      className="flex flex-col gap-3"
+      aria-labelledby="execution-skill-selections-title"
+    >
+      <div>
+        <div id="execution-skill-selections-title" className="font-medium">
+          {t("audit.executionPromptSkillSelections")}
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("audit.executionPromptSkillSelectionsDescription")}
+        </p>
+      </div>
+      <div className="flex flex-col gap-3">
+        {selections.map((selection) => {
+          const gate =
+            selection.node === "answer_candidate"
+              ? trace?.provisional_evidence_checks.find(
+                  (check) => check.ordinal === selection.candidate_ordinal,
+                )
+              : null;
+          const identity =
+            selection.node === "resolver"
+              ? t("audit.promptSkillResolver")
+              : t("audit.promptSkillAnswerCandidate", {
+                  ordinal: selection.candidate_ordinal,
+                  kind: selection.candidate_kind,
+                });
+          return (
+            <Card
+              key={`${selection.node}:${selection.candidate_ordinal ?? 0}`}
+            >
+              <CardHeader>
+                <CardTitle>{identity}</CardTitle>
+                <CardDescription>{selection.category}</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-2 sm:grid-cols-2">
+                <AuditField
+                  label={t("audit.promptSkillSelectionStatus")}
+                  value={selection.status}
+                />
+                <AuditField
+                  label={t("audit.promptSkillFallbackCode")}
+                  value={selection.fallback_code ?? "—"}
+                />
+                {selection.node === "answer_candidate" ? (
+                  <AuditField
+                    label={t("audit.promptSkillLinkedGate")}
+                    value={
+                      gate
+                        ? `${gate.ordinal} · ${gate.consistency} · ${gate.candidate_disposition}`
+                        : "—"
+                    }
+                  />
+                ) : null}
+              </CardContent>
+              <CardFooter className="flex flex-col items-start gap-1">
+                {selection.selected_skills.length > 0 ? (
+                  selection.selected_skills.map((skill) => (
+                    <AuditTraceValue
+                      key={`${skill.name}:${skill.revision}:${skill.content_digest}`}
+                      label={t("audit.promptSkillSelectedRef")}
+                      value={`${skill.name} · r${skill.revision} · ${skill.content_digest}`}
+                    />
+                  ))
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    {t("audit.promptSkillBaseline")}
+                  </span>
+                )}
+              </CardFooter>
+            </Card>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function ReasoningTracePanel({ trace }: { trace: ReasoningTrace }) {
   const { t } = useTranslation();
   return (
@@ -444,6 +594,43 @@ function ReasoningTracePanel({ trace }: { trace: ReasoningTrace }) {
           value={trace.parent_trace_digest ?? "—"}
         />
         <AuditField label={t("audit.reasoningSchemaVersion")} value={trace.schema_version} />
+      </div>
+      <div>
+        <div className="text-sm font-medium">{t("audit.promptSkillSelections")}</div>
+        {trace.skill_selections.length === 0 ? (
+          <p className="mt-1 text-sm text-muted-foreground">{t("audit.notReported")}</p>
+        ) : (
+          <div className="mt-2 flex flex-col gap-2">
+            {trace.skill_selections.map((selection) => (
+              <div
+                key={`${selection.node}-${selection.plan_generation}`}
+                className="rounded-md border p-3"
+              >
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <AuditField label={t("audit.promptSkillSelectionNode")} value={selection.node} />
+                  <AuditField
+                    label={t("audit.promptSkillPlanGeneration")}
+                    value={String(selection.plan_generation)}
+                  />
+                  <AuditField label={t("audit.promptSkillSelectionStatus")} value={selection.status} />
+                  <AuditField
+                    label={t("audit.promptSkillFallbackCode")}
+                    value={selection.fallback_code ?? "—"}
+                  />
+                </div>
+                {selection.selected_skills.length > 0 ? (
+                  <ul className="mt-2 flex flex-col gap-1 text-xs">
+                    {selection.selected_skills.map((skill) => (
+                      <li key={`${skill.name}-${skill.revision}-${skill.content_digest}`}>
+                        {skill.name} · r{skill.revision} · {skill.content_digest}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div>
         <div className="text-sm font-medium">{t("audit.reasoningPlan")}</div>

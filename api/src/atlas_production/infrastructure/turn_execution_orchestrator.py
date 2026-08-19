@@ -6,6 +6,12 @@ from typing import Callable, Literal, Protocol, Sequence
 
 from pydantic import ValidationError
 
+from atlas_production.infrastructure.prompt_skill_selection import (
+    PromptSkillSelectionResolutionError,
+    admit_execution_prompt_skill_selection,
+    resolve_selected_skill_refs,
+    validate_exact_skill_instructions,
+)
 from atlas_production.infrastructure.strict_posthoc_claim_evaluator import (
     ClaimAssessmentUnavailable,
 )
@@ -62,6 +68,13 @@ from atlas_production.modules.result_governance.public import (
     ResultGovernanceDraftOwnerV2,
     RetrievalStatusV1,
 )
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalog,
+    PromptSkillCatalogRefV1,
+    PromptSkillCatalogV1,
+    PromptSkillExactReader,
+    PromptSkillInstructionsV1,
+)
 from atlas_production.modules.retrieval.public import (
     KnowledgeToolObservationV1,
     RetrievalEvidenceLineageV1,
@@ -69,20 +82,29 @@ from atlas_production.modules.retrieval.public import (
     VisualImagePayloadV1,
 )
 from atlas_production.modules.turn_execution.public import (
+    AnswerCandidateNodeContextV1,
     DeepReasoningContractError,
     DeepReasoningModel,
     FinalizeAnswerV1,
+    InitialPlanningNodeContextV1,
     ModelContractViolationV1,
+    ReplanningNodeContextV1,
+    SkillSelectionRequestV2,
+    SkillSelectorModel,
     StrictTurnModel,
+    StrictTurnModelSession,
     TurnExecutionOrchestrator,
     TurnModelInputV3,
 )
 from atlas_production.modules.turn_runtime.public import (
     BeginResultGovernanceV1,
     ClaimSchemaRetryV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
     ExecutionState,
     FailCarrierExecutionV1,
+    PromptSkillSelectionFallbackCode,
+    PromptSkillSelectionTraceV1,
     ReasoningEvaluationV1,
     ReasoningPhase,
     ReasoningCorrectionV2,
@@ -90,7 +112,8 @@ from atlas_production.modules.turn_runtime.public import (
     ReasoningPlanV2,
     ProvisionalEvidenceCheckV1,
     ReasoningProgressStatus,
-    ReasoningTraceV3,
+    ReasoningTraceV4,
+    RecordExecutionPromptSkillSelectionV1,
     RecordReasoningProgressV1,
     RequestModelActionV1,
     SchemaRetryOriginCode,
@@ -205,6 +228,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         audit: TurnAuditDraftOwnerV2,
         evaluator: PostHocAnswerEvaluatorV2,
         reasoning_model: DeepReasoningModel | None = None,
+        skill_selector_model: SkillSelectorModel | None = None,
+        prompt_skill_catalog: PromptSkillCatalog | None = None,
+        prompt_skill_exact_reader: PromptSkillExactReader | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._runtime = runtime
@@ -216,6 +242,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._audit = audit
         self._evaluator = evaluator
         self._reasoning_model = reasoning_model
+        self._skill_selector_model = skill_selector_model
+        self._prompt_skill_catalog = prompt_skill_catalog
+        self._prompt_skill_exact_reader = prompt_skill_exact_reader
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _claim_schema_retry(
@@ -248,7 +277,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
     def _record_reasoning_progress(
         self,
         snapshot: ExecutionSnapshotV1,
-        trace: ReasoningTraceV3,
+        trace: ReasoningTraceV4,
         *,
         phase: ReasoningPhase,
         progress_status: ReasoningProgressStatus,
@@ -394,6 +423,440 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             )
         return remember(assessment)
 
+    def _load_prompt_skill_catalog(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        category: Literal["planner", "answer"],
+    ) -> tuple[PromptSkillCatalogRefV1, PromptSkillCatalogV1 | None]:
+        catalog_ref = next(
+            catalog
+            for catalog in snapshot.prompt_skill_catalogs
+            if catalog.category == category
+        )
+        if self._prompt_skill_catalog is None:
+            raise ValueError("deep execution has no prompt skill catalog reader")
+        try:
+            catalog = self._prompt_skill_catalog.read_catalog(catalog_ref)
+        except Exception:
+            return catalog_ref, None
+        if catalog.ref != catalog_ref:
+            return catalog_ref, None
+        return catalog_ref, catalog
+
+    def _post_selector_remaining_limits(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        completed_reasoning_corrections: int,
+    ) -> dict[str, int]:
+        return {
+            "provider_invocations": max(
+                0,
+                snapshot.policy.max_provider_invocations
+                - (snapshot.budget.provider_invocations + 1),
+            ),
+            "context_tokens": max(
+                0,
+                snapshot.policy.context_token_budget - snapshot.budget.context_tokens,
+            ),
+            "schema_retries": max(
+                0,
+                snapshot.policy.max_schema_retries_per_turn
+                - snapshot.budget.schema_retries,
+            ),
+            "reasoning_revision_cycles": max(
+                0,
+                snapshot.policy.max_reasoning_revision_cycles
+                - completed_reasoning_corrections,
+            ),
+            "deadline_seconds": max(
+                0, int((snapshot.deadline_at - self._clock()).total_seconds())
+            ),
+        }
+
+    @staticmethod
+    def _selector_failure_code(
+        error: Exception,
+    ) -> PromptSkillSelectionFallbackCode:
+        if isinstance(error, PromptSkillSelectionResolutionError):
+            return error.fallback_code
+        if isinstance(error, DeepReasoningContractError):
+            if error.safe_code == "selector_contract_invalid":
+                return "selector_contract_invalid"
+            if error.safe_code == "selection_outside_catalog":
+                return "selection_outside_catalog"
+        return "selector_unavailable"
+
+    def _select_prompt_skills(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        observations: Sequence[KnowledgeToolObservationV1],
+        contract_repair_remaining: int,
+        node_context: InitialPlanningNodeContextV1 | ReplanningNodeContextV1,
+        catalog: PromptSkillCatalogV1 | None,
+        plan_generation: int,
+    ) -> tuple[
+        ExecutionSnapshotV1,
+        PromptSkillSelectionTraceV1,
+        tuple[PromptSkillInstructionsV1, ...],
+        int,
+        int,
+    ]:
+        node = node_context.node
+        if catalog is None:
+            return (
+                snapshot,
+                PromptSkillSelectionTraceV1(
+                    node=node,
+                    plan_generation=plan_generation,
+                    status="baseline_fallback",
+                    fallback_code="selected_skill_integrity_error",
+                ),
+                (),
+                0,
+                0,
+            )
+        candidates = tuple(catalog.skills)
+        if not candidates:
+            return (
+                snapshot,
+                PromptSkillSelectionTraceV1(
+                    node=node,
+                    plan_generation=plan_generation,
+                    status="not_applicable",
+                ),
+                (),
+                0,
+                0,
+            )
+        if self._skill_selector_model is None:
+            raise ValueError("deep execution has no skill selector model")
+        request = SkillSelectionRequestV2(
+            node=node,
+            node_context=node_context,
+            candidates=candidates,
+        )
+        try:
+            context_tokens = (
+                self._skill_selector_model.estimate_selection_request_tokens(
+                    snapshot, request
+                )
+            )
+            snapshot = self._runtime.request_model_action(
+                RequestModelActionV1(
+                    execution_id=snapshot.execution_id,
+                    expected_version=snapshot.version,
+                    fencing_token=snapshot.lease.fencing_token,
+                    context_tokens=context_tokens,
+                )
+            )
+            result = self._skill_selector_model.select(snapshot, request)
+        except Exception as error:
+            return (
+                snapshot,
+                PromptSkillSelectionTraceV1(
+                    node=node,
+                    plan_generation=plan_generation,
+                    status="baseline_fallback",
+                    fallback_code=self._selector_failure_code(error),
+                ),
+                (),
+                0,
+                0,
+            )
+        try:
+            refs = resolve_selected_skill_refs(
+                candidates,
+                result.decision.selected_skill_ids,
+            )
+            if self._prompt_skill_exact_reader is None:
+                raise PromptSkillSelectionResolutionError(
+                    "selected_skill_integrity_error"
+                )
+            try:
+                resolved = tuple(
+                    self._prompt_skill_exact_reader.read_instructions(ref)
+                    for ref in refs
+                )
+            except Exception as error:
+                raise PromptSkillSelectionResolutionError(
+                    "selected_skill_integrity_error"
+                ) from error
+            selected_skills = validate_exact_skill_instructions(refs, resolved)
+        except PromptSkillSelectionResolutionError as error:
+            return (
+                snapshot,
+                PromptSkillSelectionTraceV1(
+                    node=node,
+                    plan_generation=plan_generation,
+                    status="baseline_fallback",
+                    fallback_code=error.fallback_code,
+                ),
+                (),
+                result.input_tokens,
+                result.output_tokens,
+            )
+        return (
+            snapshot,
+            PromptSkillSelectionTraceV1(
+                node=node,
+                plan_generation=plan_generation,
+                status="selected",
+                selected_skills=list(refs),
+            ),
+            selected_skills,
+            result.input_tokens,
+            result.output_tokens,
+        )
+
+    def _select_and_begin_answer_candidate(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        session: StrictTurnModelSession,
+        observations: Sequence[KnowledgeToolObservationV1],
+        contract_repair_remaining: int,
+        node_context: AnswerCandidateNodeContextV1,
+        catalog: PromptSkillCatalogV1 | None,
+        reasoning_plan: ReasoningPlanV2 | None,
+    ) -> tuple[ExecutionSnapshotV1, int, int]:
+        candidates = () if catalog is None else tuple(catalog.skills)
+        selected_skills: tuple[PromptSkillInstructionsV1, ...] = ()
+        selector_input_tokens = 0
+        selector_output_tokens = 0
+        if catalog is None:
+            selection = ExecutionPromptSkillSelectionTraceV1(
+                category="answer",
+                node="answer_candidate",
+                candidate_ordinal=node_context.candidate_ordinal,
+                candidate_kind=node_context.candidate_kind,
+                status="baseline_fallback",
+                fallback_code="selected_skill_integrity_error",
+            )
+        elif not candidates:
+            selection = ExecutionPromptSkillSelectionTraceV1(
+                category="answer",
+                node="answer_candidate",
+                candidate_ordinal=node_context.candidate_ordinal,
+                candidate_kind=node_context.candidate_kind,
+                status="not_applicable",
+            )
+        elif self._skill_selector_model is None:
+            selection = ExecutionPromptSkillSelectionTraceV1(
+                category="answer",
+                node="answer_candidate",
+                candidate_ordinal=node_context.candidate_ordinal,
+                candidate_kind=node_context.candidate_kind,
+                status="baseline_fallback",
+                fallback_code="selector_unavailable",
+            )
+        else:
+            request = SkillSelectionRequestV2(
+                node="answer_candidate",
+                node_context=node_context,
+                candidates=candidates,
+            )
+            try:
+                context_tokens = (
+                    self._skill_selector_model.estimate_selection_request_tokens(
+                        snapshot,
+                        request,
+                    )
+                )
+                snapshot = self._runtime.request_model_action(
+                    RequestModelActionV1(
+                        execution_id=snapshot.execution_id,
+                        expected_version=snapshot.version,
+                        fencing_token=snapshot.lease.fencing_token,
+                        context_tokens=context_tokens,
+                    )
+                )
+                result = self._skill_selector_model.select(snapshot, request)
+                selector_input_tokens = result.input_tokens
+                selector_output_tokens = result.output_tokens
+                refs = resolve_selected_skill_refs(
+                    candidates,
+                    result.decision.selected_skill_ids,
+                )
+                if self._prompt_skill_exact_reader is None:
+                    raise PromptSkillSelectionResolutionError(
+                        "selected_skill_integrity_error"
+                    )
+                try:
+                    resolved = tuple(
+                        self._prompt_skill_exact_reader.read_instructions(ref)
+                        for ref in refs
+                    )
+                except Exception as error:
+                    raise PromptSkillSelectionResolutionError(
+                        "selected_skill_integrity_error"
+                    ) from error
+                selected_skills = validate_exact_skill_instructions(refs, resolved)
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="answer",
+                    node="answer_candidate",
+                    candidate_ordinal=node_context.candidate_ordinal,
+                    candidate_kind=node_context.candidate_kind,
+                    status="selected",
+                    selected_skills=list(refs),
+                )
+            except Exception as error:
+                selected_skills = ()
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="answer",
+                    node="answer_candidate",
+                    candidate_ordinal=node_context.candidate_ordinal,
+                    candidate_kind=node_context.candidate_kind,
+                    status="baseline_fallback",
+                    fallback_code=self._selector_failure_code(error),
+                )
+        candidate_input = self._model_inputs.build(
+            snapshot,
+            observations=observations,
+            contract_repair_remaining=contract_repair_remaining,
+        )
+        if reasoning_plan is not None:
+            candidate_input = candidate_input.model_copy(
+                update={"reasoning_plan": reasoning_plan}
+            )
+        _validate_model_input(snapshot, candidate_input)
+        if selected_skills:
+            try:
+                selected_context_tokens = (
+                    session.estimate_begin_answer_candidate_tokens(
+                        candidate_input,
+                        candidate_ordinal=node_context.candidate_ordinal,
+                        candidate_kind=node_context.candidate_kind,
+                        selected_skills=selected_skills,
+                    )
+                )
+                if selected_context_tokens > (
+                    snapshot.policy.context_token_budget
+                    - snapshot.budget.context_tokens
+                ):
+                    raise ValueError("selected answer Skill context exceeds budget")
+            except Exception:
+                selected_skills = ()
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="answer",
+                    node="answer_candidate",
+                    candidate_ordinal=node_context.candidate_ordinal,
+                    candidate_kind=node_context.candidate_kind,
+                    status="baseline_fallback",
+                    fallback_code="selected_skill_context_exceeded",
+                )
+        total_possible_nodes = (
+            2
+            if snapshot.reasoning_mode == "standard"
+            else min(6, snapshot.policy.max_reasoning_revision_cycles + 3)
+        )
+        remaining_possible_nodes = max(
+            0,
+            total_possible_nodes - len(snapshot.prompt_skill_selections) - 1,
+        )
+        admitted = admit_execution_prompt_skill_selection(
+            snapshot.prompt_skill_selections,
+            selection,
+            remaining_possible_nodes=remaining_possible_nodes,
+        )
+        if admitted.status != "selected":
+            selected_skills = ()
+        snapshot = self._runtime.record_prompt_skill_selection(
+            RecordExecutionPromptSkillSelectionV1(
+                execution_id=snapshot.execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                selection=admitted,
+            )
+        )
+        candidate_input = self._model_inputs.build(
+            snapshot,
+            observations=observations,
+            contract_repair_remaining=contract_repair_remaining,
+        )
+        if reasoning_plan is not None:
+            candidate_input = candidate_input.model_copy(
+                update={"reasoning_plan": reasoning_plan}
+            )
+        _validate_model_input(snapshot, candidate_input)
+        session.begin_answer_candidate(
+            candidate_input,
+            candidate_ordinal=node_context.candidate_ordinal,
+            candidate_kind=node_context.candidate_kind,
+            selected_skills=selected_skills,
+        )
+        return snapshot, selector_input_tokens, selector_output_tokens
+
+    def _append_skill_selection(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        trace: ReasoningTraceV4,
+        selection: PromptSkillSelectionTraceV1,
+        *,
+        plans: list[ReasoningPlanV2],
+        evaluations: list[ReasoningEvaluationV1],
+        corrections: list[ReasoningCorrectionV2],
+    ) -> tuple[ReasoningTraceV4, PromptSkillSelectionTraceV1]:
+        remaining_nodes = max(
+            0,
+            snapshot.policy.max_reasoning_revision_cycles
+            + 1
+            - (len(trace.skill_selections) + 1),
+        )
+        try:
+            return (
+                _next_reasoning_trace(
+                    trace,
+                    status=trace.status,
+                    plans=plans,
+                    evaluations=evaluations,
+                    corrections=corrections,
+                    appended_skill_selection=selection,
+                    remaining_possible_skill_selection_nodes=remaining_nodes,
+                ),
+                selection,
+            )
+        except ValueError as error:
+            if not any(
+                marker in str(error)
+                for marker in (
+                    "future skill selection reserve",
+                    "reasoning trace exceeds 32 KiB",
+                )
+            ):
+                raise
+        fallback = PromptSkillSelectionTraceV1(
+            node=selection.node,
+            plan_generation=selection.plan_generation,
+            status="baseline_fallback",
+            fallback_code="selected_skill_trace_exceeded",
+        )
+        return (
+            _next_reasoning_trace(
+                trace,
+                status=trace.status,
+                plans=plans,
+                evaluations=evaluations,
+                corrections=corrections,
+                appended_skill_selection=fallback,
+                remaining_possible_skill_selection_nodes=remaining_nodes,
+            ),
+            fallback,
+        )
+
+    @staticmethod
+    def _remaining_selector_nodes(
+        snapshot: ExecutionSnapshotV1,
+        trace: ReasoningTraceV4,
+    ) -> int:
+        return max(
+            0,
+            snapshot.policy.max_reasoning_revision_cycles
+            + 1
+            - len(trace.skill_selections),
+        )
+
     def run(self, execution_id: str) -> None:
         snapshot = self._runtime.snapshot(execution_id)
         if snapshot.state is not ExecutionState.CONTEXT_READY:
@@ -415,7 +878,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         failure_code = "contract_violation"
         reasoning_replanner_failed = False
         step_ordinal = 0
-        reasoning_trace: ReasoningTraceV3 | None = None
+        reasoning_trace: ReasoningTraceV4 | None = None
         reasoning_plan: ReasoningPlanV2 | None = None
         reasoning_plans: list[ReasoningPlanV2] = []
         reasoning_evaluations: list[ReasoningEvaluationV1] = []
@@ -442,12 +905,19 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             if snapshot.reasoning_mode == "deep":
                 if self._reasoning_model is None:
                     raise ValueError("deep execution has no reasoning model")
+                prompt_skill_catalog_ref, prompt_skill_catalog = (
+                    self._load_prompt_skill_catalog(snapshot, "planner")
+                )
                 reasoning_trace = _next_reasoning_trace(
                     None,
                     status="planning",
                     plans=[],
                     evaluations=[],
                     corrections=[],
+                    prompt_skill_catalog=prompt_skill_catalog_ref,
+                    remaining_possible_skill_selection_nodes=(
+                        snapshot.policy.max_reasoning_revision_cycles + 1
+                    ),
                 )
                 snapshot = self._record_reasoning_progress(
                     snapshot,
@@ -455,6 +925,105 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     phase="understanding",
                     progress_status="completed",
                     message_code="reasoning.understanding_completed",
+                )
+                planner_context_input = self._model_inputs.build(
+                    snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,
+                )
+                _validate_model_input(snapshot, planner_context_input)
+                planner_node_context = (
+                    self._reasoning_model.build_initial_planning_node_context(
+                        planner_context_input
+                    )
+                )
+                (
+                    snapshot,
+                    initial_selection,
+                    initial_selected_skills,
+                    selector_input_tokens,
+                    selector_output_tokens,
+                ) = self._select_prompt_skills(
+                    snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,
+                    node_context=planner_node_context,
+                    catalog=prompt_skill_catalog,
+                    plan_generation=1,
+                )
+                if (
+                    prompt_skill_catalog is not None
+                    and prompt_skill_catalog.skills
+                    and initial_selection.fallback_code
+                    != "selector_unavailable"
+                ):
+                    step_ordinal += 1
+                    audit_steps.append(
+                        TurnAuditStepV1(
+                            ordinal=step_ordinal,
+                            step_kind="model",
+                            operation="deep_initial_planner_skill_selection",
+                            status="completed",
+                            safe_input_digest=_digest(
+                                {"node": "deep_initial_planner", "plan_generation": 1}
+                            ),
+                            input_tokens=selector_input_tokens,
+                            output_tokens=selector_output_tokens,
+                        )
+                    )
+                if initial_selected_skills:
+                    selected_preflight_input = self._model_inputs.build(
+                        snapshot,
+                        observations=observations,
+                        contract_repair_remaining=contract_repair_remaining,
+                    )
+                    _validate_model_input(snapshot, selected_preflight_input)
+                    selected_context_exceeded = False
+                    try:
+                        selected_context_tokens = max(
+                            self._reasoning_model.estimate_plan_request_tokens(
+                                selected_preflight_input,
+                                node_context=planner_node_context,
+                                selected_skills=initial_selected_skills,
+                                repair=repair_variant,
+                            )
+                            for repair_variant in (False, True)
+                        )
+                    except Exception as error:
+                        if getattr(error, "safe_code", None) != "context_limit_exceeded":
+                            raise
+                        selected_context_exceeded = True
+                    else:
+                        selected_context_exceeded = selected_context_tokens > (
+                            snapshot.policy.context_token_budget
+                            - snapshot.budget.context_tokens
+                        )
+                    if selected_context_exceeded:
+                        initial_selection = PromptSkillSelectionTraceV1(
+                            node="deep_initial_planner",
+                            plan_generation=1,
+                            status="baseline_fallback",
+                            fallback_code="selected_skill_context_exceeded",
+                        )
+                        initial_selected_skills = ()
+                reasoning_trace, persisted_initial_selection = (
+                    self._append_skill_selection(
+                        snapshot,
+                        reasoning_trace,
+                        initial_selection,
+                        plans=reasoning_plans,
+                        evaluations=reasoning_evaluations,
+                        corrections=reasoning_corrections,
+                    )
+                )
+                if persisted_initial_selection.status != "selected":
+                    initial_selected_skills = ()
+                snapshot = self._record_reasoning_progress(
+                    snapshot,
+                    reasoning_trace,
+                    phase="planning",
+                    progress_status="started",
+                    message_code="reasoning.planning_started",
                 )
                 schema_retry_ordinal = 0
                 while True:
@@ -466,16 +1035,21 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     )
                     _validate_model_input(snapshot, planner_input)
                     context_tokens = self._reasoning_model.estimate_plan_request_tokens(
-                        planner_input, repair=repair
+                        planner_input,
+                        node_context=planner_node_context,
+                        selected_skills=initial_selected_skills,
+                        repair=repair,
                     )
                     snapshot = self._runtime.request_model_action(
                         RequestModelActionV1(
                             execution_id=execution_id,
                             expected_version=snapshot.version,
                             fencing_token=snapshot.lease.fencing_token,
+                            contract_repair=False,
                             context_tokens=context_tokens,
                         )
                     )
+                    contract_repair_remaining = _contract_repair_remaining(snapshot)
                     planner_input = self._model_inputs.build(
                         snapshot,
                         observations=observations,
@@ -483,17 +1057,21 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     )
                     _validate_model_input(snapshot, planner_input)
                     try:
-                        if schema_repair_origin is None:
-                            plan_result = self._reasoning_model.plan(
-                                planner_input, repair=repair
+                        plan_kwargs = {
+                            "node_context": planner_node_context,
+                            "selected_skills": initial_selected_skills,
+                            "repair": repair,
+                        }
+                        if schema_repair_origin is not None:
+                            plan_kwargs.update(
+                                {
+                                    "schema_retry_ordinal": schema_retry_ordinal,
+                                    "repair_origin_error_code": schema_repair_origin,
+                                }
                             )
-                        else:
-                            plan_result = self._reasoning_model.plan(
-                                planner_input,
-                                repair=repair,
-                                schema_retry_ordinal=schema_retry_ordinal,
-                                repair_origin_error_code=schema_repair_origin,
-                            )
+                        plan_result = self._reasoning_model.plan(
+                            planner_input, **plan_kwargs
+                        )
                     except Exception as error:
                         step_ordinal += 1
                         audit_steps.append(
@@ -544,6 +1122,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     plans=reasoning_plans,
                     evaluations=reasoning_evaluations,
                     corrections=reasoning_corrections,
+                    remaining_possible_skill_selection_nodes=(
+                        self._remaining_selector_nodes(snapshot, reasoning_trace)
+                    ),
                 )
                 snapshot = self._record_reasoning_progress(
                     snapshot,
@@ -559,12 +1140,84 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     contract_repair_remaining=contract_repair_remaining,
                 ).model_copy(update={"reasoning_plan": reasoning_plan})
                 _validate_model_input(snapshot, initial_input)
+            _answer_catalog_ref, answer_skill_catalog = (
+                self._load_prompt_skill_catalog(snapshot, "answer")
+            )
             session = self._model.open_session(initial_input)
+            candidate_ordinal = 0
+            candidate_needs_start = True
+            next_candidate_kind: Literal["normal", "limit_final"] = "normal"
+            next_candidate_correction_kind: Literal[
+                "revise_only", "research_then_revise", "limit_final"
+            ] | None = None
+            next_candidate_evaluation: ReasoningEvaluationV1 | None = None
+            next_candidate_gate_feedback = None
 
             while True:
                 if self._clock() >= snapshot.deadline_at:
                     failure_code = "deadline_exceeded"
                     raise TimeoutError("turn deadline elapsed")
+                if candidate_needs_start:
+                    candidate_ordinal += 1
+                    candidate_input = self._model_inputs.build(
+                        snapshot,
+                        observations=observations,
+                        contract_repair_remaining=contract_repair_remaining,
+                    )
+                    if reasoning_plan is not None:
+                        candidate_input = candidate_input.model_copy(
+                            update={"reasoning_plan": reasoning_plan}
+                        )
+                    _validate_model_input(snapshot, candidate_input)
+                    candidate_context = AnswerCandidateNodeContextV1(
+                        candidate_ordinal=candidate_ordinal,
+                        candidate_kind=next_candidate_kind,
+                        current_user_request=candidate_input.model_user_input,
+                        current_plan=reasoning_plan,
+                        correction_kind=next_candidate_correction_kind,
+                        triggering_evaluation=next_candidate_evaluation,
+                        gate_correction_feedback=next_candidate_gate_feedback,
+                    )
+                    (
+                        snapshot,
+                        selector_input_tokens,
+                        selector_output_tokens,
+                    ) = self._select_and_begin_answer_candidate(
+                        snapshot,
+                        session=session,
+                        observations=observations,
+                        contract_repair_remaining=contract_repair_remaining,
+                        node_context=candidate_context,
+                        catalog=answer_skill_catalog,
+                        reasoning_plan=reasoning_plan,
+                    )
+                    contract_repair_remaining = _contract_repair_remaining(snapshot)
+                    persisted_answer_selection = snapshot.prompt_skill_selections[-1]
+                    if (
+                        answer_skill_catalog is not None
+                        and answer_skill_catalog.skills
+                        and persisted_answer_selection.fallback_code
+                        != "selector_unavailable"
+                    ):
+                        step_ordinal += 1
+                        audit_steps.append(
+                            TurnAuditStepV1(
+                                ordinal=step_ordinal,
+                                step_kind="model",
+                                operation="answer_candidate_skill_selection",
+                                status="completed",
+                                safe_input_digest=_digest(
+                                    {
+                                        "node": "answer_candidate",
+                                        "candidate_ordinal": candidate_ordinal,
+                                        "candidate_kind": next_candidate_kind,
+                                    }
+                                ),
+                                input_tokens=selector_input_tokens,
+                                output_tokens=selector_output_tokens,
+                            )
+                        )
+                    candidate_needs_start = False
                 finalize_only = force_finalize_only or not _has_legal_tool(
                     snapshot,
                     has_documents=bool(document_candidate_handles),
@@ -744,6 +1397,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 provisional_evidence_checks=provisional_evidence_checks,
                                 limit_finalization=limit_finalization,
                                 termination_reason=termination_reason,
+                                remaining_possible_skill_selection_nodes=0,
                             )
                             snapshot = self._record_reasoning_progress(
                                 snapshot,
@@ -762,6 +1416,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 evaluations=reasoning_evaluations,
                                 corrections=reasoning_corrections,
                                 provisional_evidence_checks=provisional_evidence_checks,
+                                remaining_possible_skill_selection_nodes=(
+                                    self._remaining_selector_nodes(snapshot, reasoning_trace)
+                                ),
                             )
                             snapshot = self._record_reasoning_progress(
                                 snapshot,
@@ -936,6 +1593,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     and correction_kind is None
                                     else None
                                 ),
+                                remaining_possible_skill_selection_nodes=(
+                                    self._remaining_selector_nodes(snapshot, reasoning_trace)
+                                ),
                             )
                             snapshot = self._record_reasoning_progress(
                                 snapshot,
@@ -977,6 +1637,129 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 if correction_kind == "research_then_revise":
                                     failure_code = "contract_violation"
                                     reasoning_replanner_failed = True
+                                    replan_context_input = self._model_inputs.build(
+                                        snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,
+                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    _validate_model_input(snapshot, replan_context_input)
+                                    replan_node_context = (
+                                        self._reasoning_model.build_replanning_node_context(
+                                            replan_context_input,
+                                            plan=reasoning_plan,
+                                            evaluation=evaluation,
+                                            remaining_execution_limits=(
+                                                self._post_selector_remaining_limits(
+                                                    snapshot,
+                                                    completed_reasoning_corrections=len(
+                                                        reasoning_corrections
+                                                    ),
+                                                )
+                                            ),
+                                        )
+                                    )
+                                    target_generation = reasoning_plan.generation + 1
+                                    (
+                                        snapshot,
+                                        replan_selection,
+                                        replan_selected_skills,
+                                        selector_input_tokens,
+                                        selector_output_tokens,
+                                    ) = self._select_prompt_skills(
+                                        snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,
+                                        node_context=replan_node_context,
+                                        catalog=prompt_skill_catalog,
+                                        plan_generation=target_generation,
+                                    )
+                                    if (
+                                        prompt_skill_catalog is not None
+                                        and prompt_skill_catalog.skills
+                                        and replan_selection.fallback_code
+                                        != "selector_unavailable"
+                                    ):
+                                        step_ordinal += 1
+                                        audit_steps.append(
+                                            TurnAuditStepV1(
+                                                ordinal=step_ordinal,
+                                                step_kind="model",
+                                                operation="deep_replanner_skill_selection",
+                                                status="completed",
+                                                safe_input_digest=_digest(
+                                                    {
+                                                        "node": "deep_replanner",
+                                                        "plan_generation": target_generation,
+                                                    }
+                                                ),
+                                                input_tokens=selector_input_tokens,
+                                                output_tokens=selector_output_tokens,
+                                            )
+                                        )
+                                    if replan_selected_skills:
+                                        selected_preflight_input = self._model_inputs.build(
+                                            snapshot,
+                                            observations=observations,
+                                            contract_repair_remaining=contract_repair_remaining,
+                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        _validate_model_input(
+                                            snapshot, selected_preflight_input
+                                        )
+                                        selected_context_exceeded = False
+                                        try:
+                                            selected_context_tokens = max(
+                                                self._reasoning_model.estimate_replan_request_tokens(
+                                                    selected_preflight_input,
+                                                    node_context=replan_node_context,
+                                                    selected_skills=replan_selected_skills,
+                                                    plan=reasoning_plan,
+                                                    evaluation=evaluation,
+                                                    repair=repair_variant,
+                                                )
+                                                for repair_variant in (False, True)
+                                            )
+                                        except Exception as error:
+                                            if (
+                                                getattr(error, "safe_code", None)
+                                                != "context_limit_exceeded"
+                                            ):
+                                                raise
+                                            selected_context_exceeded = True
+                                        else:
+                                            selected_context_exceeded = (
+                                                selected_context_tokens
+                                                > snapshot.policy.context_token_budget
+                                                - snapshot.budget.context_tokens
+                                            )
+                                        if selected_context_exceeded:
+                                            replan_selection = PromptSkillSelectionTraceV1(
+                                                node="deep_replanner",
+                                                plan_generation=target_generation,
+                                                status="baseline_fallback",
+                                                fallback_code="selected_skill_context_exceeded",
+                                            )
+                                            replan_selected_skills = ()
+                                    (
+                                        reasoning_trace,
+                                        persisted_replan_selection,
+                                    ) = self._append_skill_selection(
+                                        snapshot,
+                                        reasoning_trace,
+                                        replan_selection,
+                                        plans=reasoning_plans,
+                                        evaluations=reasoning_evaluations,
+                                        corrections=reasoning_corrections,
+                                    )
+                                    if persisted_replan_selection.status != "selected":
+                                        replan_selected_skills = ()
+                                    snapshot = self._record_reasoning_progress(
+                                        snapshot,
+                                        reasoning_trace,
+                                        phase="revising",
+                                        progress_status="started",
+                                        cycle=evaluation_cycle,
+                                        message_code="reasoning.replanning_started",
+                                    )
                                     replan_schema_origin: SchemaRetryOriginCode | None = None
                                     replan_schema_ordinal = 0
                                     while True:
@@ -990,6 +1773,8 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         replan_tokens = (
                                             self._reasoning_model.estimate_replan_request_tokens(
                                                 replan_input,
+                                                node_context=replan_node_context,
+                                                selected_skills=replan_selected_skills,
                                                 plan=reasoning_plan,
                                                 evaluation=evaluation,
                                                 repair=repair,
@@ -1001,8 +1786,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                                 expected_version=snapshot.version,
                                                 fencing_token=snapshot.lease.fencing_token,
                                                 context_tokens=replan_tokens,
-                                                contract_repair=repair,
+                                                contract_repair=False,
                                             )
+                                        )
+                                        contract_repair_remaining = (
+                                            _contract_repair_remaining(snapshot)
                                         )
                                         replan_input = self._model_inputs.build(
                                             snapshot,
@@ -1011,22 +1799,23 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         ).model_copy(update={"reasoning_plan": reasoning_plan})
                                         _validate_model_input(snapshot, replan_input)
                                         try:
-                                            if replan_schema_origin is None:
-                                                replan_result = self._reasoning_model.replan(
-                                                    replan_input,
-                                                    plan=reasoning_plan,
-                                                    evaluation=evaluation,
-                                                    repair=repair,
+                                            replan_kwargs = {
+                                                "node_context": replan_node_context,
+                                                "selected_skills": replan_selected_skills,
+                                                "plan": reasoning_plan,
+                                                "evaluation": evaluation,
+                                                "repair": repair,
+                                            }
+                                            if replan_schema_origin is not None:
+                                                replan_kwargs.update(
+                                                    {
+                                                        "schema_retry_ordinal": replan_schema_ordinal,
+                                                        "repair_origin_error_code": replan_schema_origin,
+                                                    }
                                                 )
-                                            else:
-                                                replan_result = self._reasoning_model.replan(
-                                                    replan_input,
-                                                    plan=reasoning_plan,
-                                                    evaluation=evaluation,
-                                                    repair=repair,
-                                                    schema_retry_ordinal=replan_schema_ordinal,
-                                                    repair_origin_error_code=replan_schema_origin,
-                                                )
+                                            replan_result = self._reasoning_model.replan(
+                                                replan_input, **replan_kwargs
+                                            )
                                         except Exception as error:
                                             step_ordinal += 1
                                             audit_steps.append(
@@ -1080,6 +1869,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         plans=reasoning_plans,
                                         evaluations=reasoning_evaluations,
                                         corrections=reasoning_corrections,
+                                        remaining_possible_skill_selection_nodes=(
+                                            self._remaining_selector_nodes(
+                                                snapshot, reasoning_trace
+                                            )
+                                        ),
                                     )
                                     snapshot = self._record_reasoning_progress(
                                         snapshot,
@@ -1117,6 +1911,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     plans=reasoning_plans,
                                     evaluations=reasoning_evaluations,
                                     corrections=reasoning_corrections,
+                                    remaining_possible_skill_selection_nodes=(
+                                        self._remaining_selector_nodes(
+                                            snapshot, reasoning_trace
+                                        )
+                                    ),
                                 )
                                 snapshot = self._record_reasoning_progress(
                                     snapshot,
@@ -1131,6 +1930,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         == "research_then_revise",
                                     },
                                 )
+                                next_candidate_kind = "normal"
+                                next_candidate_correction_kind = correction_kind
+                                next_candidate_evaluation = evaluation
+                                next_candidate_gate_feedback = gate_feedback
+                                candidate_needs_start = True
                                 force_finalize_only = correction_kind == "revise_only"
                                 continue
                             else:
@@ -1147,6 +1951,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     plans=reasoning_plans,
                                     evaluations=reasoning_evaluations,
                                     corrections=reasoning_corrections,
+                                    remaining_possible_skill_selection_nodes=(
+                                        self._remaining_selector_nodes(
+                                            snapshot, reasoning_trace
+                                        )
+                                    ),
                                 )
                                 snapshot = self._record_reasoning_progress(
                                     snapshot,
@@ -1157,6 +1966,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     message_code="reasoning.limit_finalization_started",
                                     message_params={"cycle": evaluation_cycle},
                                 )
+                                next_candidate_kind = "limit_final"
+                                next_candidate_correction_kind = "limit_final"
+                                next_candidate_evaluation = evaluation
+                                next_candidate_gate_feedback = gate_feedback
+                                candidate_needs_start = True
                                 force_finalize_only = True
                                 continue
                         reasoning_trace = _next_reasoning_trace(
@@ -1171,6 +1985,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 else None
                             ),
                             termination_reason=termination_reason,
+                            remaining_possible_skill_selection_nodes=0,
                         )
                         snapshot = self._record_reasoning_progress(
                             snapshot,
@@ -1321,6 +2136,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 if reasoning_replanner_failed
                                 else "execution_failed"
                             ),
+                            remaining_possible_skill_selection_nodes=0,
                         )
                         snapshot = self._record_reasoning_progress(
                             current,

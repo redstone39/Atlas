@@ -132,7 +132,7 @@ class TurnInputProjector(Protocol):
         snapshot: ExecutionSnapshotV1,
         recent_tail: list[ContextExchangeV3],
         summary: ContextSummaryInputV4 | None,
-    ) -> str: ...
+    ) -> tuple[ExecutionSnapshotV1, str]: ...
 
 
 def _verify_route(route: TurnRouteSnapshotV2, tested_route) -> None:
@@ -466,7 +466,7 @@ class SynchronousContextCompactor:
         snapshot: ExecutionSnapshotV1,
         *,
         catalog_document_count: int,
-    ) -> MaterializeContextPackV3:
+    ) -> tuple[ExecutionSnapshotV1, MaterializeContextPackV3]:
         projected = self._turn_model.estimate_initial_request_tokens_unchecked(
             _turn_input(
                 command,
@@ -571,7 +571,7 @@ class SynchronousContextCompactor:
                 }
             )
 
-        rewritten_user_input = self._input_projector.project(
+        snapshot, rewritten_user_input = self._input_projector.project(
             snapshot=snapshot,
             recent_tail=prepared.recent_tail,
             summary=prepared.summary,
@@ -600,7 +600,7 @@ class SynchronousContextCompactor:
             > snapshot.route.max_input_tokens_per_invocation
         ):
             raise ContextCompactionFailure("context_limit_exceeded")
-        return prepared
+        return snapshot, prepared
 
 
 __all__ = [

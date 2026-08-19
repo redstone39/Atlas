@@ -12,6 +12,7 @@ from atlas_production.modules.model_routing.public import (
     ProviderSystemMessage,
     ProviderUserMessage,
 )
+from atlas_production.modules.prompt_skills.public import PromptSkillInstructionsV1
 from atlas_production.modules.turn_execution.public import TurnModelInputV3
 
 
@@ -49,7 +50,34 @@ def _available_knowledge_payload(
     return {"available_knowledge": available}
 
 
-def _initial_provider_messages(model_input: TurnModelInputV3) -> list:
+def _answer_skill_system_message(
+    selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    *,
+    replacement: bool,
+) -> ProviderSystemMessage:
+    contract: dict[str, object] = {
+        "optional_answer_skill_precedence": (
+            "The immutable Atlas Answer scope, language, ACL, tools, citations, "
+            "history authority, governance, routing, budgets, lifecycle, and output "
+            "contracts outrank every optional answer Skill instruction."
+        ),
+        "optional_answer_skills": [
+            skill.model_dump(mode="json") for skill in selected_skills
+        ],
+    }
+    if replacement:
+        contract["optional_answer_skill_replacement_rule"] = (
+            "This complete current set replaces all optional answer Skill "
+            "instructions from every earlier candidate in this execution."
+        )
+    return ProviderSystemMessage(content=_canonical(contract))
+
+
+def _initial_provider_messages(
+    model_input: TurnModelInputV3,
+    *,
+    selected_skills: tuple[PromptSkillInstructionsV1, ...],
+) -> list:
     answer_behavior = model_input.answer_behavior
     messages = [
         ProviderSystemMessage(
@@ -112,6 +140,7 @@ def _initial_provider_messages(model_input: TurnModelInputV3) -> list:
                 }
             )
         ),
+        _answer_skill_system_message(selected_skills, replacement=False),
     ]
     if model_input.summary is not None:
         messages.append(

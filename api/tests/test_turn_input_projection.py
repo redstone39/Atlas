@@ -26,6 +26,18 @@ from atlas_production.modules.model_routing.public import (
     ProviderIncomplete,
     ProviderRefused,
 )
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalogV1,
+    PromptSkillInstructionsV1,
+    PromptSkillRefV1,
+    PromptSkillSelectorCandidateV1,
+)
+from atlas_production.modules.turn_execution.public import (
+    SkillSelectionDecisionV1,
+    DeepReasoningContractError,
+    SkillSelectionResultV1,
+)
+from atlas_production.modules.turn_runtime.public import ExecutionState
 from tests.test_turn_model_loop import Runtime
 
 
@@ -203,7 +215,7 @@ def test_resolver_then_rewrite_use_one_fixed_no_tool_attempt_and_persist_usage()
     )
     projections = _Projections()
 
-    rewritten = ProviderTurnInputProjector(routing, projections).project(
+    _, rewritten = ProviderTurnInputProjector(routing, projections).project(
         snapshot=_snapshot(),
         recent_tail=_history(),
         summary=None,
@@ -490,7 +502,7 @@ def test_invalid_resolver_output_retries_with_shared_turn_budget() -> None:
         }
     )
 
-    rewritten = ProviderTurnInputProjector(
+    _, rewritten = ProviderTurnInputProjector(
         routing, projections, runtime
     ).project(snapshot=snapshot, recent_tail=_history(), summary=None)
 
@@ -512,10 +524,154 @@ def test_transport_valid_semantically_wrong_rewrite_proceeds_without_validation(
         ]
     )
 
-    rewritten = ProviderTurnInputProjector(routing, _Projections()).project(
+    _, rewritten = ProviderTurnInputProjector(routing, _Projections()).project(
         snapshot=_snapshot(),
         recent_tail=_history(),
         summary=None,
     )
 
     assert rewritten == "談談火星。"
+
+def test_understanding_selection_is_persisted_once_and_only_reaches_resolver() -> None:
+    candidate_ref = PromptSkillRefV1(
+        category="understanding",
+        name="resolve-followups",
+        revision=1,
+        content_digest="a" * 64,
+    )
+    candidate = PromptSkillSelectorCandidateV1(
+        selection_id="understanding:resolve-followups:1:" + "a" * 64,
+        name="resolve-followups",
+        description="Resolve follow-up references.",
+        ref=candidate_ref,
+    )
+
+    class Catalog:
+        def read_catalog(self, ref):
+            return PromptSkillCatalogV1(ref=ref, skills=[candidate])
+
+        def read_instructions(self, ref):
+            assert ref == candidate_ref
+            return PromptSkillInstructionsV1(
+                name=ref.name,
+                revision=ref.revision,
+                content_digest=ref.content_digest,
+                instructions="Prefer the most recent explicit stable subject.",
+            )
+
+    class Selector:
+        def __init__(self):
+            self.requests = []
+
+        def select(self, snapshot, request):
+            self.requests.append((snapshot, request))
+            return SkillSelectionResultV1(
+                decision=SkillSelectionDecisionV1(
+                    selected_skill_ids=[candidate.selection_id]
+                )
+            )
+
+    routing = _Routing(
+        [
+            _completed({"resolver_context": "文件 A。"}, 1),
+            _completed({"rewritten_question": "比較文件 A。"}, 2),
+        ]
+    )
+    projections = _Projections()
+    runtime = Runtime()
+    accepted = runtime.snapshot_value.model_copy(
+        update={
+            "state": ExecutionState.ACCEPTED,
+            "version": 2,
+            "prompt_skill_selections": [],
+        }
+    )
+    runtime.snapshot_value = accepted
+    selector = Selector()
+
+    refreshed, rewritten = ProviderTurnInputProjector(
+        routing,
+        projections,
+        runtime,
+        prompt_skill_catalog=Catalog(),
+        prompt_skill_exact_reader=Catalog(),
+        skill_selector_model=selector,
+    ).project(snapshot=accepted, recent_tail=_history(), summary=None)
+
+    assert rewritten == "比較文件 A。"
+    assert len(selector.requests) == 1
+    selector_context = selector.requests[0][1].node_context
+    assert selector_context.original_user_input == projections.value.original_user_input
+    assert selector_context.authorized_rewritten_context["recent_exchanges"]
+    assert refreshed.prompt_skill_selections[0].selected_skills == [candidate_ref]
+    resolver_contract = json.loads(routing.requests[0].messages[0].content)
+    rewrite_contract = json.loads(routing.requests[1].messages[0].content)
+    assert resolver_contract["optional_understanding_skills"][0][
+        "instructions"
+    ] == "Prefer the most recent explicit stable subject."
+    assert "optional_understanding_skills" not in rewrite_contract
+
+def test_understanding_selector_failure_runs_baseline_resolver_without_retry() -> None:
+    candidate = PromptSkillSelectorCandidateV1(
+        selection_id="understanding:baseline:1:" + "b" * 64,
+        name="baseline",
+        description="Optional understanding guidance.",
+        ref=PromptSkillRefV1(
+            category="understanding",
+            name="baseline",
+            revision=1,
+            content_digest="b" * 64,
+        ),
+    )
+
+    class Catalog:
+        def read_catalog(self, ref):
+            return PromptSkillCatalogV1(ref=ref, skills=[candidate])
+
+        def read_instructions(self, ref):
+            raise AssertionError("failed selector cannot exact-read instructions")
+
+    class Selector:
+        def __init__(self):
+            self.calls = 0
+
+        def select(self, snapshot, request):
+            self.calls += 1
+            raise DeepReasoningContractError("selector_contract_invalid")
+
+    routing = _Routing(
+        [
+            _completed({"resolver_context": "baseline resolver context"}, 1),
+            _completed({"rewritten_question": "baseline rewritten request"}, 2),
+        ]
+    )
+    runtime = Runtime()
+    accepted = runtime.snapshot_value.model_copy(
+        update={
+            "state": ExecutionState.ACCEPTED,
+            "version": 2,
+            "prompt_skill_selections": [],
+        }
+    )
+    runtime.snapshot_value = accepted
+    selector = Selector()
+
+    refreshed, rewritten = ProviderTurnInputProjector(
+        routing,
+        _Projections(),
+        runtime,
+        prompt_skill_catalog=Catalog(),
+        prompt_skill_exact_reader=Catalog(),
+        skill_selector_model=selector,
+    ).project(snapshot=accepted, recent_tail=_history(), summary=None)
+
+    assert selector.calls == 1
+    assert rewritten == "baseline rewritten request"
+    assert len(routing.requests) == 2
+    selection = refreshed.prompt_skill_selections[0]
+    assert selection.status == "baseline_fallback"
+    assert selection.fallback_code == "selector_contract_invalid"
+    assert selection.selected_skills == []
+    assert "optional_understanding_skills" not in json.loads(
+        routing.requests[0].messages[0].content
+    )

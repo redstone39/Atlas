@@ -16,6 +16,7 @@ from atlas_production.infrastructure.postgres_owner.turn_runtime import (
     PostgresTurnRuntimeOwner,
 )
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     AllocateExecutionV1,
     LeasePolicyV1,
@@ -81,7 +82,7 @@ def _allocate(
             holder_id=f"holder-{suffix}",
             route_policy=RoutePolicyV1(
                 max_tool_invocations=1,
-                max_provider_invocations=7,
+                max_provider_invocations=10,
                 max_reasoning_revision_cycles=0,
             ),
             route=route_snapshot(),
@@ -91,6 +92,18 @@ def _allocate(
             retry_of_turn_id=None,
             input_digest="0" * 64,
             response_language="zh-TW",
+            prompt_skill_catalogs=[
+                PromptSkillCatalogRefV1(
+                    category="understanding",
+                    catalog_revision=1,
+                    catalog_digest="1" * 64,
+                ),
+                PromptSkillCatalogRefV1(
+                    category="answer",
+                    catalog_revision=1,
+                    catalog_digest="2" * 64,
+                ),
+            ],
             applied_guidance_revision=0,
             applied_guidance_digest=None,
         )
@@ -187,6 +200,13 @@ def test_fresh_postgres_exact_replay_read_and_soft_conversation_usage(
                     repair_origin_error_codes=["invalid_summary_output"],
                 ),
                 _invocation(
+                    f"{PREFIX}selector",
+                    subject_ref=first.execution_id,
+                    status="completed",
+                    token_usage={"input_tokens": 3, "output_tokens": 2},
+                    purpose="deep_initial_planner_skill_selection",
+                ),
+                _invocation(
                     f"{PREFIX}failed",
                     subject_ref=first.execution_id,
                     status="failed",
@@ -207,5 +227,5 @@ def test_fresh_postgres_exact_replay_read_and_soft_conversation_usage(
         PostgresConversationTokenUsageReader(
             postgres_runtime.session_factory
         ).observed_tokens("conversation-target")
-        == 31
+        == 36
     )

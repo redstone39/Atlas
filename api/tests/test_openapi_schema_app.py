@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "398f3c1b7b795ada905623dd53fbabb85b1525dad715a6a308736403a7c0d259"
+    "4a3b771c755a137218a054cb5b013c051f4c7b3f1fac5039f9ce9cb857bd7bea"
 )
 
 

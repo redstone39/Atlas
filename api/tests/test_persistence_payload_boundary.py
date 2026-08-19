@@ -205,7 +205,7 @@ def _runtime_policy() -> ModelRouteRuntimePolicy:
         schema_version="model-route-runtime-policy-v8",
         tokenizer_profile="cl100k_base",
         max_tool_executions=4,
-        max_provider_invocations=20,
+        max_provider_invocations=25,
         max_reasoning_revision_cycles=2,
         max_catalog_pages=5,
         max_search_rounds=6,

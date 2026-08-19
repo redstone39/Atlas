@@ -4,9 +4,11 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from atlas_production.modules.audit.public import TurnAuditStepV1
 
 from atlas_production.modules.conversation.public import ConversationV1, ReasoningMode
+from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionState,
-    ReasoningTraceV3,
+    ReasoningTraceV4,
     RuntimeEventV1,
 )
 from atlas_production.modules.workspace_turn.public import WorkspaceDiscoveryTraceV1
@@ -39,7 +41,11 @@ class RuntimeTraceDetail(_StrictModel):
     state: ExecutionState
     version: int = Field(ge=1)
     reasoning_mode: ReasoningMode
-    reasoning_trace: ReasoningTraceV3 | None
+    reasoning_trace: ReasoningTraceV4 | None
+    prompt_skill_catalogs: list[PromptSkillCatalogRefV1] = Field(max_length=3)
+    prompt_skill_selections: list[
+        ExecutionPromptSkillSelectionTraceV1
+    ] = Field(max_length=6)
     failure_code: str | None
     applied_guidance_revision: int = Field(ge=0)
     applied_guidance_digest: str | None = Field(

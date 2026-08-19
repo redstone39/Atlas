@@ -14,12 +14,23 @@ from atlas_production.infrastructure.history_authority import (
     history_exchange_payload,
     history_summary_payload,
 )
+from atlas_production.infrastructure.prompt_skill_selection import (
+    PromptSkillSelectionResolutionError,
+    admit_execution_prompt_skill_selection,
+    resolve_selected_skill_refs,
+    validate_exact_skill_instructions,
+)
 from atlas_production.modules.context_engineering.public import (
     ContextExchangeV3,
     ContextSummaryInputV4,
     RecordResolverProjectionV1,
     RecordRewriteProjectionV1,
     TurnInputProjectionOwner,
+)
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillCatalog,
+    PromptSkillExactReader,
+    PromptSkillInstructionsV1,
 )
 from atlas_production.modules.model_routing.public import (
     ModelRoutingRuntime,
@@ -32,9 +43,17 @@ from atlas_production.modules.model_routing.public import (
     ProviderUserMessage,
     require_provider_wire_within_limits,
 )
+from atlas_production.modules.turn_execution.public import (
+    DeepReasoningContractError,
+    SkillSelectionRequestV2,
+    SkillSelectorModel,
+    UnderstandingNodeContextV1,
+)
 from atlas_production.modules.turn_runtime.public import (
     ClaimSchemaRetryV1,
+    ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
+    RecordExecutionPromptSkillSelectionV1,
     SchemaRetryOriginCode,
     TurnRouteSnapshotV2,
     TurnRuntimeBudgetExceeded,
@@ -175,13 +194,26 @@ def _verify_route(route: TurnRouteSnapshotV2, tested_route) -> None:
         raise ProviderProtocolError(safe_code="model_route_revision_conflict")
 
 
-def _stage_system_prompt(stage_instruction: str) -> str:
-    return _canonical(
-        {
-            "history_authority_policy": HISTORY_AUTHORITY_POLICY,
-            "stage_instruction": stage_instruction,
-        }
-    )
+def _stage_system_prompt(
+    stage_instruction: str,
+    *,
+    optional_understanding_skills: tuple[PromptSkillInstructionsV1, ...] = (),
+) -> str:
+    contract: dict[str, object] = {
+        "history_authority_policy": HISTORY_AUTHORITY_POLICY,
+        "stage_instruction": stage_instruction,
+    }
+    if optional_understanding_skills:
+        contract["optional_understanding_skill_precedence"] = (
+            "The immutable Resolver intent, referent, history-authority, output, ACL, "
+            "tool, routing, budget, and lifecycle contracts outrank every optional "
+            "understanding Skill instruction."
+        )
+        contract["optional_understanding_skills"] = [
+            skill.model_dump(mode="json")
+            for skill in optional_understanding_skills
+        ]
+    return _canonical(contract)
 
 
 class ProviderTurnInputProjector:
@@ -193,11 +225,17 @@ class ProviderTurnInputProjector:
         projections: TurnInputProjectionOwner,
         runtime: TurnRuntimeOwner | None = None,
         *,
+        prompt_skill_catalog: PromptSkillCatalog | None = None,
+        prompt_skill_exact_reader: PromptSkillExactReader | None = None,
+        skill_selector_model: SkillSelectorModel | None = None,
         record_invocations: bool = True,
     ) -> None:
         self._routing = routing
         self._projections = projections
         self._runtime = runtime
+        self._prompt_skill_catalog = prompt_skill_catalog
+        self._prompt_skill_exact_reader = prompt_skill_exact_reader
+        self._skill_selector_model = skill_selector_model
         self._record_invocations = record_invocations
 
     def _claim_schema_retry(
@@ -382,13 +420,213 @@ class ProviderTurnInputProjector:
                 repair_origin = origin
                 attempt_ordinal += 1
 
+    @staticmethod
+    def _selector_failure_code(error: Exception) -> str:
+        if isinstance(error, PromptSkillSelectionResolutionError):
+            return error.fallback_code
+        if isinstance(error, DeepReasoningContractError):
+            if error.safe_code in {
+                "selector_contract_invalid",
+                "selection_outside_catalog",
+            }:
+                return error.safe_code
+        return "selector_unavailable"
+
+    @staticmethod
+    def _resolver_request(
+        *,
+        attempt,
+        snapshot: ExecutionSnapshotV1,
+        original_user_input: str,
+        resolver_context: dict[str, object],
+        selected_skills: tuple[PromptSkillInstructionsV1, ...],
+    ) -> ProviderConversationRequest:
+        return ProviderConversationRequest(
+            messages=[
+                ProviderSystemMessage(
+                    content=_stage_system_prompt(
+                        _RESOLVER_SYSTEM_PROMPT,
+                        optional_understanding_skills=selected_skills,
+                    )
+                ),
+                ProviderUserMessage(
+                    content=_canonical(
+                        {
+                            "original_user_input": original_user_input,
+                            "authorized_rewritten_context": resolver_context,
+                        }
+                    )
+                ),
+            ],
+            tools=[],
+            tool_choice="none",
+            parallel_tool_calls=False,
+            max_output_tokens=attempt.route.runtime_policy.max_output_tokens_per_invocation,
+            timeout_seconds=min(
+                float(
+                    attempt.route.runtime_policy.provider_invocation_timeout_seconds
+                ),
+                ProviderTurnInputProjector._remaining_seconds(snapshot),
+            ),
+        )
+
+    def _select_understanding_skills(
+        self,
+        *,
+        snapshot: ExecutionSnapshotV1,
+        attempt,
+        original_user_input: str,
+        resolver_context: dict[str, object],
+    ) -> tuple[
+        ExecutionSnapshotV1,
+        tuple[PromptSkillInstructionsV1, ...],
+        ProviderConversationRequest,
+    ]:
+        node_context = UnderstandingNodeContextV1(
+            original_user_input=original_user_input,
+            authorized_rewritten_context=resolver_context,
+        )
+        catalog_ref = next(
+            catalog
+            for catalog in snapshot.prompt_skill_catalogs
+            if catalog.category == "understanding"
+        )
+        selected_skills: tuple[PromptSkillInstructionsV1, ...] = ()
+        try:
+            if self._prompt_skill_catalog is None:
+                raise RuntimeError("understanding catalog reader is unavailable")
+            catalog = self._prompt_skill_catalog.read_catalog(catalog_ref)
+            if catalog.ref != catalog_ref:
+                raise PromptSkillSelectionResolutionError(
+                    "selected_skill_integrity_error"
+                )
+        except Exception:
+            selection = ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="baseline_fallback",
+                fallback_code="selected_skill_integrity_error",
+            )
+        else:
+            candidates = tuple(catalog.skills)
+            if not candidates:
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="understanding",
+                    node="resolver",
+                    status="not_applicable",
+                )
+            elif self._skill_selector_model is None:
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="understanding",
+                    node="resolver",
+                    status="baseline_fallback",
+                    fallback_code="selector_unavailable",
+                )
+            else:
+                request = SkillSelectionRequestV2(
+                    node="resolver",
+                    node_context=node_context,
+                    candidates=candidates,
+                )
+                try:
+                    result = self._skill_selector_model.select(snapshot, request)
+                    refs = resolve_selected_skill_refs(
+                        candidates,
+                        result.decision.selected_skill_ids,
+                    )
+                    if self._prompt_skill_exact_reader is None:
+                        raise PromptSkillSelectionResolutionError(
+                            "selected_skill_integrity_error"
+                        )
+                    try:
+                        resolved = tuple(
+                            self._prompt_skill_exact_reader.read_instructions(ref)
+                            for ref in refs
+                        )
+                    except Exception as error:
+                        raise PromptSkillSelectionResolutionError(
+                            "selected_skill_integrity_error"
+                        ) from error
+                    selected_skills = validate_exact_skill_instructions(
+                        refs,
+                        resolved,
+                    )
+                    selection = ExecutionPromptSkillSelectionTraceV1(
+                        category="understanding",
+                        node="resolver",
+                        status="selected",
+                        selected_skills=list(refs),
+                    )
+                except Exception as error:
+                    selected_skills = ()
+                    selection = ExecutionPromptSkillSelectionTraceV1(
+                        category="understanding",
+                        node="resolver",
+                        status="baseline_fallback",
+                        fallback_code=self._selector_failure_code(error),
+                    )
+        if selected_skills:
+            selected_request = self._resolver_request(
+                attempt=attempt,
+                snapshot=snapshot,
+                original_user_input=original_user_input,
+                resolver_context=resolver_context,
+                selected_skills=selected_skills,
+            )
+            try:
+                require_provider_wire_within_limits(
+                    policy=attempt.route.runtime_policy,
+                    request=selected_request,
+                    response_schema=build_native_json_schema(
+                        "context_resolver_v1",
+                        _ResolverOutputV1.model_json_schema(),
+                    ),
+                )
+            except Exception:
+                selected_skills = ()
+                selection = ExecutionPromptSkillSelectionTraceV1(
+                    category="understanding",
+                    node="resolver",
+                    status="baseline_fallback",
+                    fallback_code="selected_skill_context_exceeded",
+                )
+        total_possible_nodes = (
+            2
+            if snapshot.reasoning_mode == "standard"
+            else min(6, snapshot.policy.max_reasoning_revision_cycles + 3)
+        )
+        admitted = admit_execution_prompt_skill_selection(
+            snapshot.prompt_skill_selections,
+            selection,
+            remaining_possible_nodes=total_possible_nodes - 1,
+        )
+        if admitted.status != "selected":
+            selected_skills = ()
+        if self._runtime is not None:
+            snapshot = self._runtime.record_prompt_skill_selection(
+                RecordExecutionPromptSkillSelectionV1(
+                    execution_id=snapshot.execution_id,
+                    expected_version=snapshot.version,
+                    fencing_token=snapshot.lease.fencing_token,
+                    selection=admitted,
+                )
+            )
+        resolver_request = self._resolver_request(
+            attempt=attempt,
+            snapshot=snapshot,
+            original_user_input=original_user_input,
+            resolver_context=resolver_context,
+            selected_skills=selected_skills,
+        )
+        return snapshot, selected_skills, resolver_request
+
     def project(
         self,
         *,
         snapshot: ExecutionSnapshotV1,
         recent_tail: list[ContextExchangeV3],
         summary: ContextSummaryInputV4 | None,
-    ) -> str:
+    ) -> tuple[ExecutionSnapshotV1, str]:
         projection = self._projections.get_input_projection(snapshot.execution_id)
         if projection is None:
             raise RuntimeError("turn input projection is missing")
@@ -429,30 +667,13 @@ class ProviderTurnInputProjector:
             ],
         }
         try:
-            resolver_request = ProviderConversationRequest(
-                messages=[
-                    ProviderSystemMessage(
-                        content=_stage_system_prompt(_RESOLVER_SYSTEM_PROMPT)
-                    ),
-                    ProviderUserMessage(
-                        content=_canonical(
-                            {
-                                "original_user_input": projection.original_user_input,
-                                "authorized_rewritten_context": resolver_context,
-                            }
-                        )
-                    ),
-                ],
-                tools=[],
-                tool_choice="none",
-                parallel_tool_calls=False,
-                max_output_tokens=attempt.route.runtime_policy.max_output_tokens_per_invocation,
-                timeout_seconds=min(
-                    float(
-                        attempt.route.runtime_policy.provider_invocation_timeout_seconds
-                    ),
-                    self._remaining_seconds(snapshot),
-                ),
+            snapshot, _selected_skills, resolver_request = (
+                self._select_understanding_skills(
+                    snapshot=snapshot,
+                    attempt=attempt,
+                    original_user_input=projection.original_user_input,
+                    resolver_context=resolver_context,
+                )
             )
             resolver_output, resolver_invocation_ref = self._invoke(
                 stage="resolver",
@@ -545,7 +766,7 @@ class ProviderTurnInputProjector:
                 rewrite_invocation_ref=rewrite_invocation_ref,
             )
         )
-        return rewritten
+        return snapshot, rewritten
 
 
 __all__ = ["ProviderTurnInputProjector", "TurnInputProjectionFailure"]

@@ -500,6 +500,9 @@ def build_api_composition(
         audit=strict_audit,
         evaluator=StrictPostHocClaimEvaluator(model_routing, strict_runtime),
         reasoning_model=strict_turn_model,
+        skill_selector_model=strict_turn_model,
+        prompt_skill_catalog=prompt_skill_owner,
+        prompt_skill_exact_reader=prompt_skill_owner,
     )
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
     conversations = PostgresConversationV1Adapter(session_factory)
@@ -513,6 +516,7 @@ def build_api_composition(
         retrieval=strict_retrieval,
         generation_retention=generation_retention,
         runtime=strict_runtime,
+        prompt_skill_catalog=prompt_skill_owner,
         results=strict_results,
         citations=strict_citations,
         audits=strict_audit,
@@ -527,7 +531,12 @@ def build_api_composition(
                 model_routing, strict_runtime
             ),
             input_projector=ProviderTurnInputProjector(
-                model_routing, strict_contexts, strict_runtime
+                model_routing,
+                strict_contexts,
+                strict_runtime,
+                prompt_skill_catalog=prompt_skill_owner,
+                prompt_skill_exact_reader=prompt_skill_owner,
+                skill_selector_model=strict_turn_model,
             ),
             answer_behavior=answer_behavior_owner,
         ),
