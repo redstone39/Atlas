@@ -2,6 +2,7 @@ import type { AdminActionResult } from "../../shared/api-contracts";
 import { requestJson } from "../../shared/api-client";
 import type {
   DirectoryProfileSummary,
+  EditableSystemRole,
   UserAdminFilters,
   UserAdminListResult,
   UserInviteCreateResult,
@@ -46,12 +47,16 @@ export const userAdministrationApi = {
       `/api/v1/admin/users${query ? `?${query}` : ""}`,
     );
   },
-  updateUserProfile: (actorId: string, displayName: string) =>
+  updateUserDetails: (
+    actorId: string,
+    updates: { displayName?: string; systemRole?: EditableSystemRole },
+  ) =>
     requestJson<AdminActionResult>(`/api/v1/admin/users/${actorId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        display_name: displayName,
-        idempotency_key: `user-profile-${actorId}`,
+        ...(updates.displayName !== undefined ? { display_name: updates.displayName } : {}),
+        ...(updates.systemRole !== undefined ? { system_role: updates.systemRole } : {}),
+        idempotency_key: `user-details-${actorId}-${updates.systemRole ?? "profile"}`,
       }),
     }),
   updateUserActive: (actorId: string, active: boolean) =>

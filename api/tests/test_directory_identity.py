@@ -192,7 +192,12 @@ class FakeRepository:
         return bool(actor and actor.active and actor.system_role == "admin")
 
     def active_admin_count(self):
-        return 1
+        return sum(
+            user.actor_type == "user"
+            and user.active
+            and user.system_role == "admin"
+            for user in self.users.values()
+        )
 
     def append_audit(self, command):
         event = AuditEventRecord(
@@ -1063,6 +1068,75 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
     )
     assert local_profile_edit.status_code == 200
     assert repository.users["local"].display_name == "Updated Local User"
+    promoted = client.patch(
+        "/api/v1/admin/users/local",
+        json={
+            "system_role": "admin",
+            "idempotency_key": "promote-local-admin",
+        },
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["message_code"] == "identity.system_admin_access_is_updated"
+    assert repository.users["local"].system_role == "admin"
+    promotion_audit = repository.audits[-1]
+    assert promotion_audit.event_type == "user_lifecycle_updated"
+    assert promotion_audit.message_code == "identity.system_admin_access_is_updated"
+    assert promotion_audit.metadata == {"active": True, "system_role": "admin"}
+
+    demoted = client.patch(
+        "/api/v1/admin/users/local",
+        json={
+            "system_role": "user",
+            "idempotency_key": "demote-other-admin",
+        },
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["message_code"] == "identity.system_admin_access_is_updated"
+    assert repository.users["local"].system_role == "user"
+    demotion_audit = repository.audits[-1]
+    assert demotion_audit.event_type == "user_lifecycle_updated"
+    assert demotion_audit.message_code == "identity.system_admin_access_is_updated"
+    assert demotion_audit.metadata == {"active": True, "system_role": "user"}
+
+    directory_display_name = repository.users[actor_id].display_name
+    directory_role_update = client.patch(
+        f"/api/v1/admin/users/{actor_id}",
+        json={
+            "system_role": "admin",
+            "idempotency_key": "promote-directory-user",
+        },
+    )
+    assert directory_role_update.status_code == 200
+    assert (
+        directory_role_update.json()["message_code"]
+        == "identity.system_admin_access_is_updated"
+    )
+    assert repository.users[actor_id].system_role == "admin"
+    assert repository.users[actor_id].display_name == directory_display_name
+    directory_role_audit = repository.audits[-1]
+    assert directory_role_audit.event_type == "user_lifecycle_updated"
+    assert (
+        directory_role_audit.message_code
+        == "identity.system_admin_access_is_updated"
+    )
+    assert directory_role_audit.metadata == {
+        "active": True,
+        "system_role": "admin",
+    }
+
+    self_demotion = client.patch(
+        "/api/v1/admin/users/admin",
+        json={
+            "system_role": "user",
+            "idempotency_key": "reject-self-demotion",
+        },
+    )
+    assert self_demotion.status_code == 422
+    assert (
+        self_demotion.json()["message_code"]
+        == "identity.cannot_remove_own_admin_role"
+    )
+    assert repository.users["admin"].system_role == "admin"
     filtered = client.get(
         "/api/v1/admin/users",
         params={
@@ -1095,6 +1169,19 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
     member_client = TestClient(create_app(ApiComposition(**values)))
     denied = member_client.get("/api/v1/admin/directory-connections")
     assert denied.status_code == 403
+    denied_role_update = member_client.patch(
+        f"/api/v1/admin/users/{actor_id}",
+        json={
+            "system_role": "user",
+            "idempotency_key": "non-admin-role-update",
+        },
+    )
+    assert denied_role_update.status_code == 403
+    assert (
+        denied_role_update.json()["message_code"]
+        == "permission.admin_permission_is_required"
+    )
+    assert repository.users[actor_id].system_role == "admin"
 
 def test_http_directory_login_sets_cookie_and_never_falls_back() -> None:
     directory, repository, gateway = service_fixture()

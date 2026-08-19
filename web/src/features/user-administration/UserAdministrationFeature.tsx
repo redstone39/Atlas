@@ -45,6 +45,7 @@ import {
 } from "../../components/ui/select";
 import { Spinner } from "../../components/ui/spinner";
 import { useIsMobile } from "../../hooks/use-mobile";
+import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
 import type { MessageReference } from "../../shared/user-messages";
 import {
   Table,
@@ -65,8 +66,13 @@ import {
   clickableSurfaceClassName,
   serverMessage,
 } from "../../shared/product-ui";
+import { DirectoryUserImportFeature } from "../directory-administration";
 import { userAdministrationApi } from "./api";
-import type { UserAdminFilters, UserAdminSummary } from "./types";
+import type {
+  EditableSystemRole,
+  UserAdminFilters,
+  UserAdminSummary,
+} from "./types";
 import {
   adminUserDetailRoute,
   type AppRoute,
@@ -77,6 +83,8 @@ type UserAction = MessageReference & {
   local_pilot_acceptance?: { acceptance_url: string } | null;
 };
 
+
+const editableSystemRoleValues: EditableSystemRole[] = ["user", "admin"];
 export function UserAdministrationFeature({
   currentActorId,
   detail,
@@ -99,6 +107,7 @@ export function UserAdministrationFeature({
   const [email, setEmail] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
   const [editDisplayName, setEditDisplayName] = useState("");
+  const [editSystemRole, setEditSystemRole] = useState<EditableSystemRole>("user");
   const [inviteLink, setInviteLink] = useState("");
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
@@ -133,15 +142,25 @@ export function UserAdministrationFeature({
     if (editableUsers.length === 0 || !detail) {
       setSelectedUserId("");
       setEditDisplayName("");
+      setEditSystemRole("user");
+      setShowEditUser(false);
       return;
     }
     const routedUser = editableUsers.find((user) => user.actor_id === detail.actorId);
     if (routedUser) {
       setSelectedUserId(routedUser.actor_id);
       setEditDisplayName(routedUser.display_name);
+      if (editableSystemRoleValues.includes(routedUser.system_role as EditableSystemRole)) {
+        setEditSystemRole(routedUser.system_role as EditableSystemRole);
+      } else {
+        setEditSystemRole("user");
+      }
+      setShowEditUser(false);
     } else {
       setSelectedUserId("");
       setEditDisplayName("");
+      setEditSystemRole("user");
+      setShowEditUser(false);
     }
   }, [editableUsers, detail?.actorId]);
 
@@ -164,6 +183,7 @@ export function UserAdministrationFeature({
     actionName: string,
     action: () => Promise<UserAction>,
     onSuccess?: () => void,
+    requireCanonicalRefresh = false,
   ) {
     setPendingAction(actionName);
     setActionError("");
@@ -176,10 +196,22 @@ export function UserAdministrationFeature({
       if (actionName.startsWith("invite-revoke-")) {
         setInviteLink("");
       }
-      onNotice(result.message_code);
-      toast.success(message);
+      if (!requireCanonicalRefresh) {
+        onNotice(result.message_code);
+        toast.success(message);
+      }
       const refreshedUsers = await refreshUsers();
       await onRefresh();
+      if (requireCanonicalRefresh && !refreshedUsers) {
+        const refreshError = t("common.requestFailed");
+        setActionError(refreshError);
+        toast.error(refreshError);
+        return;
+      }
+      if (requireCanonicalRefresh) {
+        onNotice(result.message_code);
+        toast.success(message);
+      }
       if (
         detail &&
         refreshedUsers &&
@@ -228,11 +260,20 @@ export function UserAdministrationFeature({
     (user) => user.actor_type === "user" && user.system_role === "admin" && user.active,
   ).length;
   const canCreateInvite = Boolean(displayName.trim() && email.trim());
-  const canSaveUser = Boolean(
+  const trimmedEditDisplayName = editDisplayName.trim();
+  const displayNameChanged = Boolean(
     selectedUser &&
-      editDisplayName.trim() &&
-      editDisplayName.trim() !== selectedUser.display_name,
+      selectedUser.account_source === "local" &&
+      editDisplayName !== selectedUser.display_name &&
+      trimmedEditDisplayName &&
+      trimmedEditDisplayName !== selectedUser.display_name,
   );
+  const systemRoleChanged = Boolean(
+    selectedUser &&
+      canEditSystemRole(selectedUser) &&
+      editSystemRole !== selectedUser.system_role,
+  );
+  const canSaveUser = displayNameChanged || systemRoleChanged;
 
   function canToggleLifecycle(user: UserAdminSummary) {
     if (user.actor_type !== "user") return false;
@@ -247,6 +288,54 @@ export function UserAdministrationFeature({
 
   function canRevokeInvite(user: UserAdminSummary) {
     return Boolean(user.invite_id && user.invite_status === "pending");
+  }
+
+  function canEditSystemRole(user: UserAdminSummary) {
+    return (
+      user.actor_type === "user" &&
+      user.actor_id !== currentActorId &&
+      editableSystemRoleValues.includes(user.system_role as EditableSystemRole) &&
+      user.invite_status !== "pending"
+    );
+  }
+
+  function canEditDisplayName(user: UserAdminSummary) {
+    return user.actor_type === "user" && user.account_source === "local";
+  }
+
+  function canOpenUserEditor(user: UserAdminSummary) {
+    return canEditDisplayName(user) || canEditSystemRole(user);
+  }
+
+  function systemRoleLabel(user: UserAdminSummary) {
+    return t(`users.role.${user.system_role}`);
+  }
+
+  function systemRoleDescription(user: UserAdminSummary) {
+    if (canEditSystemRole(user)) return t("users.systemRoleEditable");
+    if (user.actor_id === currentActorId) return t("users.systemRoleReadonlySelf");
+    if (user.system_role === "operator") return t("users.systemRoleReadonlyOperator");
+    if (user.invite_status === "pending") return t("users.systemRoleReadonlyPending");
+    return t("users.systemRoleReadonly");
+  }
+
+  function resetUserDraft(user: UserAdminSummary) {
+    setEditDisplayName(user.display_name);
+    setEditSystemRole(
+      editableSystemRoleValues.includes(user.system_role as EditableSystemRole)
+        ? (user.system_role as EditableSystemRole)
+        : "user",
+    );
+  }
+
+  function showUserEditor(user: UserAdminSummary) {
+    resetUserDraft(user);
+    setShowEditUser(true);
+  }
+
+  function closeUserEditor() {
+    if (selectedUser) resetUserDraft(selectedUser);
+    setShowEditUser(false);
   }
 
   function resetInviteDraft() {
@@ -296,6 +385,11 @@ export function UserAdministrationFeature({
     setFilterEmployeeId("");
     setAppliedFilters({});
     void refreshUsers({});
+  }
+
+  async function refreshImportedUsers() {
+    await refreshUsers();
+    await onRefresh();
   }
 
   function sourceBadge(user: UserAdminSummary) {
@@ -425,16 +519,13 @@ export function UserAdministrationFeature({
                 title={selectedUser.display_name}
                 description={userContactLabel(selectedUser)}
               />
-              {selectedUser.account_source === "local" ? (
+              {canOpenUserEditor(selectedUser) ? (
                 <Button
                   variant="outline"
-                  onClick={() => {
-                    setEditDisplayName(selectedUser.display_name);
-                    setShowEditUser(true);
-                  }}
+                  onClick={() => showUserEditor(selectedUser)}
                 >
                   <Save data-icon="inline-start" />
-                  {t("admin.editProfile")}
+                  {t("users.editTitle")}
                 </Button>
               ) : null}
             </div>
@@ -459,7 +550,7 @@ export function UserAdministrationFeature({
                 </div>
                 <div>
                   <div className="text-sm text-muted-foreground">{t("users.systemRole")}</div>
-                  <Badge variant="outline">{selectedUser.system_role}</Badge>
+                  <Badge variant="outline">{systemRoleLabel(selectedUser)}</Badge>
                 </div>
                 <div>
                   <div className="text-sm text-muted-foreground">{t("users.accountSource")}</div>
@@ -547,6 +638,10 @@ export function UserAdministrationFeature({
           {t("admin.createInvite")}
         </Button>
       </div>
+      <DirectoryUserImportFeature
+        onImported={refreshImportedUsers}
+        onNotice={onNotice}
+      />
       <Card>
         <CardHeader>
           <CardTitle>{t("users.filters")}</CardTitle>
@@ -637,7 +732,7 @@ export function UserAdministrationFeature({
                           {userContactLabel(user)}
                         </div>
                       </div>
-                      <Badge variant="outline">{user.system_role}</Badge>
+                      <Badge variant="outline">{systemRoleLabel(user)}</Badge>
                     </div>
                     <div className="mt-3 grid gap-2 text-sm">
                       <div className="flex items-center justify-between gap-3">
@@ -707,7 +802,7 @@ export function UserAdministrationFeature({
                       <TableCell>{userContactLabel(user)}</TableCell>
                       <TableCell>{sourceBadge(user)}</TableCell>
                       <TableCell>
-                        <Badge variant="outline">{user.system_role}</Badge>
+                        <Badge variant="outline">{systemRoleLabel(user)}</Badge>
                       </TableCell>
                       <TableCell>
                         <StatusBadge
@@ -824,7 +919,12 @@ export function UserAdministrationFeature({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={showEditUser} onOpenChange={setShowEditUser}>
+      <Dialog
+        open={showEditUser}
+        onOpenChange={(open) => {
+          if (!open) closeUserEditor();
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t("users.editTitle")}</DialogTitle>
@@ -844,46 +944,73 @@ export function UserAdministrationFeature({
                   </div>
                 </div>
               </Field>
-              <Field>
-                <FieldLabel htmlFor="edit-user-name">{t("users.name")}</FieldLabel>
-                <Input
-                  id="edit-user-name"
-                  value={editDisplayName}
-                  onChange={(event) => setEditDisplayName(event.target.value)}
-                  disabled={!selectedUser}
-                />
-              </Field>
-              <Field>
-                <FieldTitle>{t("users.systemRole")}</FieldTitle>
-                <Badge variant="outline">{selectedUser?.system_role ?? "-"}</Badge>
-                <FieldDescription>{t("users.systemRoleLocked")}</FieldDescription>
-              </Field>
+              {selectedUser && canEditDisplayName(selectedUser) ? (
+                <Field>
+                  <FieldLabel htmlFor="edit-user-name">{t("users.name")}</FieldLabel>
+                  <Input
+                    id="edit-user-name"
+                    value={editDisplayName}
+                    onChange={(event) => setEditDisplayName(event.target.value)}
+                    disabled={pendingAction === `user-details-${selectedUser.actor_id}`}
+                  />
+                </Field>
+              ) : null}
+              {selectedUser && canEditSystemRole(selectedUser) ? (
+                <Field>
+                  <FieldLabel htmlFor="edit-user-system-role">{t("users.systemRole")}</FieldLabel>
+                  <OptionSelect<EditableSystemRole>
+                    id="edit-user-system-role"
+                    value={editSystemRole}
+                    options={
+                      [
+                        { value: "user", label: t("users.role.user") },
+                        { value: "admin", label: t("users.role.admin") },
+                      ] satisfies OptionSelectItem<EditableSystemRole>[]
+                    }
+                    onValueChange={setEditSystemRole}
+                    disabled={pendingAction === `user-details-${selectedUser.actor_id}`}
+                  />
+                  <FieldDescription>{systemRoleDescription(selectedUser)}</FieldDescription>
+                </Field>
+              ) : selectedUser ? (
+                <Field>
+                  <FieldTitle>{t("users.systemRole")}</FieldTitle>
+                  <Badge variant="outline">{systemRoleLabel(selectedUser)}</Badge>
+                  <FieldDescription>{systemRoleDescription(selectedUser)}</FieldDescription>
+                </Field>
+              ) : null}
             </FieldGroup>
           </FieldSet>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowEditUser(false)}>
+            <Button variant="outline" onClick={closeUserEditor}>
               {t("admin.cancel")}
             </Button>
             <Button
-              onClick={() =>
-                selectedUser &&
-                runAction(
-                  `user-profile-${selectedUser.actor_id}`,
-                  () =>
-                    userAdministrationApi.updateUserProfile(
-                      selectedUser.actor_id,
-                      editDisplayName.trim(),
-                    ),
-                  () => setShowEditUser(false),
-                )
-              }
+              onClick={() => {
+                if (!selectedUser) return;
+                const updates = {
+                  ...(displayNameChanged ? { displayName: trimmedEditDisplayName } : {}),
+                  ...(systemRoleChanged ? { systemRole: editSystemRole } : {}),
+                };
+                void runAction(
+                  `user-details-${selectedUser.actor_id}`,
+                  () => userAdministrationApi.updateUserDetails(selectedUser.actor_id, updates),
+                  closeUserEditor,
+                  true,
+                );
+              }}
               disabled={
                 !selectedUser ||
                 !canSaveUser ||
-                pendingAction === `user-profile-${selectedUser.actor_id}`
+                pendingAction === `user-details-${selectedUser.actor_id}`
               }
             >
-              <Save data-icon="inline-start" />
+              {selectedUser &&
+              pendingAction === `user-details-${selectedUser.actor_id}` ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Save data-icon="inline-start" />
+              )}
               {t("users.saveUser")}
             </Button>
           </DialogFooter>

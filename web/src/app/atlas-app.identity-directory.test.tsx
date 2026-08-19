@@ -36,7 +36,7 @@ beforeEach(() => {
 afterEach(cleanupAppTest);
 
 describe("Atlas production web: identity-directory", () => {
-it("/admin/directory creates, tests, searches, imports, and exposes read-only directory profiles", async () => {
+it("/admin/directory manages sources while /admin/users imports directory users", async () => {
     window.history.pushState({}, "", "/admin/directory");
     mockApi(adminSession, readyReadiness);
     const normalFetch = global.fetch;
@@ -102,14 +102,8 @@ it("/admin/directory creates, tests, searches, imports, and exposes read-only di
       .find((element): element is HTMLElement => element !== null)!;
     expect(connectionCard).not.toHaveTextContent("bind-secret-canary");
     expect(connectionCard).not.toHaveTextContent("ca-secret-canary");
-    fireEvent.change(screen.getByLabelText("Name, email, or username"), {
-      target: { value: "a" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada Lovelace" }));
-    fireEvent.click(within(connectionCard).getByRole("button", { name: "Test connection" }));
-    expect(await screen.findByText(/Directory connection test passed/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name, email, or username")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Test connection" })).not.toBeInTheDocument();
     fireEvent.click(within(connectionCard).getByRole("button", { name: "Edit directory" }));
     const editDialog = await screen.findByRole("dialog");
     expect(
@@ -165,8 +159,8 @@ it("/admin/directory creates, tests, searches, imports, and exposes read-only di
       expect(body).not.toHaveProperty("clear_custom_ca");
       expect(within(editDialog).queryByLabelText("Clear the saved custom CA and use the system trust store")).not.toBeInTheDocument();
     });
-    expect(screen.queryByText("Ada Lovelace")).not.toBeInTheDocument();
-
+    fireEvent.click(screen.getByRole("button", { name: "Users" }));
+    expect(await screen.findByRole("heading", { name: "Users" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name, email, or username"), {
       target: { value: "a" },
     });
@@ -178,8 +172,6 @@ it("/admin/directory creates, tests, searches, imports, and exposes read-only di
     fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
     expect(await screen.findByText(/Directory users imported/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Users" }));
-    expect(await screen.findByRole("heading", { name: "Users" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Search users"), {
       target: { value: "compiler" },
     });
@@ -194,7 +186,7 @@ it("/admin/directory creates, tests, searches, imports, and exposes read-only di
 
     fireEvent.click(screen.getByText("Grace Hopper"));
     expect(await screen.findByRole("heading", { name: "Grace Hopper" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Edit profile" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit user" })).toBeInTheDocument();
     expect(screen.getByText("grace")).toBeInTheDocument();
     expect(screen.getByText("Compiler")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Refresh profile" }));
@@ -216,7 +208,7 @@ it("/admin/directory creates, tests, searches, imports, and exposes read-only di
     expect(createBody).not.toHaveProperty("custom_ca_pem");
   });
 
-it("/admin/users owns invite and user lifecycle controls", async () => {
+it("/admin/users owns server-confirmed system role and lifecycle controls", async () => {
     // acceptance-scenario:SYS-01
     window.history.pushState({}, "", "/admin/users");
     mockApi(adminSession, readyReadiness);
@@ -225,11 +217,8 @@ it("/admin/users owns invite and user lifecycle controls", async () => {
     expect(await screen.findByRole("heading", { name: "Users" })).toBeInTheDocument();
     expect(global.fetch).not.toHaveBeenCalledWith("/api/v1/admin/projects", expect.any(Object));
     expect(screen.queryByRole("button", { name: /deactivate atlas admin/i })).not.toBeInTheDocument();
-    expect(await screen.findByText("Engineer One")).toBeInTheDocument();
-    expect(await screen.findByText("Invited Engineer")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
-    const engineerRow = screen.getByRole("button", { name: /^Engineer One$/ });
-    expect(engineerRow).toHaveAttribute("tabindex", "0");
+
+    const engineerRow = await screen.findByRole("button", { name: /^Engineer One$/ });
     engineerRow.focus();
     expect(engineerRow).toHaveFocus();
     fireEvent.keyDown(engineerRow, { key: " " });
@@ -237,45 +226,122 @@ it("/admin/users owns invite and user lifecycle controls", async () => {
       expect(window.location.pathname).toBe("/admin/users/user-engineer-001"),
     );
     expect(await screen.findByRole("heading", { name: "Engineer One" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    expect(screen.getByText("Standard user")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
     let dialog = await screen.findByRole("dialog");
-    expect(within(dialog).queryByLabelText("Select user")).not.toBeInTheDocument();
-    expect(within(dialog).getByText("Engineer One")).toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText("Name"), {
       target: { value: "Discarded User Draft" },
     });
+    await chooseDialogOption(dialog, "System role", "System Admin");
     fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
     dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("Name")).toHaveValue("Engineer One");
+    expect(within(dialog).getByLabelText("System role")).toHaveTextContent("Standard user");
     fireEvent.change(within(dialog).getByLabelText("Name"), {
       target: { value: "Engineer One Edited" },
     });
-    expect(within(dialog).queryByLabelText("System role")).not.toBeInTheDocument();
-    expect(within(dialog).getByText("user")).toBeInTheDocument();
-    expect(within(dialog).getByText(/System role changes are handled later/i)).toBeInTheDocument();
+    await chooseDialogOption(dialog, "System role", "System Admin");
     fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
-    expect(await screen.findByText(/User profile is updated/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /set permission engineer one/i }))
-      .not.toBeInTheDocument();
-    expect(global.fetch).not.toHaveBeenCalledWith("/api/v1/admin/projects", expect.any(Object));
+    expect(await screen.findByText(/System administrator access has been updated/))
+      .toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "Engineer One Edited" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("System Admin")).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/user-engineer-001",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          display_name: "Engineer One Edited",
+          system_role: "admin",
+          idempotency_key: "user-details-user-engineer-001-admin",
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    dialog = await screen.findByRole("dialog");
+    await chooseDialogOption(dialog, "System role", "Standard user");
+    fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("Standard user")).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/user-engineer-001",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          system_role: "user",
+          idempotency_key: "user-details-user-engineer-001-user",
+        }),
+      }),
+    );
+
     fireEvent.click(screen.getByRole("link", { name: "Users" }));
     await waitFor(() => expect(window.location.pathname).toBe("/admin/users"));
-    fireEvent.click(screen.getByRole("button", { name: /create invite/i }));
+    const refreshedEngineerRow = await screen.findByRole("button", {
+      name: "Engineer One Edited",
+    });
+    expect(within(refreshedEngineerRow).getByText("Standard user")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Atlas Admin" }));
+    expect(await screen.findByRole("heading", { name: "Atlas Admin" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
     dialog = await screen.findByRole("dialog");
-    fireEvent.change(within(dialog).getByLabelText("Member name"), {
-      target: { value: "Discarded Invite" },
-    });
-    fireEvent.change(within(dialog).getByLabelText("Member email"), {
-      target: { value: "discarded@example.test" },
-    });
+    expect(within(dialog).queryByLabelText("System role")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("You cannot change your own system role."))
+      .toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    fireEvent.click(screen.getByRole("link", { name: "Users" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Atlas Operator" }));
+    expect(await screen.findByRole("heading", { name: "Atlas Operator" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("System role")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Operator access cannot be changed here."))
+      .toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    fireEvent.click(screen.getByRole("link", { name: "Users" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Invited Engineer" }));
+    expect(await screen.findByRole("heading", { name: "Invited Engineer" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("System role")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("A pending invitation receives its role when accepted."))
+      .toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    fireEvent.click(screen.getByRole("link", { name: "Users" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Directory User" }));
+    expect(await screen.findByRole("heading", { name: "Directory User" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("System role")).toHaveTextContent("Standard user");
+    await chooseDialogOption(dialog, "System role", "System Admin");
+    fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("System Admin")).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/user-directory-existing",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          system_role: "admin",
+          idempotency_key: "user-details-user-directory-existing-admin",
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "Users" }));
     fireEvent.click(screen.getByRole("button", { name: /create invite/i }));
     dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByLabelText("Member name")).toHaveValue("");
-    expect(within(dialog).getByLabelText("Member email")).toHaveValue("");
     fireEvent.change(within(dialog).getByLabelText("Member name"), {
       target: { value: "Engineer One" },
     });
@@ -284,35 +350,125 @@ it("/admin/users owns invite and user lifecycle controls", async () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: /create invite/i }));
     expect(await screen.findByText(/Invite is ready/)).toBeInTheDocument();
-    expect(await screen.findByDisplayValue(/atlas_invite_visible_once/)).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: /create invite/i }));
-    dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByLabelText("Member name")).toHaveValue("");
-    expect(within(dialog).getByLabelText("Member email")).toHaveValue("");
-    expect(within(dialog).queryByText(/Invite is ready/)).not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
     fireEvent.click(screen.getByRole("button", { name: /revoke invite invited engineer/i }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent(
-      "Invited Engineer will be updated immediately. Continue?",
-    );
-    expect(global.fetch).not.toHaveBeenCalledWith(
-      "/api/v1/admin/user-invites/inv-pending/revoke",
-      expect.objectContaining({ method: "POST" }),
-    );
     await confirmDestructiveAction(/revoke invite/i);
     expect(await screen.findByText(/Invite has been revoked/)).toBeInTheDocument();
-    expect(global.fetch).toHaveBeenCalledWith(
-      "/api/v1/admin/user-invites/inv-pending/revoke",
-      expect.objectContaining({ method: "POST" }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /deactivate engineer one/i }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent(
-      "Engineer One will be updated immediately. Continue?",
-    );
+    fireEvent.click(screen.getByRole("button", { name: /deactivate engineer one edited/i }));
     await confirmDestructiveAction(/deactivate/i);
     expect(await screen.findByText(/User access has been removed/)).toBeInTheDocument();
+  });
+
+it("omits an untouched padded canonical name from a role-only update", async () => {
+    window.history.pushState({}, "", "/admin/users/user-padded-001");
+    mockApi(adminSession, readyReadiness);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Padded User" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("Name")).toHaveValue(" Padded User ");
+    await chooseDialogOption(dialog, "System role", "System Admin");
+    fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/users/user-padded-001",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          system_role: "admin",
+          idempotency_key: "user-details-user-padded-001-admin",
+        }),
+      }),
+    );
+    expect(await screen.findByRole("heading", { name: "Padded User" })).toBeInTheDocument();
+  });
+
+it("keeps the canonical role and edit draft when the server rejects a role update", async () => {
+    window.history.pushState({}, "", "/admin/users/user-engineer-001");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (
+        String(input) === "/api/v1/admin/users/user-engineer-001" &&
+        init?.method === "PATCH"
+      ) {
+        return jsonResponse(
+          {
+            error_code: "admin_action_rejected",
+            message_code: "identity.active_admin_required",
+            request_id: "user-details-user-engineer-001-admin",
+            message_params: {},
+          },
+          422,
+        );
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Engineer One" })).toBeInTheDocument();
+    expect(screen.getByText("Standard user")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    const dialog = await screen.findByRole("dialog");
+    await chooseDialogOption(dialog, "System role", "System Admin");
+    fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
+
+    expect(await screen.findByText("At least one active administrator is required."))
+      .toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("System role")).toHaveTextContent("System Admin");
+    expect(screen.getByText("Standard user")).toBeInTheDocument();
+  });
+
+it("waits for a canonical users refresh before completing a role update", async () => {
+    window.history.pushState({}, "", "/admin/users/user-engineer-001");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    let failNextUsersRefresh = false;
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (
+        String(input) === "/api/v1/admin/users/user-engineer-001" &&
+        init?.method === "PATCH"
+      ) {
+        failNextUsersRefresh = true;
+        return normalFetch(input, init);
+      }
+      if (
+        String(input) === "/api/v1/admin/users" &&
+        (init?.method ?? "GET") === "GET" &&
+        failNextUsersRefresh
+      ) {
+        failNextUsersRefresh = false;
+        return jsonResponse(
+          {
+            message_code: "common.request_failed",
+            message_params: {},
+          },
+          503,
+        );
+      }
+      return normalFetch(input, init);
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Engineer One" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit user" }));
+    const dialog = await screen.findByRole("dialog");
+    await chooseDialogOption(dialog, "System role", "System Admin");
+    fireEvent.click(within(dialog).getByRole("button", { name: /save user/i }));
+
+    expect((await screen.findAllByText("The request could not be completed. Please try again.")).length)
+      .toBeGreaterThan(0);
+    expect(screen.queryByText("System administrator access has been updated."))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("System role")).toHaveTextContent("System Admin");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("System Admin")).toBeInTheDocument();
   });
 
 it("does not expose service accounts through human User detail routes", async () => {

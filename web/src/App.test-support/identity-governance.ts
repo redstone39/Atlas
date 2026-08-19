@@ -138,6 +138,69 @@ export function createIdentityGovernanceHandler(
       account_source: "local",
       directory_profile: null,
     },
+    {
+      actor_id: "user-operator-001",
+      actor_type: "user",
+      display_name: "Atlas Operator",
+      email: "operator@example.test",
+      system_role: "operator",
+      active: true,
+      created_at: "2026-07-08T00:00:00Z",
+      invite_status: "accepted",
+      invite_id: "inv-operator",
+      account_source: "local",
+      directory_profile: null,
+    },
+    {
+      actor_id: "user-directory-existing",
+      actor_type: "user",
+      display_name: "Directory User",
+      email: "directory.user@example.test",
+      system_role: "user",
+      active: true,
+      created_at: "2026-07-08T00:00:00Z",
+      invite_status: "accepted",
+      invite_id: null,
+      account_source: "directory",
+      directory_profile: {
+        connection_id: "existing-directory",
+        connection_display_name: "Existing directory",
+        username: "directory.user",
+        email: "directory.user@example.test",
+        groups: ["Research"],
+        department: "Engineering",
+        title: "Programmer",
+        employee_id: "E-200",
+        status: "current",
+        last_refreshed_at: "2026-07-08T00:00:00Z",
+      },
+    },
+    {
+      actor_id: "user-padded-001",
+      actor_type: "user",
+      display_name: " Padded User ",
+      email: "padded@example.test",
+      system_role: "user",
+      active: true,
+      created_at: "2026-07-08T00:00:00Z",
+      invite_status: "accepted",
+      invite_id: "inv-padded",
+      account_source: "local",
+      directory_profile: null,
+    },
+    {
+      actor_id: "agent-layout-review-001",
+      actor_type: "service_account",
+      display_name: "Layout Review Agent",
+      email: null,
+      system_role: "user",
+      active: true,
+      created_at: "2026-07-08T00:00:00Z",
+      invite_status: null,
+      invite_id: null,
+      account_source: "local",
+      directory_profile: null,
+    },
   ];
   let teamMemberships: TeamMembershipRecord[] = [
     {
@@ -449,28 +512,40 @@ export function createIdentityGovernanceHandler(
       });
       return jsonResponse({ users });
     }
-    if (
-      url.pathname === "/api/v1/admin/users/user-engineer-001" &&
-      method === "PATCH"
-    ) {
+    const userUpdateMatch = url.pathname.match(/^\/api\/v1\/admin\/users\/([^/]+)$/);
+    if (userUpdateMatch && method === "PATCH") {
+      const actorId = decodeURIComponent(userUpdateMatch[1]);
       const body = JSON.parse(String(init?.body ?? "{}"));
+      adminUsers = adminUsers.map((user) =>
+        user.actor_id === actorId
+          ? {
+              ...user,
+              ...(typeof body.display_name === "string"
+                ? { display_name: body.display_name }
+                : {}),
+              ...(body.system_role === "user" ||
+              body.system_role === "admin" ||
+              body.system_role === "operator"
+                ? { system_role: body.system_role }
+                : {}),
+              ...(typeof body.active === "boolean" ? { active: body.active } : {}),
+            }
+          : user,
+      );
+      const messageCode =
+        body.active === false
+          ? "identity.user_has_been_removed"
+          : body.active === true
+            ? "identity.user_has_been_reactivated"
+            : body.system_role !== undefined
+              ? "identity.system_admin_access_is_updated"
+              : "processing.user_profile_is_updated";
       return jsonResponse({
-        request_id: "user-engineer-001-update",
+        request_id: body.idempotency_key,
         status: "applied",
-        target_ref: "user:user-engineer-001",
-        message_code: body.active === false ? "identity.user_has_been_removed" : "processing.user_profile_is_updated", message_params: {},
-        audit_event_ref: "audit-user-updated",
-      });
-    }
-    if (
-      url.pathname === "/api/v1/admin/users/user-admin-001" &&
-      method === "PATCH"
-    ) {
-      return jsonResponse({
-        request_id: "user-admin-001-update",
-        status: "applied",
-        target_ref: "user:user-admin-001",
-        message_code: "processing.user_profile_is_updated", message_params: {},
+        target_ref: `user:${actorId}`,
+        message_code: messageCode,
+        message_params: {},
         audit_event_ref: "audit-user-updated",
       });
     }

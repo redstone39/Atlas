@@ -1,12 +1,15 @@
 import type { TeamScopeRole } from "../../shared/identity-access-contracts";
 import type { MessageReference } from "../../shared/user-messages";
 
+export type SystemRole = "user" | "admin" | "operator";
+export type EditableSystemRole = Extract<SystemRole, "user" | "admin">;
+
 export interface UserInviteSummary {
   invite_id: string;
   actor_id: string;
   email: string;
   display_name: string;
-  system_role: "user" | "admin" | "operator";
+  system_role: SystemRole;
   status: "pending" | "accepted" | "revoked" | "expired";
   created_at: string;
   expires_at: string;
@@ -65,7 +68,7 @@ export interface UserAdminSummary {
   actor_type: "user" | "service_account";
   display_name: string;
   email: string | null;
-  system_role: string;
+  system_role: SystemRole;
   active: boolean;
   created_at: string;
   invite_status: "pending" | "accepted" | "revoked" | "expired" | null;
