@@ -48,6 +48,16 @@ initializer.
   and savepoints, collaboration epochs, restore commits, settings, and
   attachment metadata. The WebSocket carrier keeps only reconstructible
   in-memory room/timer state and has no durable volume or ACL authority.
+- Identity Access owns canonical user roles, Directory imports, and Team
+  lifecycle. Project Governance owns Project lifecycle and grants. Their
+  `active|retired` state is reversible durable authority; retained relationships
+  and content do not bypass a retired scope.
+- Prompt Skills owns immutable Understanding, Planner, and Answer revisions and
+  category catalogs. Turn Execution pins exact catalog selections; Turn Runtime
+  persists only bounded selection lineage.
+- Turn Experience owns immutable, derived-only completed-execution projections.
+  Its recorder and process-local reconciler consume durable Turn Runtime state;
+  they are not a second execution, answer, or audit authority.
 - Local or SMB storage owns artifact bytes, but it does not grant access or
   define business state.
 - Qdrant supplies semantic candidates. It is not an authorization or lineage
@@ -79,6 +89,14 @@ Architecture ownership and dependency direction are executable in
   scope. Notes connection tickets are short-lived; every accepted sync,
   reconnect, restore, and attachment read rechecks current authorization and
   the collaboration epoch.
+- Retired Projects and Teams fail closed in every operational resolver before
+  protected content is fetched or mutated, including System Admin paths.
+  Reactivation restores only still-active grants and memberships. Active scoped
+  Project Admin and direct human Team Admin mutations accept exactly a name;
+  lifecycle, policy, parent, or inheritance fields make the entire request fail.
+- Notes computes ordered unique contributor actor IDs and enforces the 1 MiB
+  canonical serialized boundary before any savepoint, head, audit, or
+  idempotency mutation. Oversize input is rejected without truncation.
 - Evidence preview requires current authorization and exact immutable lineage.
 - An answer's `evidence_aligned` or `questionable` status is a soft comparison
   with model-declared evidence, not a truth guarantee or formal citation
@@ -115,6 +133,13 @@ authenticated data. Secret values are write-only and never returned. Missing or
 unreadable key material makes directory secret operations unavailable; there is
 no per-connection environment fallback or scheduled directory sync.
 
+Directory connection administration owns source configuration and testing.
+Global directory candidate search and import are consumed by Users
+administration, which reloads canonical users after successful import. Eligible
+human user updates send only changed display-name or `user|admin` role fields;
+the current actor, service accounts, pending invites, and operator identities
+never receive the role control.
+
 ## Provider and model routing
 
 The model-routing owner persists Provider connections, encrypted credentials,
@@ -136,6 +161,18 @@ unless the persisted explicit default is currently eligible.
 - Deep execution uses the existing runtime lease, fence, budgets, tools,
   retrieval, governance, and terminal transaction. It does not add a background
   reasoning service or a second answer authority.
+- Fresh Standard execution pins Understanding and Answer catalogs; fresh Deep
+  execution also pins Planner. Understanding runs once before Resolver, Planner
+  once per Deep plan generation, and Answer once per complete answer candidate.
+  Explicit retry may pin current catalogs; exact replay reuses recorded
+  selections and invocation counts. Selection failure falls back only at the
+  current node and cannot expand tools, ACLs, citation authority, routes, or
+  budgets.
+- A successful terminal commit triggers best-effort Turn Experience recording.
+  Startup backfill and a five-second, at-most-100-item process-local scan use a
+  strict `(scan_sequence, execution_id)` cursor that advances only after the
+  derived Store commit. Store identity and digest rules make exact replay
+  stable; recorder failure never rolls back the completed turn.
 - Workspace receives only allowlisted phase, status, cycle, and message fields.
   Plans, drafts, prompts, Provider payloads, and Provider reasoning are not
   projected to members.
@@ -171,16 +208,19 @@ unless the persisted explicit default is currently eligible.
 - Knowledge: canonical Project/Team and Workspace routes, authorized multi-file
   upload, current processing status, and authorized original content.
 - Notes: scope-bound directories, categories, collaborative block editing,
-  activity/revisions, savepoints, body-only restore, settings, and protected
-  attachments.
+  activity/revisions, bounded savepoints, body-only restore, settings, and
+  protected attachments.
 - Workspace: conversation routes, durable execution status, answers, soft
-  evidence review, protected page evidence, and owner-controlled current
-  helpful/not-helpful feedback on eligible answers.
-- System Admin: users, teams, projects, Provider/model routes with independent
+  evidence review, protected page evidence, owner-controlled current
+  helpful/not-helpful feedback, and bounded safe Skill lineage on eligible
+  turns.
+- System Admin: users and global Directory import, reversible Team and Project
+  lifecycle, three-slot Prompt Skills, Provider/model routes with independent
   text/vision defaults, explicit LDAP/Active Directory transport and scoped
   imports, Notes settings, plugins, agents/tokens, safe audit events, ordered
   completed-turn safe actions, and latest-only read-only feedback in
-  conversation inspection.
+  conversation inspection. Turn Experience recovery has no Admin or Web
+  surface.
 - Agent query management exists, but `POST /api/v1/agent/queries` currently
   returns `501 feature_deferred`.
 

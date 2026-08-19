@@ -93,6 +93,19 @@ the normal governed answer flow. Deep runs a bounded plan, research, evaluation,
 and revision loop under the selected model route's tool, Provider, token, and
 deadline limits.
 
+System Admin manages immutable Prompt Skill revisions from
+`/admin/prompt-skills` in three category-local slots: Understanding, Planner,
+and Answer. Fresh Standard turns pin Understanding and Answer catalogs; fresh
+Deep turns also pin Planner. Exact replay reuses the recorded selections.
+Administration and audit surfaces expose only bounded category, lifecycle, and
+selected revision references, never Skill instructions, Selector reasoning, or
+Provider payloads.
+
+After a completed turn commits, Atlas best-effort materializes a bounded,
+derived Turn Experience record. A process-local startup and periodic reconciler
+scans durable completed executions so a transient recorder failure or process
+restart can converge without adding another operator-facing service or API.
+
 Workspace shows only durable, allowlisted progress phases. System Admin can
 inspect the bounded Atlas-owned plan/evaluation trace and the authoritative,
 ordered model/tool actions recorded for a completed turn. Action projection is
@@ -128,6 +141,16 @@ jobs refresh until terminal state. Notes provide scope-bound categories,
 collaborative block editing, activity, savepoints, body-only restore, and
 protected attachments. Every direct route first checks the caller's current
 scope; Web and the collaboration carrier do not merge or cache ACL authority.
+
+System Admin can retire and reactivate Projects and Teams without deleting
+metadata, grants, memberships, Documents, or Notes. Retired scopes fail closed
+for operational reads and writes, including System Admin bypasses; reactivation
+restores only relationships that are still active. Scoped Project and direct
+human Team administrators may update only the exact scope name.
+
+Notes savepoints reject a canonical contributor attribution payload larger than
+1 MiB before changing a revision, head, audit, or idempotency record. Atlas does
+not truncate the attribution list.
 
 ## Local quick start
 
@@ -217,12 +240,17 @@ changing either default never silently changes the other.
 
 ## LDAP and Active Directory
 
-System Admin can configure and test an `ldap` or `active_directory` connection,
-search candidates, and import users directly into a selected Project or Team.
-Transport is explicit: `ldaps`, `start_tls`, or plaintext `plain`. Plaintext
-mode is for a deliberately selected trusted evaluation network, displays a
-destructive warning, and never acts as a fallback when TLS fails. Atlas remains
-authoritative for account activity, system role, grants, ACLs, and sessions.
+System Admin configures and tests `ldap` or `active_directory` connections on
+the Directory page. Global directory candidate search, selection, and import
+are performed from Users; scoped Project or Team administration can import into
+its selected scope. Eligible human users can also be updated there with a
+minimal display-name and `user|admin` role mutation. Atlas does not expose role
+controls for the current actor, service accounts, pending invites, or operator
+identities. Transport is explicit: `ldaps`, `start_tls`, or plaintext `plain`.
+Plaintext mode is for a deliberately selected trusted evaluation network,
+displays a destructive warning, and never acts as a fallback when TLS fails.
+Atlas remains authoritative for account activity, system role, grants, ACLs,
+and sessions.
 Local email authentication is checked first; once an imported directory source
 is selected, unavailable transport, disabled principals, invalid credentials,
 alias conflicts, or a concurrent Atlas deactivation fail closed without trying

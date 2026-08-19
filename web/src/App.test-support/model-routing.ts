@@ -76,7 +76,7 @@ export function createModelRoutingHandler(
     schema_version: "model-route-runtime-policy-v8" as const,
     tokenizer_profile: "cl100k_base",
     max_tool_executions: 3,
-    max_provider_invocations: 20,
+    max_provider_invocations: 24,
     max_reasoning_revision_cycles: 2,
     max_catalog_pages: 5,
     max_search_rounds: 6,
@@ -126,7 +126,7 @@ export function createModelRoutingHandler(
       runtime_policy: runtimePolicy(1, {
         tokenizer_profile: "o200k_base",
         max_tool_executions: 2,
-        max_provider_invocations: 20,
+        max_provider_invocations: 23,
         max_catalog_pages: 5,
         max_search_rounds: 6,
         max_model_visible_items_per_turn: 40,

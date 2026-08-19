@@ -450,7 +450,7 @@ function PromptSkillsManager({
                     value={uploadName}
                     disabled={pendingUpload !== null}
                     onChange={(event) => setUploadName(event.target.value)}
-                    placeholder="compare-options"
+                    placeholder={t("promptSkills.namePlaceholder")}
                     autoComplete="off"
                   />
                   <FieldDescription>{t("promptSkills.nameHelp")}</FieldDescription>
@@ -477,7 +477,10 @@ function PromptSkillsManager({
                           key={skill.control.name}
                           value={skill.control.name}
                         >
-                          {skill.control.name} · r{skill.control.head_revision}
+                          {t("promptSkills.skillRevisionOption", {
+                            name: skill.control.name,
+                            revision: skill.control.head_revision,
+                          })}
                         </SelectItem>
                       ))}
                       </SelectGroup>
@@ -754,7 +757,9 @@ function RevisionRow({
   const actionKey = `${skill.control.name}:${revision.ref.revision}:${enabled ? "disable" : "enable"}`;
   return (
     <TableRow>
-      <TableCell className="font-medium">r{revision.ref.revision}</TableCell>
+      <TableCell className="font-medium">
+        {t("promptSkills.revisionValue", { revision: revision.ref.revision })}
+      </TableCell>
       <TableCell>
         <div>{new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(revision.created_at))}</div>
         <div className="text-xs text-muted-foreground">{revision.created_by}</div>

@@ -162,7 +162,7 @@ it("/admin/models manages provider connections, encrypted-key entry, and models"
     expectModelRuntimePolicyDraft(dialog, {
       "Tokenizer profile": "cl100k_base",
       "Maximum tool executions": 3,
-      "Maximum provider invocations": 20,
+      "Maximum provider invocations": 24,
       "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
@@ -298,7 +298,7 @@ it("/admin/models manages provider connections, encrypted-key entry, and models"
     expectModelRuntimePolicyDraft(dialog, {
       "Tokenizer profile": "o200k_base",
       "Maximum tool executions": 2,
-      "Maximum provider invocations": 20,
+      "Maximum provider invocations": 23,
       "Maximum deep-reasoning revision cycles": 2,
       "Maximum catalog pages": 5,
       "Maximum search rounds": 6,
@@ -375,7 +375,7 @@ it("/admin/models keeps the original minimal prefills without a tested default r
     ).not.toBeInTheDocument();
     expect(within(dialog).getByLabelText("Tokenizer profile")).toHaveValue("cl100k_base");
     expect(within(dialog).getByLabelText("Maximum tool executions")).toHaveValue(12);
-    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(29);
+    expect(within(dialog).getByLabelText("Maximum provider invocations")).toHaveValue(33);
     expect(
       within(dialog).getByLabelText("Maximum deep-reasoning revision cycles"),
     ).toHaveValue(2);

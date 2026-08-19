@@ -622,7 +622,11 @@ function ReasoningTracePanel({ trace }: { trace: ReasoningTrace }) {
                   <ul className="mt-2 flex flex-col gap-1 text-xs">
                     {selection.selected_skills.map((skill) => (
                       <li key={`${skill.name}-${skill.revision}-${skill.content_digest}`}>
-                        {skill.name} · r{skill.revision} · {skill.content_digest}
+                        {t("audit.promptSkillReference", {
+                          name: skill.name,
+                          revision: skill.revision,
+                          digest: skill.content_digest,
+                        })}
                       </li>
                     ))}
                   </ul>
