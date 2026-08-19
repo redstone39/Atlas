@@ -28,6 +28,7 @@ from atlas_production.infrastructure.persistence.payload_policy import (
     serialize_typed_dataclass,
     validate_typed_payload,
 )
+from atlas_production.infrastructure.postgres_owner import notes as notes_owner_module
 from atlas_production.infrastructure.persistence.result_governance import (
     _assessment_payload,
     _claim_evidence_payload,
@@ -49,6 +50,7 @@ from atlas_production.modules.result_governance.records import (
     ResponseSegmentRecord,
 )
 from atlas_production.modules.turn_runtime.public import SchemaRetryOriginCode
+from atlas_production.modules.notes.document_schema import NOTE_DOCUMENT_SCHEMA_V2
 from atlas_production.shared.public import AuditEventRecord
 
 
@@ -443,6 +445,39 @@ def test_production_orm_and_baseline_have_no_legacy_artifact_byte_columns() -> N
         for table in OrmBase.metadata.tables.values()
         for column in table.columns
     }.intersection(prohibited_names)
+
+
+def test_notes_jsonb_payload_policies_match_owner_boundaries() -> None:
+    assert {
+        key: JSONB_PAYLOAD_REGISTRY[key]
+        for key in (
+            "atlas_note_revisions.change_set",
+            "atlas_note_savepoints.aggregate_change_set",
+            "atlas_note_savepoints.canonical_body",
+            "atlas_note_savepoints.contributor_actor_ids",
+        )
+    } == {
+        "atlas_note_revisions.change_set": (
+            "notes_change_set",
+            notes_owner_module.MAX_JSON_BYTES,
+            "note_change_set_v1",
+        ),
+        "atlas_note_savepoints.aggregate_change_set": (
+            "notes_change_set",
+            notes_owner_module.MAX_JSON_BYTES,
+            "note_change_set_v1",
+        ),
+        "atlas_note_savepoints.canonical_body": (
+            "notes_canonical_body",
+            notes_owner_module.MAX_JSON_BYTES,
+            NOTE_DOCUMENT_SCHEMA_V2,
+        ),
+        "atlas_note_savepoints.contributor_actor_ids": (
+            "notes_contributor_actor_ids",
+            notes_owner_module.MAX_CONTRIBUTOR_ACTOR_IDS_BYTES,
+            "notes_contributor_actor_ids_v1",
+        ),
+    }
 
 
 def test_every_postgresql_jsonb_column_has_an_explicit_payload_policy() -> None:

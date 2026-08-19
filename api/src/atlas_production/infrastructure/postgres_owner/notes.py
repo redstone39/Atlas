@@ -46,6 +46,7 @@ from atlas_production.modules.notes.document_schema import (
 SessionFactory = Callable[[], Session]
 MAX_BINARY_BYTES = MAX_NOTE_BINARY_BYTES
 MAX_JSON_BYTES = 1024 * 1024
+MAX_CONTRIBUTOR_ACTOR_IDS_BYTES = MAX_JSON_BYTES
 EMPTY_BODY = {"type": "doc", "content": []}
 EMPTY_STATE = b"\x00\x00"
 
@@ -1041,6 +1042,8 @@ class PostgresNotesOwner:
             contributors=list(dict.fromkeys(session.scalars(select(AtlasNoteRevisionRow.actor_id).where(
                 AtlasNoteRevisionRow.note_id==command.note_id,AtlasNoteRevisionRow.sequence>prior,
                 AtlasNoteRevisionRow.sequence<=command.expected_revision_head).order_by(AtlasNoteRevisionRow.sequence))))
+            if len(_json(contributors)) > MAX_CONTRIBUTOR_ACTOR_IDS_BYTES:
+                raise _error("payload_oversize","Savepoint payload is empty or too large",413)
             sequence=note.savepoint_head+1; digest=_digest(command.canonical_body)
             row=AtlasNoteSavepointRow(savepoint_id=f"nsp-{uuid4().hex}",note_id=command.note_id,
                 sequence=sequence,covered_revision=command.expected_revision_head,

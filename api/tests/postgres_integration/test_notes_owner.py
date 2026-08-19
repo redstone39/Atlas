@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pytest
+import atlas_production.infrastructure.postgres_owner.notes as notes_owner_module
 
 from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow
 from atlas_production.infrastructure.persistence.identity_access import (
@@ -99,6 +100,36 @@ def _seed_project_member(runtime: PostgresRuntime) -> None:
             created_at="2026-08-12T00:00:00+00:00",
             revoked_at=None,
         ))
+        session.commit()
+
+
+def _seed_project_contributor(runtime: PostgresRuntime) -> None:
+    with runtime.session_factory() as session:
+        session.merge(
+            AtlasUserRow(
+                actor_id="user-notes-contributor",
+                display_name="Notes Contributor",
+                email="notes-contributor@example.test",
+                system_role="member",
+                password_digest=None,
+                active=True,
+                actor_type="user",
+                created_at="2026-08-12T00:00:00+00:00",
+            )
+        )
+        session.merge(
+            AtlasPermissionGrantRow(
+                grant_id="grant-notes-contributor",
+                project_id="project-notes-owner",
+                subject_type="user",
+                subject_id="user-notes-contributor",
+                role="viewer",
+                effect="allow",
+                status="active",
+                created_at="2026-08-12T00:00:00+00:00",
+                revoked_at=None,
+            )
+        )
         session.commit()
 
 
@@ -682,33 +713,7 @@ def test_notes_owner_derives_savepoint_contributors_from_revision_journal(
     postgres_runtime: PostgresRuntime,
 ) -> None:
     _seed_project_member(postgres_runtime)
-    with postgres_runtime.session_factory() as session:
-        session.merge(
-            AtlasUserRow(
-                actor_id="user-notes-contributor",
-                display_name="Notes Contributor",
-                email="notes-contributor@example.test",
-                system_role="member",
-                password_digest=None,
-                active=True,
-                actor_type="user",
-                created_at="2026-08-12T00:00:00+00:00",
-            )
-        )
-        session.merge(
-            AtlasPermissionGrantRow(
-                grant_id="grant-notes-contributor",
-                project_id="project-notes-owner",
-                subject_type="user",
-                subject_id="user-notes-contributor",
-                role="viewer",
-                effect="allow",
-                status="active",
-                created_at="2026-08-12T00:00:00+00:00",
-                revoked_at=None,
-            )
-        )
-        session.commit()
+    _seed_project_contributor(postgres_runtime)
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-owner",
@@ -754,6 +759,113 @@ def test_notes_owner_derives_savepoint_contributors_from_revision_journal(
         "user-notes-owner",
         "user-notes-contributor",
     )
+
+
+def test_notes_owner_rejects_oversize_savepoint_contributors_without_mutation(
+    postgres_runtime: PostgresRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_project_member(postgres_runtime)
+    _seed_project_contributor(postgres_runtime)
+    owner = PostgresNotesOwner(postgres_runtime.session_factory)
+    note = owner.create_note(
+        actor_id="user-notes-owner",
+        command=NoteCreateRequestV1(
+            note_id="note-oversize-savepoint-contributors",
+            scope_type="project",
+            scope_id="project-notes-owner",
+            title="Oversize contributor attribution",
+            idempotency_key="create-oversize-contributor-attribution",
+        ),
+    )
+    for head, actor in ((1, "user-notes-owner"), (2, "user-notes-contributor")):
+        owner.accept_revision(
+            actor_id=actor,
+            command=AcceptNoteRevisionRequestV1(
+                note_id=note.note_id,
+                expected_revision_head=head,
+                expected_collaboration_epoch=1,
+                event_kind="content_update",
+                raw_yjs_update=actor.encode(),
+                canonical_body=_body(f"oversize-actor-{actor}", actor),
+                document_schema=NOTE_DOCUMENT_SCHEMA_V2,
+                change_set=NoteChangeSetV1(),
+                idempotency_key=f"oversize-revision-{actor}",
+            ),
+        )
+    command = CreateNoteSavepointRequestV1(
+        note_id=note.note_id,
+        expected_revision_head=3,
+        expected_savepoint_head=1,
+        expected_collaboration_epoch=1,
+        encoded_yjs_state=b"state",
+        canonical_body=_body("oversize-savepoint-contributors"),
+        document_schema=NOTE_DOCUMENT_SCHEMA_V2,
+        aggregate_change_set=NoteChangeSetV1(),
+        contributor_actor_ids=("spoofed-carrier-actor",),
+        idempotency_key="oversize-savepoint-contributors",
+    )
+    contributor_bytes = len(
+        notes_owner_module._json(
+            ["user-notes-owner", "user-notes-contributor"]
+        )
+    )
+    monkeypatch.setattr(
+        notes_owner_module,
+        "MAX_CONTRIBUTOR_ACTOR_IDS_BYTES",
+        contributor_bytes - 1,
+    )
+
+    with pytest.raises(NotesError) as rejected:
+        owner.create_savepoint(
+            actor_id="user-notes-owner",
+            command=command,
+        )
+
+    assert rejected.value.code == "payload_oversize"
+    assert rejected.value.status_code == 413
+    receipt_id = notes_owner_module._receipt(
+        "user-notes-owner",
+        "savepoint_create",
+        note.note_id,
+        command.idempotency_key,
+    )
+    with postgres_runtime.session_factory() as session:
+        current = session.get(AtlasNoteRow, note.note_id)
+        assert current is not None
+        assert current.accepted_update_head == 3
+        assert current.savepoint_head == 1
+        assert (
+            session.query(AtlasNoteSavepointRow)
+            .filter_by(note_id=note.note_id)
+            .count()
+            == 1
+        )
+        events = session.query(AtlasAuditEventRow).all()
+        assert not any(
+            event.event_type == "note_savepoint_created"
+            and event.event_metadata.get("operation") == "savepoint_create"
+            and event.event_metadata.get("note_id") == note.note_id
+            for event in events
+        )
+        assert session.get(AtlasAuditEventRow, receipt_id) is None
+
+    monkeypatch.setattr(
+        notes_owner_module,
+        "MAX_CONTRIBUTOR_ACTOR_IDS_BYTES",
+        contributor_bytes,
+    )
+    savepoint = owner.create_savepoint(
+        actor_id="user-notes-owner",
+        command=command,
+    )
+    assert savepoint.sequence == 2
+    assert savepoint.contributor_actor_ids == (
+        "user-notes-owner",
+        "user-notes-contributor",
+    )
+    with postgres_runtime.session_factory() as session:
+        assert session.get(AtlasAuditEventRow, receipt_id) is not None
 
 
 def test_notes_owner_binds_finalized_attachment_and_rejects_cross_note_body(
