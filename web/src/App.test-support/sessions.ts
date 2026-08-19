@@ -179,7 +179,10 @@ export function createSessionHandler(
   initialSession: SessionState,
   readiness: ReadinessState,
 ) {
-  let session = initialSession;
+  let session = {
+    ...initialSession,
+    team_roles: { ...initialSession.team_roles },
+  };
   const handler: MockApiHandler = ({ url, method }) => {
     if (url.pathname === "/api/v1/auth/session" && method === "GET") {
       return jsonResponse(session);
@@ -197,5 +200,11 @@ export function createSessionHandler(
     }
     return undefined;
   };
-  return { handler, getSession: () => session };
+  return {
+    handler,
+    getSession: () => session,
+    setSession: (next: SessionState) => {
+      session = next;
+    },
+  };
 }

@@ -412,11 +412,19 @@ class TeamAccessService:
         team_id: str,
         payload: TeamUpdateRequest,
     ) -> TeamActionOutcome:
+        submitted_fields = payload.model_fields_set - {"idempotency_key"}
+        is_system_admin = bool(
+            actor is not None and self.repository.is_system_admin(actor)
+        )
         return self._run_mutation(
             self._team_mutation_context(
                 team_id,
                 actor_ids=(actor.actor_id,) if actor else (),
-                include_hierarchy=True,
+                include_hierarchy=is_system_admin
+                or bool(
+                    submitted_fields
+                    & {"parent_team_id", "status", "inherit_parent_documents"}
+                ),
             ),
             lambda: self._update_team_locked(actor, team_id, payload),
         )
@@ -427,15 +435,46 @@ class TeamAccessService:
         team_id: str,
         payload: TeamUpdateRequest,
     ) -> TeamActionOutcome:
-        actor = self._require_system_admin(actor)
-        team = self.repository.get_team(team_id)
-        if not team:
-            self._reject(
-                'team.was_not_found',
-                "audit-team-update-rejected",
-                404,
-            )
+        actor = self._require_actor(actor)
+        submitted_fields = payload.model_fields_set - {"idempotency_key"}
+        is_system_admin = self.repository.is_system_admin(actor)
+        if not is_system_admin:
+            if submitted_fields != {"name"}:
+                raise TeamAccessError(
+                    "access_denied",
+                    'permission.admin_permission_is_required',
+                    403,
+                )
+            team = self.repository.get_team(team_id)
+            if (
+                team is None
+                or team.status != "active"
+                or not self.repository.can_manage_team(actor, team_id)
+            ):
+                raise TeamAccessError(
+                    "access_denied",
+                    'team.admin_access_is_required',
+                    403,
+                )
+        else:
+            team = self.repository.get_team(team_id)
+            if team is None:
+                self._reject(
+                    'team.was_not_found',
+                    "audit-team-update-rejected",
+                    404,
+                )
         assert team is not None
+        if is_system_admin and (
+            team.status == "retired"
+            and submitted_fields
+            & {"parent_team_id", "inherit_parent_documents"}
+        ):
+            self._reject(
+                "team.was_not_found_or_is_retired",
+                "audit-team-update-rejected",
+                409,
+            )
         parent_provided = "parent_team_id" in payload.model_fields_set
         next_parent = payload.parent_team_id if parent_provided else team.parent_team_id
         if next_parent and not self.repository.get_team(next_parent):
@@ -678,6 +717,7 @@ class TeamAccessService:
         team_id: str,
         membership_id: str,
     ) -> TeamActionOutcome:
+        self._require_active_team(team_id)
         membership = self.repository.get_membership(membership_id)
         if not membership or membership.team_id != team_id:
             self._reject(

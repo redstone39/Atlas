@@ -86,6 +86,7 @@ def _seed_project_member(runtime: PostgresRuntime) -> None:
             project_id="project-notes-owner",
             name="Notes Project",
             policy_profile_id="default",
+            status="active",
         ))
         session.merge(AtlasPermissionGrantRow(
             grant_id="grant-notes-owner",

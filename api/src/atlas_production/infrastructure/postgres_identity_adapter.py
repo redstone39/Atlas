@@ -728,6 +728,20 @@ class PostgresIdentityAccessRepository(
         return None, None
 
     def _direct_team_roles(self, actor: UserRecord) -> dict[str, str]:
+        active_team_ids: set[str] = set()
+        after_team_id: str | None = None
+        while True:
+            teams = self.team_owner.list_teams(
+                limit=500,
+                after_team_id=after_team_id,
+            )
+            active_team_ids.update(
+                team.team_id for team in teams if team.status == "active"
+            )
+            if len(teams) < 500:
+                break
+            after_team_id = teams[-1].team_id
+
         roles: dict[str, str] = {}
         after_membership_id: str | None = None
         while True:
@@ -740,6 +754,7 @@ class PostgresIdentityAccessRepository(
                 if (
                     membership.member_actor_type != actor.actor_type
                     or membership.status != "active"
+                    or membership.team_id not in active_team_ids
                 ):
                     continue
                 existing = roles.get(membership.team_id)

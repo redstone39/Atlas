@@ -83,9 +83,12 @@ def _protected_facts(
     allow_member_download: bool = True,
     system_role: str = "user",
     can_administer_owner_scope: bool = False,
+    owner_active: bool = True,
 ) -> journeys.ProtectedOriginalFacts:
     reason = (
-        "source_download_restricted"
+        "owner_retired"
+        if not owner_active
+        else "source_download_restricted"
         if source_restricted
         else "member_download_policy"
         if not allow_member_download
@@ -140,6 +143,7 @@ def _protected_facts(
         can_administer_owner_scope=(
             can_administer_owner_scope or system_role == "admin"
         ),
+        owner_active=owner_active,
         observed_at=NOW,
         read_lease=SimpleNamespace(fence=FENCE),
         access_decision=decision,
@@ -173,10 +177,21 @@ def _denial_adapter(events: list[str]) -> adapter.PostgresArtifactStorageAdapter
 @pytest.mark.parametrize(
     ("method", "facts", "reason"),
     (
-        ("GET", _protected_facts(method="GET", source_restricted=True),
-         "source_download_restricted"),
-        ("HEAD", _protected_facts(method="HEAD", allow_member_download=False),
-         "member_download_policy"),
+        (
+            "GET",
+            _protected_facts(method="GET", source_restricted=True),
+            "source_download_restricted",
+        ),
+        (
+            "HEAD",
+            _protected_facts(method="HEAD", allow_member_download=False),
+            "member_download_policy",
+        ),
+        (
+            "GET",
+            _protected_facts(method="GET", owner_active=False),
+            "owner_retired",
+        ),
     ),
 )
 def test_policy_denial_reaches_owner_before_headers_or_bytes(
@@ -195,6 +210,42 @@ def test_policy_denial_reaches_owner_before_headers_or_bytes(
     assert built.request.presented_browser_session_token == TOKEN
     assert built.request.access_decision.reason == reason
     assert events == [f"commit-denial:{reason}"]
+
+
+def test_retired_project_owner_denial_survives_active_team_scope() -> None:
+    facts = _protected_facts(method="GET", owner_active=False)
+    facts = replace(
+        facts,
+        tags=(
+            *facts.tags,
+            SimpleNamespace(
+                document_id="document-1",
+                tag_type="team",
+                tag_id="team-1",
+            ),
+        ),
+        bindings=(
+            *facts.bindings,
+            SimpleNamespace(
+                artifact_id="artifact-1",
+                binding_kind="authorization",
+                scope_type="team",
+                scope_id="team-1",
+            ),
+        ),
+    )
+    builder = journeys.ProtectedOriginalJourneyBuilder(
+        SimpleNamespace(
+            effective_document_scope=lambda **_kwargs: {
+                ("team", "team-1"),
+            }
+        )
+    )
+
+    built = builder.build(facts)
+
+    assert built.request.access_decision.allowed is False
+    assert built.request.access_decision.reason == "owner_retired"
 
 
 @pytest.mark.parametrize("method", ("GET", "HEAD"))
@@ -256,8 +307,10 @@ def test_protected_original_provider_rejects_missing_authorization_binding(
         ]
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def get(self, row_type, key):
+        def get(self, row_type, key, **_kwargs):
             name = row_type.__name__
+            if name in {"AtlasProjectRow", "AtlasTeamRow"}:
+                return SimpleNamespace(status="active")
             return document_row if name == "AtlasDocumentRow" else artifact_row if name == "AtlasArtifactRow" else blob_row
         def scalars(self, _statement): return ScalarResult(self.results.pop(0))
 
@@ -375,8 +428,14 @@ def test_protected_original_provider_success_reaches_terminal_open_command(
         ]
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def get(self, row_type, _key):
-            return document_row if row_type.__name__ == "AtlasDocumentRow" else artifact_row if row_type.__name__ == "AtlasArtifactRow" else blob_row
+        def get(self, row_type, _key, **_kwargs):
+            if row_type.__name__ == "AtlasDocumentRow":
+                return document_row
+            if row_type.__name__ == "AtlasArtifactRow":
+                return artifact_row
+            if row_type.__name__ in {"AtlasProjectRow", "AtlasTeamRow"}:
+                return SimpleNamespace(status="active")
+            return blob_row
         def scalars(self, _statement): return ScalarResult(self.results.pop(0))
 
     monkeypatch.setattr(journeys, "read_session_actor", lambda *_args: facts.actor)

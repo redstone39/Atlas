@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import Callable, Literal
 
 from sqlalchemy.orm import Session
 
@@ -55,6 +55,7 @@ class _ProjectMutationBuffer:
         str, PermissionGrantRecord | None
     ] = field(default_factory=dict)
     audit_events: list[AuditEventRecord] = field(default_factory=list)
+    project_authorization: Literal["system_admin", "permission_manage"] | None = None
     committed: bool = False
 
 
@@ -90,11 +91,28 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
             projects.update(buffer.projects)
         return [replace(projects[key]) for key in sorted(projects)]
 
-    def put_project(self, project: ProjectRecord) -> None:
+    def put_project(
+        self,
+        project: ProjectRecord,
+        *,
+        expected_project: ProjectRecord | None,
+        authorization: Literal["system_admin", "permission_manage"],
+    ) -> None:
+        if (
+            expected_project is not None
+            and expected_project.project_id != project.project_id
+        ):
+            raise ValueError("expected project must match the project mutation")
         buffer = self._pending()
+        if (
+            buffer.project_authorization is not None
+            and buffer.project_authorization != authorization
+        ):
+            raise ValueError("project mutation must use one authorization mode")
+        buffer.project_authorization = authorization
         if project.project_id not in buffer.original_projects:
-            buffer.original_projects[project.project_id] = self.owner.get_project(
-                project.project_id
+            buffer.original_projects[project.project_id] = (
+                replace(expected_project) if expected_project else None
             )
         buffer.projects[project.project_id] = replace(project)
 
@@ -177,7 +195,13 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
         )
         buffer.audit_events.append(event)
         try:
-            requires_system_admin = bool(buffer.projects)
+            requires_system_admin = (
+                buffer.project_authorization == "system_admin"
+            )
+            project_authorization = (
+                buffer.project_authorization == "permission_manage"
+            )
+            grant_authorization = bool(buffer.grants and not buffer.projects)
             self.owner.project_acl(
                 ProjectAclChangeSet(
                     projects=tuple(buffer.projects.values()),
@@ -197,11 +221,13 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
                         else None
                     ),
                     authorization_project_id=(
-                        command.project_id if buffer.grants and not buffer.projects else None
+                        command.project_id
+                        if project_authorization or grant_authorization
+                        else None
                     ),
                     authorization_action=(
                         "permission_manage"
-                        if buffer.grants and not buffer.projects
+                        if project_authorization or grant_authorization
                         else None
                     ),
                     authorization_requires_system_admin=requires_system_admin,
@@ -213,7 +239,7 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
                 "access_denied",
                 (
                     'permission.admin_permission_is_required'
-                    if buffer.projects
+                    if requires_system_admin
                     else 'project.members_require_project_admin_access'
                 ),
                 403,

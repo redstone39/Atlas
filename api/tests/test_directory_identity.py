@@ -694,6 +694,7 @@ def test_team_and_project_directory_import_build_owner_specific_atomic_intent() 
                 project_id="project-a",
                 name="Project A",
                 policy_profile_id="default",
+                status="active",
             )
             if project_id == "project-a"
             else None

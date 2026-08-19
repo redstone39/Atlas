@@ -18,6 +18,7 @@ from atlas_production.infrastructure.persistence.document_intake import (
 )
 from atlas_production.infrastructure.persistence.identity_access import read_session_actor
 from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    document_owner_row_is_active,
     read_effective_document_scope_with_team_ids,
 )
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
@@ -88,6 +89,7 @@ class ProtectedOriginalFacts:
     bindings: tuple[ArtifactScopeBindingRecord, ...]
     candidate_team_ids: frozenset[str]
     can_administer_owner_scope: bool
+    owner_active: bool
     observed_at: str
     read_lease: StorageRequestLeaseRecord
     access_decision: AccessDecisionRecord | None
@@ -175,7 +177,9 @@ class ProtectedOriginalJourneyBuilder:
             tag_scope.intersection(allowed_scope).intersection(binding_scope)
         )
         policy_denial_reason = (
-            "source_download_restricted"
+            "owner_retired"
+            if not facts.owner_active
+            else "source_download_restricted"
             if document.source_download_restricted
             else (
                 "member_download_policy"
@@ -185,7 +189,7 @@ class ProtectedOriginalJourneyBuilder:
             )
         )
         policy_allowed = policy_denial_reason is None
-        allowed = bool(visible_scope) and policy_allowed
+        allowed = facts.owner_active and bool(visible_scope) and policy_allowed
         candidate_scope = visible_scope if visible_scope else tag_scope
         decision = facts.access_decision
         if allowed and facts.method == "HEAD":
@@ -508,6 +512,11 @@ class PostgresProtectedOriginalJourneyProvider:
                 if binding.binding_kind in {"owner", "authorization"}
                 and binding.scope_id is not None
             }
+            owner_active = document_owner_row_is_active(
+                session,
+                document.scope_type,
+                document.scope_id,
+            )
             requested_scope = tag_scope.intersection(binding_scope)
             if not tag_scope or not requested_scope:
                 self._unavailable(
@@ -530,14 +539,18 @@ class PostgresProtectedOriginalJourneyProvider:
             )
             visible_scope = requested_scope.intersection(resolved_scope)
             policy_reason = (
-                "source_download_restricted"
+                "owner_retired"
+                if not owner_active
+                else "source_download_restricted"
                 if document.source_download_restricted
                 else "member_download_policy"
                 if not document.allow_member_download
                 and not can_administer_owner_scope
                 else None
             )
-            allowed = bool(visible_scope) and policy_reason is None
+            allowed = (
+                owner_active and bool(visible_scope) and policy_reason is None
+            )
             reason = policy_reason or ("authorized_scope" if allowed else "scope_missing")
             evidence_required = method == "GET" or not allowed
             decision = None
@@ -613,6 +626,7 @@ class PostgresProtectedOriginalJourneyProvider:
                 bindings=bindings,
                 candidate_team_ids=frozenset(team_ids),
                 can_administer_owner_scope=can_administer_owner_scope,
+                owner_active=owner_active,
                 observed_at=observed_at,
                 read_lease=lease,
                 access_decision=decision,

@@ -1,4 +1,14 @@
-import { Copy, FileText, MailPlus, ShieldCheck, Trash2, UserRoundPlus, UsersRound } from "lucide-react";
+import {
+  Copy,
+  FileText,
+  MailPlus,
+  Pencil,
+  Save,
+  ShieldCheck,
+  Trash2,
+  UserRoundPlus,
+  UsersRound,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTranslation } from "react-i18next";
@@ -95,6 +105,8 @@ export function ScopedTeamAdministrationFeature({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<TeamScopeRole>("member");
   const [inviteUrl, setInviteUrl] = useState("");
+  const [showEditTeam, setShowEditTeam] = useState(false);
+  const [editTeamName, setEditTeamName] = useState("");
   const [showAddMember, setShowAddMember] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -266,6 +278,16 @@ export function ScopedTeamAdministrationFeature({
     setInviteUrl("");
     setShowInvite(false);
   }
+  function openEditTeamDialog() {
+    if (!selectedTeam) return;
+    setEditTeamName(selectedTeam.name);
+    setActionError("");
+    setShowEditTeam(true);
+  }
+
+  function closeEditTeamDialog() {
+    setShowEditTeam(false);
+  }
   async function runAction(
     actionName: string,
     action: () => Promise<MessageReference>,
@@ -279,6 +301,7 @@ export function ScopedTeamAdministrationFeature({
       const result = await action();
       onNotice(result.message_code);
       toast.success(serverMessage(result, t));
+      await refreshTeams();
       const routeRetained = await onRefresh();
       if (routeRetained && pathnameRef.current === originRoute) {
         await Promise.all([refreshMembers(selectedTeamId), refreshCandidates(selectedTeamId)]);
@@ -486,15 +509,21 @@ export function ScopedTeamAdministrationFeature({
         title={selectedTeam.name}
         description={t("teams.membersForTeamDescription", { team: selectedTeam.name })}
         actions={
-          <Button
-            variant="outline"
-            onClick={() =>
-              onNavigate(documentLibraryDestination("team", selectedTeam.team_id))
-            }
-          >
-            <FileText data-icon="inline-start" />
-            {t("documentLibrary.manageTargetDocuments")}
-          </Button>
+          <>
+            <Button variant="outline" size="sm" onClick={openEditTeamDialog}>
+              <Pencil data-icon="inline-start" />
+              {t("admin.editProfile")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() =>
+                onNavigate(documentLibraryDestination("team", selectedTeam.team_id))
+              }
+            >
+              <FileText data-icon="inline-start" />
+              {t("documentLibrary.manageTargetDocuments")}
+            </Button>
+          </>
         }
       />
       <AdminSectionNav
@@ -617,6 +646,62 @@ export function ScopedTeamAdministrationFeature({
           </Table>
         )}
       </AdminSection>
+      <Dialog
+        open={showEditTeam}
+        onOpenChange={(open) => (open ? openEditTeamDialog() : closeEditTeamDialog())}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("teams.editTitle")}</DialogTitle>
+            <DialogDescription className="sr-only">
+              {t("teams.editDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          {actionError && (
+            <Alert variant="destructive">
+              <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+            </Alert>
+          )}
+          <Field>
+            <FieldLabel htmlFor="scoped-edit-team-name">{t("teams.teamName")}</FieldLabel>
+            <Input
+              id="scoped-edit-team-name"
+              value={editTeamName}
+              onChange={(event) => setEditTeamName(event.target.value)}
+            />
+          </Field>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeEditTeamDialog}>
+              {t("admin.cancel")}
+            </Button>
+            <Button
+              onClick={() =>
+                void runAction(
+                  "rename-team",
+                  () =>
+                    teamAdministrationApi.updateTeam(selectedTeam.team_id, {
+                      name: editTeamName.trim(),
+                    }),
+                  closeEditTeamDialog,
+                )
+              }
+              disabled={
+                pendingAction === "rename-team" ||
+                !editTeamName.trim() ||
+                editTeamName.trim() === selectedTeam.name
+              }
+            >
+              {pendingAction === "rename-team" ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <Save data-icon="inline-start" />
+              )}
+              {t("teams.saveTeam")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={showAddMember}
         onOpenChange={(open) => (open ? void openAddMemberDialog() : closeAddMemberDialog())}

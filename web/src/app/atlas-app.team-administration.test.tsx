@@ -65,7 +65,31 @@ it("/admin/teams can create nested teams and add a member", async () => {
     expect(global.fetch).not.toHaveBeenCalledWith("/api/v1/admin/projects", expect.any(Object));
     fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
     let dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    fireEvent.click(within(dialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Retired" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /save team/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByText("Retired")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /members/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /manage target documents/i }))
+      .not.toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/teams/team-si",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "retired",
+          idempotency_key: "team-update-team-si",
+        }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("Parent team")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Inherit parent documents")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Active" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /save team/i }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.getByText("Active")).toBeInTheDocument();
     expect(container).not.toHaveTextContent("user-engineer-001");
@@ -217,6 +241,139 @@ it("/admin/teams can create nested teams and add a member", async () => {
     expect(screen.queryByRole("button", { name: /set permission signal integrity/i }))
       .not.toBeInTheDocument();
     expect(global.fetch).not.toHaveBeenCalledWith("/api/v1/admin/projects", expect.any(Object));
+  });
+
+it("retains the scoped Team rename draft when owner authorization rejects it", async () => {
+    window.history.pushState({}, "", "/admin/teams/team-si/members");
+    mockApi(teamAdminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/admin/teams/team-si" &&
+        (init?.method ?? "GET") === "PATCH"
+      ) {
+        return jsonResponse(
+          { message_code: "team.admin_access_is_required", message_params: {} },
+          403,
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /edit profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Team name"), {
+      target: { value: "Uncommitted Scoped Team" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save team/i }));
+
+    expect(await within(dialog).findByText("Action failed")).toBeInTheDocument();
+    expect(document.body).toHaveTextContent("Signal Integrity");
+    expect(within(dialog).getByLabelText("Team name")).toHaveValue("Uncommitted Scoped Team");
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/teams/team-si",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "Uncommitted Scoped Team",
+          idempotency_key: "team-update-team-si",
+        }),
+      }),
+    );
+  });
+
+it("retains the canonical Team and edit draft when lifecycle update fails", async () => {
+    window.history.pushState({}, "", "/admin/teams/team-si/profile");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/admin/teams/team-si" &&
+        (init?.method ?? "GET") === "PATCH"
+      ) {
+        return jsonResponse(
+          { message_code: "team.concurrent_update", message_params: {} },
+          409,
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /edit profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Team name"), {
+      target: { value: "Uncommitted Team Name" },
+    });
+    fireEvent.click(within(dialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Retired" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /save team/i }));
+
+    expect(await within(dialog).findByText("Action failed")).toBeInTheDocument();
+    expect(within(dialog).getByText("Signal Integrity")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Team name")).toHaveValue("Uncommitted Team Name");
+    expect(within(dialog).getByLabelText("Status")).toHaveTextContent("Retired");
+  });
+
+it("redirects a retired Team members URL without reading protected relationships", async () => {
+    window.history.pushState({}, "", "/admin/teams/team-si/members");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/api/v1/admin/teams" && method === "GET") {
+        return jsonResponse({
+          teams: [{
+            team_id: "team-si",
+            name: "Signal Integrity",
+            parent_team_id: "team-platform",
+            status: "retired",
+            created_at: "2026-07-08T00:00:00Z",
+            inherit_parent_documents: true,
+          }],
+          memberships: [{
+            membership_id: "team-member-engineer",
+            team_id: "team-si",
+            member_actor_type: "user",
+            member_actor_id: "user-engineer-001",
+            role: "member",
+            status: "active",
+            created_at: "2026-07-08T00:00:00Z",
+            removed_at: null,
+          }],
+        });
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    await waitFor(() =>
+      expect(window.location.pathname).toBe("/admin/teams/team-si/profile"),
+    );
+    expect(await screen.findByText("Retired")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create invite" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Unknown member")).not.toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/users",
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/agent-users",
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/teams/team-si/members",
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/teams/team-si/member-candidates",
+      expect.any(Object),
+    );
   });
 
 it("restores the same Team and section through browser back and forward", async () => {
@@ -381,9 +538,31 @@ it("scoped Team admin manages only human membership and scoped invites", async (
     expect(screen.queryByRole("button", { name: /create team/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/parent team|inherit parent|permission grant/i)).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent(/user-team-admin-001|agent-layout-review-001|team-si/);
+    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    let dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Parent team")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Inherit parent documents")).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("Team name"), {
+      target: { value: "Signal Integrity Renamed" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save team/i }));
+    expect(
+      await screen.findByRole("heading", { name: "Signal Integrity Renamed" }),
+    ).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/teams/team-si",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "Signal Integrity Renamed",
+          idempotency_key: "team-update-team-si",
+        }),
+      }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Add member" }));
-    let dialog = await screen.findByRole("dialog");
+    dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Add member" }));
     expect(await screen.findByText(/Team member is active/)).toBeInTheDocument();
     expect(await screen.findByText("Team Candidate")).toBeInTheDocument();

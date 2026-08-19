@@ -1020,6 +1020,7 @@ def test_scoped_project_import_commits_atomically_and_retry_converges(
                 project_id="project-directory",
                 name="Directory Project",
                 policy_profile_id="policy-default",
+                status="active",
             )
         )
         session.commit()

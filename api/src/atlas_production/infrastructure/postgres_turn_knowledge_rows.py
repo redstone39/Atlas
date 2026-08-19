@@ -35,8 +35,18 @@ from atlas_production.infrastructure.persistence.processing_pipeline import (
     AtlasProcessingRevisionRow,
 )
 from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    read_current_document_ids_for_scope,
     read_effective_document_scope,
+    read_effective_document_scope_with_team_ids,
 )
+from atlas_production.infrastructure.postgres_locks import (
+    acquire_shared_owner_locks,
+)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.modules.artifact_storage.errors import ArtifactStorageError
 from atlas_production.modules.artifact_storage.ports import ArtifactFilesystemPort
 from atlas_production.modules.citation_preview.public import (
@@ -99,6 +109,68 @@ class PostgresProductionKnowledgeRowSource:
                     session, actor_type="user", actor_id=actor_id
                 )
             )
+
+    def _authorized_document_ids_in_session(
+        self,
+        session: Session,
+        *,
+        actor_id: str,
+        requested_scope: set[tuple[str, str]] | None = None,
+    ) -> set[str]:
+        scope, team_ids, _can_administer = (
+            read_effective_document_scope_with_team_ids(
+                session,
+                actor_type="user",
+                actor_id=actor_id,
+                requested_scope=requested_scope,
+            )
+        )
+        if not scope:
+            return set()
+        candidates = read_current_document_ids_for_scope(session, scope)
+        project_ids = set(
+            session.scalars(
+                select(AtlasDocumentRow.scope_id)
+                .where(
+                    AtlasDocumentRow.document_id.in_(sorted(candidates)),
+                    AtlasDocumentRow.scope_type == "project",
+                    AtlasDocumentRow.scope_id.is_not(None),
+                )
+                .distinct()
+            ).all()
+        )
+        acquire_shared_owner_locks(
+            session,
+            identity_keys=(
+                identity_actor_owner_key(actor_id),
+                project_acl_subject_owner_key("user", actor_id),
+                team_subject_owner_key("user", actor_id),
+                *(
+                    project_owner_key(scope_id)
+                    for scope_type, scope_id in scope
+                    if scope_type == "project"
+                ),
+                *(project_owner_key(project_id) for project_id in project_ids),
+                *(team_owner_key(team_id) for team_id in team_ids),
+                *(
+                    project_acl_subject_owner_key("team", team_id)
+                    for team_id in team_ids
+                ),
+                *(
+                    f"document-processing:document:{document_id}"
+                    for document_id in candidates
+                ),
+            ),
+        )
+        current_scope, _current_team_ids, _can_administer = (
+            read_effective_document_scope_with_team_ids(
+                session,
+                actor_type="user",
+                actor_id=actor_id,
+                requested_scope=scope,
+            )
+        )
+        return read_current_document_ids_for_scope(session, current_scope)
 
 
     def grant_resources(
@@ -186,43 +258,23 @@ class PostgresProductionKnowledgeRowSource:
         actor_id: str,
         requested_scope: set[tuple[str, str]] | None = None,
     ) -> tuple[CurrentDocumentResource, ...]:
-        scope = read_effective_document_scope(
+        document_ids = self._authorized_document_ids_in_session(
             session,
-            actor_type="user",
             actor_id=actor_id,
             requested_scope=requested_scope,
         )
-        if not scope:
+        if not document_ids:
             return ()
-        document_ids = set(
-            session.scalars(
-                select(AtlasDocumentTagRow.document_id).where(
-                    tuple_(AtlasDocumentTagRow.tag_type, AtlasDocumentTagRow.tag_id).in_(
-                        sorted(scope)
-                    )
-                )
-            ).all()
-        )
         return self._current_documents(session, document_ids=document_ids)
 
     def authorized_resource_refs(self, *, actor_id: str) -> frozenset[str]:
-        """Return ACL scope independently of current lifecycle state."""
+        """Return current operational resources in the actor's ACL scope."""
 
         with self._session_factory() as session:
-            scope = read_effective_document_scope(
-                session, actor_type="user", actor_id=actor_id
+            document_ids = self._authorized_document_ids_in_session(
+                session,
+                actor_id=actor_id,
             )
-            if not scope:
-                return frozenset()
-            document_ids = session.scalars(
-                select(AtlasDocumentTagRow.document_id)
-                .where(
-                    tuple_(AtlasDocumentTagRow.tag_type, AtlasDocumentTagRow.tag_id).in_(
-                        sorted(scope)
-                    )
-                )
-                .distinct()
-            ).all()
         return frozenset(canonical_document_resource_ref(value) for value in document_ids)
 
     def current_ready_pins(
@@ -405,28 +457,13 @@ class PostgresProductionKnowledgeRowSource:
         if not wanted:
             return ()
         with self._session_factory() as session:
-            # One repeatable-read snapshot closes the ACL/currentness race while
-            # remaining fully read-only and lock-free.
+            # One repeatable-read snapshot gives the final authorization
+            # projection a stable ordering against concurrent retirement.
             session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             _apply_statement_deadline(session, deadline_at)
-            scope = read_effective_document_scope(
-                session, actor_type="user", actor_id=actor_id
-            )
-            authorized_ids = (
-                set(
-                    session.scalars(
-                        select(AtlasDocumentTagRow.document_id)
-                        .where(
-                            tuple_(
-                                AtlasDocumentTagRow.tag_type,
-                                AtlasDocumentTagRow.tag_id,
-                            ).in_(sorted(scope))
-                        )
-                        .distinct()
-                    ).all()
-                )
-                if scope
-                else set()
+            authorized_ids = self._authorized_document_ids_in_session(
+                session,
+                actor_id=actor_id,
             )
             all_ids = set(session.scalars(select(AtlasDocumentRow.document_id)).all())
             by_ref = {

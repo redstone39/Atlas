@@ -110,6 +110,7 @@ def _seed(runtime: PostgresRuntime, tmp_path: Path) -> PostgresNotesAttachmentPr
                 project_id="project-notes-attachment",
                 name="Notes attachment project",
                 policy_profile_id="default",
+                status="active",
             )
         )
         session.add(

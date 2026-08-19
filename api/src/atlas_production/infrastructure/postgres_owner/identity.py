@@ -28,9 +28,7 @@ from atlas_production.infrastructure.persistence.identity_access import (
     external_identity_row,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,)
 from atlas_production.infrastructure.postgres_owner.identity_mappings import (
     _agent_token_record,
     _agent_token_row,
@@ -620,8 +618,8 @@ class IdentityRepository:
                 raise IdentityAuthorizationConflict("Team is no longer active")
         elif scope_type == "project" and scope_id:
             project = session.get(AtlasProjectRow, scope_id)
-            if project is None:
-                raise IdentityAuthorizationConflict("Project no longer exists")
+            if project is None or project.status != "active":
+                raise IdentityAuthorizationConflict("Project is no longer active")
         if actor.system_role == "admin":
             return
         if change_set.authorization_requires_system_admin:
@@ -941,6 +939,18 @@ class IdentityRepository:
             if current_grant != change_set.expected_project_grant:
                 raise IdentityCurrentnessConflict(
                     "invite Project grant currentness changed"
+                )
+            project = session.scalar(
+                select(AtlasProjectRow)
+                .where(
+                    AtlasProjectRow.project_id
+                    == change_set.project_grant.project_id
+                )
+                .with_for_update()
+            )
+            if project is None or project.status != "active":
+                raise IdentityCurrentnessConflict(
+                    "invite Project is no longer active"
                 )
 
     @classmethod

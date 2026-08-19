@@ -4,6 +4,9 @@ import json
 from types import SimpleNamespace
 
 from atlas_production.infrastructure import schema_init
+from atlas_production.infrastructure.persistence.project_governance import (
+    AtlasProjectRow,
+)
 
 
 class _Runtime:
@@ -17,6 +20,21 @@ class _Runtime:
         if self.error is not None:
             raise self.error
 
+
+
+def test_project_status_schema_is_required_and_lifecycle_bounded() -> None:
+    table = AtlasProjectRow.__table__
+    status = table.columns["status"]
+    constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in table.constraints
+        if constraint.name is not None
+    }
+
+    assert status.nullable is False
+    assert constraints["ck_atlas_projects_status"] == (
+        "status IN ('active', 'retired')"
+    )
 
 def test_schema_initializer_applies_baseline(monkeypatch, capsys) -> None:
     runtime = _Runtime()

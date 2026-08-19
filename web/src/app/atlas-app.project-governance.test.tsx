@@ -81,8 +81,28 @@ it("project admins manage only their own project members from Projects", async (
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
     );
-    expect(await screen.findByText("Project profile is managed by system admins")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /save project/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /edit profile/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    const profileDialog = await screen.findByRole("dialog");
+    expect(within(profileDialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(within(profileDialog).queryByLabelText("Access profile")).not.toBeInTheDocument();
+    fireEvent.change(within(profileDialog).getByLabelText("Project name"), {
+      target: { value: "Admin Live Project Renamed" },
+    });
+    fireEvent.click(within(profileDialog).getByRole("button", { name: /save project/i }));
+    expect(
+      await screen.findByRole("heading", { name: "Admin Live Project Renamed" }),
+    ).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/projects/proj-admin-live",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "Admin Live Project Renamed",
+          idempotency_key: "project-update-proj-admin-live",
+        }),
+      }),
+    );
     expect(global.fetch).not.toHaveBeenCalledWith(
       "/api/v1/admin/projects/proj-admin-live/members",
       expect.any(Object),
@@ -97,7 +117,7 @@ it("project admins manage only their own project members from Projects", async (
     );
     expect((await screen.findAllByText("Project Admin")).length).toBeGreaterThan(0);
     expect(container).not.toHaveTextContent(/grant-project-member|user-project-admin-001/);
-    fireEvent.click(screen.getByRole("link", { name: "Admin Live Project" }));
+    fireEvent.click(screen.getByRole("link", { name: "Admin Live Project Renamed" }));
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
     );
@@ -147,6 +167,121 @@ it("project admins manage only their own project members from Projects", async (
       within(await screen.findByRole("dialog", { name: "Invite new user" }))
         .queryByLabelText("Invite acceptance link"),
     ).not.toBeInTheDocument();
+  });
+
+it("retains the scoped Project rename draft when owner authorization rejects it", async () => {
+    window.history.pushState({}, "", "/admin/projects/proj-admin-live/profile");
+    mockApi(projectAdminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/admin/projects/proj-admin-live" &&
+        (init?.method ?? "GET") === "PATCH"
+      ) {
+        return jsonResponse(
+          { message_code: "project.manage_access_is_required", message_params: {} },
+          403,
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /edit profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Project name"), {
+      target: { value: "Uncommitted Scoped Project" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /save project/i }));
+
+    expect(await within(dialog).findByText("Action failed")).toBeInTheDocument();
+    expect(within(dialog).getByText("Admin Live Project")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Project name"))
+      .toHaveValue("Uncommitted Scoped Project");
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/projects/proj-admin-live",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "Uncommitted Scoped Project",
+          idempotency_key: "project-update-proj-admin-live",
+        }),
+      }),
+    );
+  });
+
+it("retains the canonical Project and edit draft when lifecycle update fails", async () => {
+    window.history.pushState({}, "", "/admin/projects/proj-admin-live/profile");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      if (
+        url.pathname === "/api/v1/admin/projects/proj-admin-live" &&
+        (init?.method ?? "GET") === "PATCH"
+      ) {
+        return jsonResponse(
+          { message_code: "project.concurrent_update", message_params: {} },
+          409,
+        );
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /edit profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Project name"), {
+      target: { value: "Uncommitted Project Name" },
+    });
+    fireEvent.click(within(dialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Retired" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /save project/i }));
+
+    expect(await within(dialog).findByText("Action failed")).toBeInTheDocument();
+    expect(within(dialog).getByText("Admin Live Project")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Project name")).toHaveValue(
+      "Uncommitted Project Name",
+    );
+    expect(within(dialog).getByLabelText("Status")).toHaveTextContent("Retired");
+  });
+
+it("redirects a retired Project access URL without reading protected relationships", async () => {
+    window.history.pushState({}, "", "/admin/projects/proj-admin-live/access");
+    mockApi(adminSession, readyReadiness);
+    const normalFetch = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input), "http://localhost");
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/api/v1/admin/projects" && method === "GET") {
+        return jsonResponse({
+          projects: [{
+            project_id: "proj-admin-live",
+            name: "Admin Live Project",
+            policy_profile_id: "policy-default-governed",
+            status: "retired",
+          }],
+        });
+      }
+      return normalFetch(input, init);
+    });
+
+    render(<App />);
+    await waitFor(() =>
+      expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
+    );
+    expect(await screen.findByText("Retired")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add access" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Invite new user" })).not.toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/projects/proj-admin-live/members",
+      expect.any(Object),
+    );
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/admin/projects/proj-admin-live/member-candidates",
+      expect.any(Object),
+    );
   });
 
 it("replaces Project detail with the directory after the current admin revokes own access", async () => {
@@ -343,6 +478,32 @@ it("/admin/projects owns the canonical Project Members controls", async () => {
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/profile"),
     );
     expect(screen.getByRole("tab", { name: "Access" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    let lifecycleDialog = await screen.findByRole("dialog");
+    fireEvent.click(within(lifecycleDialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Retired" }));
+    fireEvent.click(within(lifecycleDialog).getByRole("button", { name: /save project/i }));
+    await waitFor(() =>
+      expect(screen.queryByRole("tab", { name: "Access" })).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: /manage target documents/i }))
+      .not.toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/v1/admin/projects/proj-admin-live",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "retired",
+          idempotency_key: "project-update-proj-admin-live",
+        }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit profile/i }));
+    lifecycleDialog = await screen.findByRole("dialog");
+    fireEvent.click(within(lifecycleDialog).getByLabelText("Status"));
+    fireEvent.click(await screen.findByRole("option", { name: "Active" }));
+    fireEvent.click(within(lifecycleDialog).getByRole("button", { name: /save project/i }));
+    expect(await screen.findByRole("tab", { name: "Access" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Access" }));
     await waitFor(() =>
       expect(window.location.pathname).toBe("/admin/projects/proj-admin-live/access"),
@@ -389,13 +550,14 @@ it("/admin/projects owns the canonical Project Members controls", async () => {
     expect(within(dialog).queryByRole("button", { name: "Open Document Library" }))
       .not.toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /save project/i }));
-    expect(await screen.findByText(/project is updated/i)).toBeInTheDocument();
+    expect((await screen.findAllByText(/project is updated/i)).length).toBeGreaterThan(0);
     expect(global.fetch).toHaveBeenCalledWith(
       "/api/v1/admin/projects/proj-admin-live",
       expect.objectContaining({
-        body: expect.stringMatching(
-          /"name":"Admin Live Project Edited".*"policy_profile_id":"policy-default-governed"/,
-        ),
+        body: JSON.stringify({
+          name: "Admin Live Project Edited",
+          idempotency_key: "project-update-proj-admin-live",
+        }),
         method: "PATCH",
       }),
     );
@@ -672,7 +834,7 @@ it("renders Project roles and effects as Traditional Chinese labels", async () =
 
   expect(await screen.findByRole("heading", { name: "Admin Live Project" }))
     .toBeInTheDocument();
-  fireEvent.click(screen.getByLabelText("Project Admin 的角色"));
+  fireEvent.click(await screen.findByLabelText("Project Admin 的角色"));
   expect(await screen.findByRole("option", { name: "檢視者" })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "貢獻者" })).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "管理員" })).toBeInTheDocument();

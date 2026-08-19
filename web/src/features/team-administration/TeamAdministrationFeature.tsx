@@ -89,12 +89,6 @@ type MemberOption = {
 
 const NO_PARENT = "__no-parent__";
 
-const teamStatusOptions: OptionSelectItem<"active" | "retired">[] = [
-  { value: "active", label: "active" },
-  { value: "retired", label: "retired" },
-];
-
-
 function buildDescendantTeamIdsByTeamId(teams: TeamRecord[]) {
   const childIdsByParentId = new Map<string, string[]>();
   for (const team of teams) {
@@ -226,6 +220,10 @@ export function TeamAdministrationFeature({
         : [],
     [memberships, selectedTeam],
   );
+  const teamStatusOptions: OptionSelectItem<"active" | "retired">[] = [
+    { value: "active", label: localizedStatusLabel("active", t) },
+    { value: "retired", label: localizedStatusLabel("retired", t) },
+  ];
   const activeSelectedTeamMemberIds = useMemo(
     () =>
       new Set(
@@ -262,11 +260,15 @@ export function TeamAdministrationFeature({
 
   useEffect(() => {
     if (!detail || detail.section !== "members" || !selectedTeam) return;
+    if (selectedTeam.status !== "active") {
+      onNavigate(adminTeamDetailRoute(selectedTeam.team_id, "profile"));
+      return;
+    }
     if (!memberDirectoryLoaded) {
       setMemberDirectoryLoaded(true);
       void refreshMemberDirectory();
     }
-  }, [detail?.section, memberDirectoryLoaded, selectedTeam?.team_id]);
+  }, [detail?.section, memberDirectoryLoaded, selectedTeam?.team_id, selectedTeam?.status]);
 
   async function refreshTeams() {
     setLoading(true);
@@ -353,10 +355,27 @@ export function TeamAdministrationFeature({
     selectedTeam &&
       editTeamName.trim() &&
       (editTeamName.trim() !== selectedTeam.name ||
-        editParentTeamId !== (selectedTeam.parent_team_id ?? "") ||
         editTeamStatus !== selectedTeam.status ||
-        editInheritParentDocuments !== selectedTeam.inherit_parent_documents),
+        (selectedTeam.status === "active" &&
+          (editParentTeamId !== (selectedTeam.parent_team_id ?? "") ||
+            editInheritParentDocuments !== selectedTeam.inherit_parent_documents))),
   );
+  const teamUpdates = selectedTeam
+    ? {
+        ...(editTeamName.trim() !== selectedTeam.name
+          ? { name: editTeamName.trim() }
+          : {}),
+        ...(editTeamStatus !== selectedTeam.status ? { status: editTeamStatus } : {}),
+        ...(selectedTeam.status === "active" &&
+        editParentTeamId !== (selectedTeam.parent_team_id ?? "")
+          ? { parent_team_id: editParentTeamId || null }
+          : {}),
+        ...(selectedTeam.status === "active" &&
+        editInheritParentDocuments !== selectedTeam.inherit_parent_documents
+          ? { inherit_parent_documents: editInheritParentDocuments }
+          : {}),
+      }
+    : {};
   const availableMemberOptions = memberOptions.filter(
     (member) => !activeSelectedTeamMemberIds.has(member.actor_id),
   );
@@ -453,6 +472,7 @@ export function TeamAdministrationFeature({
   function openTeamProfileEditor(team: TeamRecord) {
     teamEditorGenerationRef.current += 1;
     selectTeam(team);
+    setActionError("");
     setShowEditTeam(true);
   }
 
@@ -674,24 +694,28 @@ export function TeamAdministrationFeature({
             <AdminResourceHeader
               title={selectedTeam.name}
               actions={
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    onNavigate(
-                      documentLibraryDestination("team", selectedTeam.team_id),
-                    )
-                  }
-                >
-                  <FileText data-icon="inline-start" />
-                  {t("documentLibrary.manageTargetDocuments")}
-                </Button>
+                selectedTeam.status === "active" ? (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      onNavigate(
+                        documentLibraryDestination("team", selectedTeam.team_id),
+                      )
+                    }
+                  >
+                    <FileText data-icon="inline-start" />
+                    {t("documentLibrary.manageTargetDocuments")}
+                  </Button>
+                ) : undefined
               }
             />
             <AdminSectionNav
               value={detail.section}
               items={[
                 { value: "profile", label: t("admin.profileSection") },
-                { value: "members", label: t("admin.membersSection") },
+                ...(selectedTeam.status === "active"
+                  ? [{ value: "members" as const, label: t("admin.membersSection") }]
+                  : []),
               ]}
               onValueChange={(section) =>
                 onNavigate(adminTeamDetailRoute(selectedTeam.team_id, section))
@@ -703,7 +727,7 @@ export function TeamAdministrationFeature({
                 <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
               </Alert>
             )}
-            {detail.section === "profile" ? (
+            {detail.section === "profile" || selectedTeam.status !== "active" ? (
               <AdminSection
                 title={t("admin.profileSection")}
                 actions={
@@ -718,30 +742,34 @@ export function TeamAdministrationFeature({
                 }
               >
                 <div className="grid gap-4 text-sm sm:grid-cols-2">
-                  <TargetSummary
-                    variant="flat"
-                    label={t("teams.parentTeam")}
-                    title={
-                      selectedTeam.parent_team_id
-                        ? teamById.get(selectedTeam.parent_team_id)?.name ??
-                          selectedTeam.parent_team_id
-                        : t("teams.noParent")
-                    }
-                  />
+                  {selectedTeam.status === "active" && (
+                    <TargetSummary
+                      variant="flat"
+                      label={t("teams.parentTeam")}
+                      title={
+                        selectedTeam.parent_team_id
+                          ? teamById.get(selectedTeam.parent_team_id)?.name ??
+                            selectedTeam.parent_team_id
+                          : t("teams.noParent")
+                      }
+                    />
+                  )}
                   <TargetSummary
                     variant="flat"
                     label={t("users.status")}
                     title={localizedStatusLabel(selectedTeam.status, t)}
                   />
-                  <TargetSummary
-                    variant="flat"
-                    label={t("teams.documentInheritance")}
-                    title={
-                      selectedTeam.inherit_parent_documents
-                        ? t("teams.inheritParentDocumentsOn")
-                        : t("teams.inheritParentDocumentsOff")
-                    }
-                  />
+                  {selectedTeam.status === "active" && (
+                    <TargetSummary
+                      variant="flat"
+                      label={t("teams.documentInheritance")}
+                      title={
+                        selectedTeam.inherit_parent_documents
+                          ? t("teams.inheritParentDocumentsOn")
+                          : t("teams.inheritParentDocumentsOff")
+                      }
+                    />
+                  )}
                 </div>
               </AdminSection>
             ) : (
@@ -941,6 +969,12 @@ export function TeamAdministrationFeature({
               {t("teams.editDescription")}
             </DialogDescription>
           </DialogHeader>
+          {actionError && (
+            <Alert variant="destructive">
+              <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+            </Alert>
+          )}
           {selectedTeam && (
             <>
               <TargetSummary label={t("teams.team")} title={selectedTeam.name}>
@@ -948,14 +982,16 @@ export function TeamAdministrationFeature({
                   semantic={selectedTeam.status === "active" ? "success" : "inactive"}
                   label={localizedStatusLabel(selectedTeam.status, t)}
                 />
-                <StatusBadge
-                  semantic={selectedTeam.inherit_parent_documents ? "success" : "inactive"}
-                  label={
-                    selectedTeam.inherit_parent_documents
-                      ? t("teams.inheritParentDocumentsOn")
-                      : t("teams.inheritParentDocumentsOff")
-                  }
-                />
+                {selectedTeam.status === "active" && (
+                  <StatusBadge
+                    semantic={selectedTeam.inherit_parent_documents ? "success" : "inactive"}
+                    label={
+                      selectedTeam.inherit_parent_documents
+                        ? t("teams.inheritParentDocumentsOn")
+                        : t("teams.inheritParentDocumentsOff")
+                    }
+                  />
+                )}
               </TargetSummary>
               <div className="pt-3">
                 <FieldSet>
@@ -969,19 +1005,21 @@ export function TeamAdministrationFeature({
                         onChange={(event) => setEditTeamName(event.target.value)}
                       />
                     </Field>
-                    <Field>
-                      <FieldLabel htmlFor="edit-parent-team">{t("teams.parentTeam")}</FieldLabel>
-                      <SearchSelect
-                        id="edit-parent-team"
-                        value={editParentTeamId || NO_PARENT}
-                        options={editParentTeamOptions}
-                        placeholder={t("teams.parentTeam")}
-                        emptyText={t("teams.emptyTitle")}
-                        onValueChange={(value) =>
-                          setEditParentTeamId(value === NO_PARENT ? "" : value)
-                        }
-                      />
-                    </Field>
+                    {selectedTeam.status === "active" && (
+                      <Field>
+                        <FieldLabel htmlFor="edit-parent-team">{t("teams.parentTeam")}</FieldLabel>
+                        <SearchSelect
+                          id="edit-parent-team"
+                          value={editParentTeamId || NO_PARENT}
+                          options={editParentTeamOptions}
+                          placeholder={t("teams.parentTeam")}
+                          emptyText={t("teams.emptyTitle")}
+                          onValueChange={(value) =>
+                            setEditParentTeamId(value === NO_PARENT ? "" : value)
+                          }
+                        />
+                      </Field>
+                    )}
                     <Field>
                       <FieldLabel htmlFor="edit-team-status">{t("users.status")}</FieldLabel>
                       <OptionSelect
@@ -991,23 +1029,25 @@ export function TeamAdministrationFeature({
                         onValueChange={setEditTeamStatus}
                       />
                     </Field>
-                    <Field orientation="horizontal">
-                      <Checkbox
-                        id="edit-inherit-parent-documents"
-                        checked={editInheritParentDocuments}
-                        onCheckedChange={(checked) =>
-                          setEditInheritParentDocuments(checked === true)
-                        }
-                      />
-                      <div className="grid gap-1">
-                        <FieldLabel htmlFor="edit-inherit-parent-documents">
-                          {t("teams.inheritParentDocuments")}
-                        </FieldLabel>
-                        <FieldDescription>
-                          {t("teams.inheritParentDocumentsHelp")}
-                        </FieldDescription>
-                      </div>
-                    </Field>
+                    {selectedTeam.status === "active" && (
+                      <Field orientation="horizontal">
+                        <Checkbox
+                          id="edit-inherit-parent-documents"
+                          checked={editInheritParentDocuments}
+                          onCheckedChange={(checked) =>
+                            setEditInheritParentDocuments(checked === true)
+                          }
+                        />
+                        <div className="grid gap-1">
+                          <FieldLabel htmlFor="edit-inherit-parent-documents">
+                            {t("teams.inheritParentDocuments")}
+                          </FieldLabel>
+                          <FieldDescription>
+                            {t("teams.inheritParentDocumentsHelp")}
+                          </FieldDescription>
+                        </div>
+                      </Field>
+                    )}
                     <Button
                       className="w-fit"
                       onClick={() =>
@@ -1017,10 +1057,7 @@ export function TeamAdministrationFeature({
                           () =>
                             teamAdministrationApi.updateTeam(
                               selectedTeam.team_id,
-                              editTeamName.trim(),
-                              editParentTeamId || null,
-                              editTeamStatus,
-                              editInheritParentDocuments,
+                              teamUpdates,
                             ),
                           closeTeamEditor,
                         )

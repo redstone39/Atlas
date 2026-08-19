@@ -1739,6 +1739,7 @@ export const en = {
 "messages.project.please_sign_in_before_using_project_management": "Please sign in before using project management.",
 "messages.project.tag_was_not_found": "The project tag was not found.",
 "messages.project.was_not_found": "The project was not found.",
+"messages.project.was_not_found_or_is_retired": "The project was not found or is retired. Reactivate it before changing other settings.",
 "messages.provider.choose_another_default_before_disabling_connection": "Choose another default connection before disabling this provider connection.",
 "messages.answer_behavior.custom_guidance_was_updated": "Answer behavior guidance was updated.",
 "messages.answer_behavior.custom_guidance_was_cleared": "Answer behavior guidance was cleared.",

@@ -22,7 +22,7 @@ export function mockApi(
     sessions.handler,
     createNotesHandler(sessions.getSession),
     createDocumentsHandler(sessions.getSession),
-    createIdentityGovernanceHandler(sessions.getSession),
+    createIdentityGovernanceHandler(sessions.getSession, sessions.setSession),
     createAuditHandler(),
     createModelRoutingHandler(options),
     createWorkspaceHandler(),

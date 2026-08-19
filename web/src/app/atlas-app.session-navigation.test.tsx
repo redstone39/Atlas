@@ -326,6 +326,40 @@ it("member users cannot render admin controls through direct URLs", async () => 
     expect(screen.queryByRole("button", { name: /create invite/i })).not.toBeInTheDocument();
   });
 
+it.each(["revoked", "missing"] as const)(
+  "non-active %s Project admin cannot enter scoped management or operational routes",
+  async (membershipStatus) => {
+    window.history.pushState({}, "", "/settings");
+    const nonActiveProjectAdminSession = {
+      ...projectAdminSession,
+      available_projects: projectAdminSession.available_projects.map((project) => ({
+        ...project,
+        membership_status: membershipStatus,
+      })),
+    };
+    mockApi(nonActiveProjectAdminSession, readyReadiness);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Management" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Document Library" }))
+      .not.toBeInTheDocument();
+
+    window.history.pushState({}, "", "/admin/projects/proj-admin-live/access");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(await screen.findByRole("heading", { name: "Admin access required" }))
+      .toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        new URL(String(input), "http://localhost").pathname.startsWith(
+          "/api/v1/admin/projects",
+        ),
+      ),
+    ).toBe(false);
+  },
+);
+
 it("member settings do not expose management entry points", async () => {
     window.history.pushState({}, "", "/settings");
     mockApi(memberSession, readyReadiness);

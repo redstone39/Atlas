@@ -453,6 +453,7 @@ export function DocumentLibraryFeature({
     return session.available_projects.some(
       (project) =>
         project.project_id === document.scope_id &&
+        project.membership_status === "active" &&
         project.role === "admin",
     );
   }
@@ -1011,7 +1012,8 @@ function documentScopeOptions(
     .filter(
       (project) =>
         session.system_role === "admin" ||
-        ["contributor", "admin"].includes(project.role ?? ""),
+        (project.membership_status === "active" &&
+          ["contributor", "admin"].includes(project.role ?? "")),
     )
     .map((project) => ({
       value: `project:${project.project_id}` as ScopeKey,

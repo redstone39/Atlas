@@ -57,6 +57,7 @@ def _seed(runtime: PostgresRuntime) -> None:
             project_id="project-notes-race",
             name="Notes Race Project",
             policy_profile_id="default",
+            status="active",
         ))
         session.merge(AtlasPermissionGrantRow(
             grant_id="grant-notes-race",

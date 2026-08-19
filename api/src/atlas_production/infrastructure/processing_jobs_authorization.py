@@ -7,6 +7,7 @@ from atlas_production.modules.processing_pipeline.job_records import (
 
 from atlas_production.rbac import (
     direct_team_role,
+    document_owner_is_active,
     effective_document_scope,
     is_system_admin,
     resolve_access,
@@ -20,6 +21,13 @@ class RbacProcessingJobsAuthorization:
         projection: DocumentJobRequestAuthorityProjection,
         actor: UserRecord,
     ) -> bool:
+        document = projection.document
+        if not document_owner_is_active(
+            projection.authorization_state,
+            document.scope_type,
+            document.scope_id,
+        ):
+            return False
         allowed = effective_document_scope(
             projection.authorization_state,
             actor_type=actor.actor_type,
@@ -35,6 +43,10 @@ class RbacProcessingJobsAuthorization:
     ) -> bool:
         document = projection.document
         state = projection.authorization_state
+        if not document_owner_is_active(
+            state, document.scope_type, document.scope_id
+        ):
+            return False
         if document.uploader_actor_id == actor.actor_id:
             return True
         if is_system_admin(state, actor.actor_type, actor.actor_id):

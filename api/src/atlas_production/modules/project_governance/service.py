@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import replace
-from typing import NoReturn
+from typing import Literal, NoReturn
 from uuid import uuid4
 
 from atlas_production.shared.public import (
@@ -96,6 +96,7 @@ class ProjectGovernanceService:
                     project_id=project.project_id,
                     name=project.name,
                     policy_profile_id=project.policy_profile_id,
+                    status=project.status,
                 )
                 for project in sorted(projects, key=lambda item: item.project_id)
             ]
@@ -489,7 +490,10 @@ class ProjectGovernanceService:
                 project_id=payload.project_id,
                 name=payload.name,
                 policy_profile_id=payload.policy_profile_id,
-            )
+                status="active",
+            ),
+            expected_project=None,
+            authorization="system_admin",
         )
         creator_grant_id = self.project_access_grant_id(
             payload.project_id,
@@ -538,20 +542,57 @@ class ProjectGovernanceService:
         project_id: str,
         payload: ProjectUpdateRequest,
     ) -> ProjectActionOutcome:
-        actor = self._require_system_admin(actor)
-        project = self.repository.get_project(project_id)
-        if not project:
-            self._reject(
-                'project.was_not_found',
-                "audit-project-update-rejected",
-                404,
-                request_id=payload.idempotency_key,
-            )
+        actor = self._require_project_actor(actor)
+        submitted_fields = payload.model_fields_set - {"idempotency_key"}
+        is_system_admin = self.repository.is_system_admin(actor)
+        authorization: Literal["system_admin", "permission_manage"] = "system_admin"
+        if not is_system_admin:
+            if submitted_fields != {"name"}:
+                raise ProjectGovernanceError(
+                    "access_denied",
+                    'permission.admin_permission_is_required',
+                    403,
+                )
+            project = self.repository.get_project(project_id)
+            if project is None or project.status != "active":
+                raise ProjectGovernanceError(
+                    "access_denied",
+                    'project.management_requires_project_admin_access',
+                    403,
+                )
+            actor = self._require_project_manage(actor, project_id)
+            authorization = "permission_manage"
+        else:
+            project = self.repository.get_project(project_id)
+            if project is None:
+                self._reject(
+                    'project.was_not_found',
+                    "audit-project-update-rejected",
+                    404,
+                    request_id=payload.idempotency_key,
+                )
+            if (
+                project.status == "retired"
+                and "policy_profile_id" in submitted_fields
+            ):
+                self._reject(
+                    'project.was_not_found_or_is_retired',
+                    "audit-project-update-rejected",
+                    409,
+                    request_id=payload.idempotency_key,
+                )
+        expected_project = replace(project)
         if payload.name is not None:
             project.name = payload.name
         if payload.policy_profile_id is not None:
             project.policy_profile_id = payload.policy_profile_id
-        self.repository.put_project(project)
+        if payload.status is not None:
+            project.status = payload.status
+        self.repository.put_project(
+            project,
+            expected_project=expected_project,
+            authorization=authorization,
+        )
         audit = self.repository.append_audit(
             ProjectAuditCommand(
                 event_type="project_updated",
@@ -559,7 +600,10 @@ class ProjectGovernanceService:
                 target_ref=f"project:{project_id}",
                 project_id=project_id,
                 message_code='project.is_updated',
-                metadata={"policy_profile_id": project.policy_profile_id},
+                metadata={
+                    "policy_profile_id": project.policy_profile_id,
+                    "status": project.status,
+                },
             )
         )
         self.repository.persist()

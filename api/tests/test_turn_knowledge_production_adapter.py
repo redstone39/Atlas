@@ -304,10 +304,11 @@ def test_selected_scope_empty_intersection_never_falls_back_to_all(
 
     def _scope(_session, **facts):
         observed.append(facts["requested_scope"])
-        return set()
+        return set(), set(), False
 
     monkeypatch.setattr(
-        "atlas_production.infrastructure.postgres_turn_knowledge_rows.read_effective_document_scope",
+        "atlas_production.infrastructure.postgres_turn_knowledge_rows."
+        "read_effective_document_scope_with_team_ids",
         _scope,
     )
     source = PostgresProductionKnowledgeRowSource(lambda: SimpleNamespace())

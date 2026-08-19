@@ -36,6 +36,9 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasAccessDecisionRow,
     read_session_actor,
 )
+from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    document_owner_row_is_active,
+)
 from atlas_production.infrastructure.persistence.processing_pipeline import (
     AtlasProcessingIdentityRow,
     AtlasProcessingRevisionRow,
@@ -354,6 +357,10 @@ def _validate_input(command: NewDocumentUploadInput) -> None:
             not decision.allowed
             or decision.actor_id != command.created_by
             or decision.action != "document_register"
+            for decision in decisions
+        )
+        or any(
+            decision.actor_type != decisions[0].actor_type
             for decision in decisions
         )
         or not command.audit_events
@@ -836,6 +843,16 @@ class NewDocumentUploadCommand:
             idempotency_scope=command.idempotency_scope,
             idempotency_key=command.idempotency_key,
         )
+        tag_scopes = tuple(
+            (tag.tag_type, tag.tag_id) for tag in command.tags
+        )
+        authority_domain_keys, authority_identity_keys, _ = (
+            document_upload_authority_lock_plan(
+                actor_type=command.authorization_decisions[0].actor_type,
+                actor_id=command.created_by or "",
+                scopes=tag_scopes,
+            )
+        )
         identity_keys = tuple(
             sorted(
                 {
@@ -871,8 +888,22 @@ class NewDocumentUploadCommand:
                     shared_domain_keys=(
                         "artifact:control",
                     ),
-                    exclusive_identity_keys=identity_keys,
+                    exclusive_domain_keys=authority_domain_keys,
+                    exclusive_identity_keys=(
+                        *authority_identity_keys,
+                        *identity_keys,
+                    ),
                 )
+                for scope_type, scope_id in tag_scopes:
+                    if not document_owner_row_is_active(
+                        session, scope_type, scope_id
+                    ):
+                        owner_label = (
+                            "Project" if scope_type == "project" else "Team"
+                        )
+                        raise DocumentUploadReplayConflict(
+                            f"document upload {owner_label} is no longer active"
+                        )
                 NewDocumentOriginalArtifactPublicationWriter(
                     session
                 ).publish_new_document_original(publication)

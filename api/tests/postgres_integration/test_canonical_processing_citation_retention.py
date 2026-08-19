@@ -24,6 +24,7 @@ from atlas_production.infrastructure.persistence.conversation import (
 )
 from atlas_production.infrastructure.persistence.identity_access import (
     AtlasPermissionGrantRow,
+    AtlasTeamRow,
     AtlasUserRow,
 )
 from atlas_production.infrastructure.persistence.processing_pipeline import (
@@ -33,6 +34,9 @@ from atlas_production.infrastructure.persistence.processing_pipeline import (
     AtlasProcessingRevisionRow,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
+from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    read_current_document_ids_for_scope,
+)
 from atlas_production.infrastructure.postgres_authorization_v1_adapter import (
     PostgresAuthorizationV1Adapter,
 )
@@ -191,6 +195,7 @@ def _seed_canonical_fixture(runtime: PostgresRuntime) -> dict[str, object] | Non
                 project_id=PROJECT_ID,
                 name="CPR-003 canonical citation retention",
                 policy_profile_id="policy-default",
+                status="active",
             )
         )
         session.add(
@@ -448,6 +453,116 @@ def _cleanup_canonical_fixture(
             delete(AtlasProjectRow).where(AtlasProjectRow.project_id == PROJECT_ID)
         )
     _delete_fixture(runtime, restore_control=restore_control)
+
+
+def test_retired_project_owner_excludes_cross_tagged_retrieval_document(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    previous_control = _seed_canonical_fixture(postgres_runtime)
+    team_scope = ("team", "team-ptc-retrieval")
+    try:
+        with postgres_runtime.session_factory() as session, session.begin():
+            session.add(
+                AtlasDocumentTagRow(
+                    document_id=DOCUMENT_ID,
+                    tag_type=team_scope[0],
+                    tag_id=team_scope[1],
+                    created_at=NOW_TEXT,
+                )
+            )
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {team_scope},
+            ) == {DOCUMENT_ID}
+
+        with postgres_runtime.session_factory() as session, session.begin():
+            project = session.get(AtlasProjectRow, PROJECT_ID)
+            assert project is not None
+            project.status = "retired"
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {team_scope},
+            ) == set()
+
+        with postgres_runtime.session_factory() as session, session.begin():
+            project = session.get(AtlasProjectRow, PROJECT_ID)
+            assert project is not None
+            project.status = "active"
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {team_scope},
+            ) == {DOCUMENT_ID}
+    finally:
+        _cleanup_canonical_fixture(
+            postgres_runtime,
+            restore_control=previous_control,
+        )
+
+
+def test_retired_team_owner_excludes_cross_tagged_retrieval_document(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    previous_control = _seed_canonical_fixture(postgres_runtime)
+    team_id = "team-ptc-retrieval-owner"
+    project_scope = ("project", PROJECT_ID)
+    try:
+        with postgres_runtime.session_factory() as session, session.begin():
+            session.add(
+                AtlasTeamRow(
+                    team_id=team_id,
+                    name="PTC Retrieval Team",
+                    parent_team_id=None,
+                    status="active",
+                    created_at=NOW_TEXT,
+                    inherit_parent_documents=True,
+                )
+            )
+            document = session.get(AtlasDocumentRow, DOCUMENT_ID)
+            assert document is not None
+            document.scope_type = "team"
+            document.scope_id = team_id
+
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {project_scope},
+            ) == {DOCUMENT_ID}
+
+        with postgres_runtime.session_factory() as session, session.begin():
+            team = session.get(AtlasTeamRow, team_id)
+            assert team is not None
+            team.status = "retired"
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {project_scope},
+            ) == set()
+
+        with postgres_runtime.session_factory() as session, session.begin():
+            team = session.get(AtlasTeamRow, team_id)
+            assert team is not None
+            team.status = "active"
+        with postgres_runtime.session_factory() as session:
+            assert read_current_document_ids_for_scope(
+                session,
+                {project_scope},
+            ) == {DOCUMENT_ID}
+    finally:
+        with postgres_runtime.session_factory() as session, session.begin():
+            document = session.get(AtlasDocumentRow, DOCUMENT_ID)
+            if document is not None:
+                document.scope_type = "project"
+                document.scope_id = PROJECT_ID
+            session.execute(
+                delete(AtlasTeamRow).where(AtlasTeamRow.team_id == team_id)
+            )
+        _cleanup_canonical_fixture(
+            postgres_runtime,
+            restore_control=previous_control,
+        )
 
 
 def test_old_exact_citation_survives_current_switch_and_retention_fences_cleanup(

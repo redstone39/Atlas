@@ -76,6 +76,20 @@ class RecordingSession:
         self.flushes = 0
         self.rollbacks = 0
         self.fail_audit = False
+        self.rows[(owner.AtlasProjectRow, "project-1")] = owner.AtlasProjectRow(
+            project_id="project-1",
+            name="Project",
+            policy_profile_id="policy-default",
+            status="active",
+        )
+        self.rows[(owner.AtlasTeamRow, "team-1")] = owner.AtlasTeamRow(
+            team_id="team-1",
+            name="Team",
+            parent_team_id=None,
+            status="active",
+            created_at=NOW,
+            inherit_parent_documents=True,
+        )
 
     def __enter__(self):
         return self
@@ -519,6 +533,12 @@ def _prime_protected_rows(session: RecordingSession) -> None:
         active=True,
         actor_type="user",
         created_at=NOW,
+    )
+    session.rows[(owner.AtlasProjectRow, "project-1")] = owner.AtlasProjectRow(
+        project_id="project-1",
+        name="Protected Project",
+        policy_profile_id="policy-default",
+        status="active",
     )
     session.rows[(owner.AtlasDocumentRow, "document-1")] = owner._row(
         _document(), owner.AtlasDocumentRow
@@ -2418,6 +2438,25 @@ def test_write_lease_heartbeat_rejects_expired_unbounded_or_changed_authority(
         owner.HeartbeatArtifactWriteCommand(Factory(RecordingSession())).execute(
             mutation(request)
         )
+
+
+def test_new_document_original_writer_rejects_retired_team_owner() -> None:
+    request = _new_document_original_publication(
+        owner_scope_type="team",
+        owner_scope_id="team-1",
+    )
+    session = RecordingSession()
+    session.rows[(owner.AtlasTeamRow, "team-1")].status = "retired"
+
+    with pytest.raises(
+        owner.ArtifactCommandConflict,
+        match="owner is no longer active",
+    ):
+        owner.NewDocumentOriginalArtifactPublicationWriter(
+            session  # type: ignore[arg-type]
+        ).publish_new_document_original(request)
+
+    assert session.added == [] and session.deleted == []
 
 
 def test_new_document_original_writer_stages_exact_graph_without_transaction_authority() -> None:

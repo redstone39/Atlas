@@ -63,12 +63,16 @@ export default function AuthenticatedLayout({ children }: { children: ReactNode 
     Object.values(session.team_roles).some(
       (role) => role === "uploader" || role === "admin",
     ) ||
-    session.available_projects.some((project) =>
-      ["contributor", "admin"].includes(project.role ?? ""),
+    session.available_projects.some(
+      (project) =>
+        project.membership_status === "active" &&
+        ["contributor", "admin"].includes(project.role ?? ""),
     );
   const canManageProjects =
     isAdmin ||
-    session.available_projects.some((project) => project.role === "admin");
+    session.available_projects.some(
+      (project) => project.membership_status === "active" && project.role === "admin",
+    );
   const canManageTeams =
     isAdmin || Object.values(session.team_roles).some((role) => role === "admin");
   const managementGroups = managementGroupsForCapabilities(session);
@@ -106,7 +110,9 @@ export default function AuthenticatedLayout({ children }: { children: ReactNode 
       !nextIsAdmin &&
       !nextSession.available_projects.some(
         (project) =>
-          project.project_id === currentMatch.projectId && project.role === "admin",
+          project.project_id === currentMatch.projectId &&
+          project.membership_status === "active" &&
+          project.role === "admin",
       )
     ) {
       fallback = "/admin/projects";

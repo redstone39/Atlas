@@ -16,13 +16,15 @@ export function ProjectsScreen({ route = null }: { route?: AppRoute | null }) {
   } = useAuthenticatedShell();
   const match = route ? matchAppRoute(route) : null;
   const detail = match?.kind === "admin-project-detail" ? match : null;
-  const canOpenDetail =
-    !detail ||
-    isAdmin ||
-    session.available_projects.some(
-      (project) =>
-        project.project_id === detail.projectId && project.role === "admin",
-    );
+  const canOpenDetail = !detail
+    ? true
+    : isAdmin ||
+      session.available_projects.some(
+        (project) =>
+          project.project_id === detail.projectId &&
+          project.membership_status === "active" &&
+          project.role === "admin",
+      );
   if (!canManageProjects || !canOpenDetail) return <AdminAccessDenied />;
   return (
     <AdminProjectsPage

@@ -51,7 +51,9 @@ import {
   LoadErrorState,
   LoadingState,
   PageHeader,
+  StatusBadge,
   TargetSummary,
+  localizedStatusLabel,
   serverMessage,
 } from "../../shared/product-ui";
 import type { AdminActionResult } from "../../shared/api-contracts";
@@ -101,6 +103,8 @@ export function ProjectGovernanceFeature({
   const [projectName, setProjectName] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [editProjectName, setEditProjectName] = useState("");
+  const [editProjectStatus, setEditProjectStatus] =
+    useState<"active" | "retired">("active");
   const [projectAccessGrants, setProjectAccessGrants] = useState<ProjectAccessGrant[]>([]);
   const [projectAccessSubjects, setProjectAccessSubjects] = useState<ProjectMemberCandidate[]>([]);
   const [memberCandidates, setMemberCandidates] = useState(EMPTY_PROJECT_MEMBER_CANDIDATES);
@@ -156,6 +160,10 @@ export function ProjectGovernanceFeature({
     { value: "allow", label: t("permissions.allow") },
     { value: "deny", label: t("permissions.deny") },
   ];
+  const projectStatusOptions: OptionSelectItem<"active" | "retired">[] = [
+    { value: "active", label: localizedStatusLabel("active", t) },
+    { value: "retired", label: localizedStatusLabel("retired", t) },
+  ];
   const userCandidateOptions = memberCandidates.users.map(candidateOption);
   const teamCandidateOptions = memberCandidates.teams.map(candidateOption);
   const serviceAccountCandidateOptions = memberCandidates.service_accounts.map(candidateOption);
@@ -169,6 +177,7 @@ export function ProjectGovernanceFeature({
     if (projects.length === 0 || !detail) {
       setSelectedProjectId("");
       setEditProjectName("");
+      setEditProjectStatus("active");
       return;
     }
     const routedProject = projects.find((project) => project.project_id === detail.projectId);
@@ -186,11 +195,15 @@ export function ProjectGovernanceFeature({
 
   useEffect(() => {
     if (!detail || detail.section !== "access" || !selectedProject) return;
+    if (selectedProject.status !== "active") {
+      onNavigate(adminProjectDetailRoute(selectedProject.project_id, "profile"));
+      return;
+    }
     projectEditorGenerationRef.current += 1;
     const generation = projectEditorGenerationRef.current;
     void refreshProjectMembers(selectedProject.project_id, generation);
     void refreshProjectCandidates(selectedProject.project_id, generation);
-  }, [detail?.projectId, detail?.section, selectedProject?.project_id]);
+  }, [detail?.projectId, detail?.section, selectedProject?.project_id, selectedProject?.status]);
 
   async function refreshProjects() {
     setLoading(true);
@@ -252,6 +265,7 @@ export function ProjectGovernanceFeature({
   function selectProject(project: ProjectAdminSummary) {
     setSelectedProjectId(project.project_id);
     setEditProjectName(project.name);
+    setEditProjectStatus(project.status);
     directoryImport.invalidateRequest();
     setShowAddAccess(false);
     setShowInviteUser(false);
@@ -494,12 +508,26 @@ export function ProjectGovernanceFeature({
   }
 
   const canCreateProject = Boolean(canManageProjectProfile && isSystemAdmin && projectName.trim());
+  const canEditProjectProfile = Boolean(
+    selectedProject && (isSystemAdmin || selectedProject.status === "active"),
+  );
   const canSaveProject = Boolean(
-    canManageProjectProfile &&
+    canEditProjectProfile &&
     selectedProject &&
       editProjectName.trim() &&
-      editProjectName.trim() !== selectedProject.name,
+      (editProjectName.trim() !== selectedProject.name ||
+        (isSystemAdmin && editProjectStatus !== selectedProject.status)),
   );
+  const projectUpdates = selectedProject
+    ? {
+        ...(editProjectName.trim() !== selectedProject.name
+          ? { name: editProjectName.trim() }
+          : {}),
+        ...(isSystemAdmin && editProjectStatus !== selectedProject.status
+          ? { status: editProjectStatus }
+          : {}),
+      }
+    : {};
   const canInviteProjectUser = Boolean(selectedProject && inviteName.trim() && inviteEmail.trim());
   const accessCandidateId =
     accessSubjectType === "user"
@@ -800,42 +828,48 @@ export function ProjectGovernanceFeature({
               title={selectedProject.name}
               description={policyProfileLabel(selectedProject.policy_profile_id)}
               actions={
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    onNavigate(
-                      documentLibraryDestination(
-                        "project",
-                        selectedProject.project_id,
-                      ),
-                    )
-                  }
-                >
-                  <FileText data-icon="inline-start" />
-                  {t("documentLibrary.manageTargetDocuments")}
-                </Button>
+                selectedProject.status === "active" ? (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      onNavigate(
+                        documentLibraryDestination(
+                          "project",
+                          selectedProject.project_id,
+                        ),
+                      )
+                    }
+                  >
+                    <FileText data-icon="inline-start" />
+                    {t("documentLibrary.manageTargetDocuments")}
+                  </Button>
+                ) : undefined
               }
             />
             <AdminSectionNav
               value={detail.section}
               items={[
                 { value: "profile", label: t("admin.profileSection") },
-                { value: "access", label: t("admin.accessSection") },
+                ...(selectedProject.status === "active"
+                  ? [{ value: "access" as const, label: t("admin.accessSection") }]
+                  : []),
               ]}
               onValueChange={(section) =>
                 onNavigate(adminProjectDetailRoute(selectedProject.project_id, section))
               }
             />
-            {detail.section === "profile" ? (
+            {detail.section === "profile" || selectedProject.status !== "active" ? (
               <AdminSection
                 title={t("admin.profileSection")}
                 actions={
-                  canManageProjectProfile ? (
+                  canEditProjectProfile ? (
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => {
+                        setActionError("");
                         setEditProjectName(selectedProject.name);
+                        setEditProjectStatus(selectedProject.status);
                         setShowEditProject(true);
                       }}
                     >
@@ -856,7 +890,12 @@ export function ProjectGovernanceFeature({
                     variant="flat"
                     title={policyProfileLabel(selectedProject.policy_profile_id)}
                   />
-                  {!canManageProjectProfile && (
+                  <TargetSummary
+                    label={t("users.status")}
+                    variant="flat"
+                    title={localizedStatusLabel(selectedProject.status, t)}
+                  />
+                  {!canEditProjectProfile && (
                     <Alert className="sm:col-span-2">
                       <AlertTitle>{t("projects.profileReadOnlyTitle")}</AlertTitle>
                       <AlertDescription>{t("projects.profileReadOnlyDescription")}</AlertDescription>
@@ -923,43 +962,56 @@ export function ProjectGovernanceFeature({
                           {t("projects.governanceMode")}
                         </div>
                       </div>
-                      <Badge variant="outline">
-                        {policyProfileLabel(project.policy_profile_id)}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline">
+                          {policyProfileLabel(project.policy_profile_id)}
+                        </Badge>
+                        <StatusBadge
+                          semantic={project.status === "active" ? "success" : "inactive"}
+                          label={localizedStatusLabel(project.status, t)}
+                        />
+                      </div>
                     </div>
                   </Item>
                 ))}
               </ItemGroup>
             ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t("admin.projectName")}</TableHead>
-                      <TableHead>{t("projects.governanceMode")}</TableHead>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("admin.projectName")}</TableHead>
+                    <TableHead>{t("projects.governanceMode")}</TableHead>
+                    <TableHead>{t("users.status")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {projects.map((project) => (
+                    <TableRow key={project.project_id}>
+                      <TableCell>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-auto px-0"
+                          onClick={() => openProjectEditor(project)}
+                        >
+                          {project.name}
+                        </Button>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline">
+                          {policyProfileLabel(project.policy_profile_id)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          semantic={project.status === "active" ? "success" : "inactive"}
+                          label={localizedStatusLabel(project.status, t)}
+                        />
+                      </TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projects.map((project) => (
-                      <TableRow key={project.project_id}>
-                        <TableCell>
-                          <Button
-                            variant="link"
-                            size="sm"
-                            className="h-auto px-0"
-                            onClick={() => openProjectEditor(project)}
-                          >
-                            {project.name}
-                          </Button>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline">
-                            {policyProfileLabel(project.policy_profile_id)}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                  ))}
+                </TableBody>
+              </Table>
             )}
       </div>
       </>
@@ -1042,6 +1094,12 @@ export function ProjectGovernanceFeature({
               {t("projects.directoryDescription")}
             </DialogDescription>
           </DialogHeader>
+          {actionError && (
+            <Alert variant="destructive">
+              <AlertTitle>{t("admin.actionFailed")}</AlertTitle>
+              <AlertDescription>{serverMessage(actionError, t)}</AlertDescription>
+            </Alert>
+          )}
           {selectedProject && (
             <>
               <TargetSummary
@@ -1057,6 +1115,17 @@ export function ProjectGovernanceFeature({
                   onChange={(event) => setEditProjectName(event.target.value)}
                 />
               </Field>
+              {isSystemAdmin && (
+                <Field>
+                  <FieldLabel htmlFor="edit-project-status">{t("users.status")}</FieldLabel>
+                  <OptionSelect
+                    id="edit-project-status"
+                    value={editProjectStatus}
+                    options={projectStatusOptions}
+                    onValueChange={setEditProjectStatus}
+                  />
+                </Field>
+              )}
             </>
           )}
           <DialogFooter>
@@ -1071,8 +1140,7 @@ export function ProjectGovernanceFeature({
                   () =>
                     projectGovernanceApi.updateProject(
                       selectedProject.project_id,
-                      editProjectName.trim(),
-                      selectedProject.policy_profile_id,
+                      projectUpdates,
                     ),
                   closeProjectEditor,
                 )

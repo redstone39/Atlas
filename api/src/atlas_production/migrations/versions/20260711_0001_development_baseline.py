@@ -523,6 +523,8 @@ def upgrade() -> None:
     sa.Column('project_id', sa.String(), nullable=False),
     sa.Column('name', sa.String(), nullable=False),
     sa.Column('policy_profile_id', sa.String(), nullable=False),
+    sa.Column('status', sa.String(), nullable=False),
+    sa.CheckConstraint("status IN ('active', 'retired')", name='ck_atlas_projects_status'),
     sa.PrimaryKeyConstraint('project_id')
     )
     op.create_table('atlas_note_categories',

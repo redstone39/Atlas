@@ -11,12 +11,10 @@ from sqlalchemy.orm import Session
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AccessDecisionWriter
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_subject_owner_key,)
 from atlas_production.infrastructure.postgres_owner.identity import (
     IdentityRepository,
     IdentitySessionChangeSet,

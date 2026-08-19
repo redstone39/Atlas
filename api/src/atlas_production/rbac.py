@@ -48,6 +48,16 @@ def role_covers(role: str, required_role: str) -> bool:
 def team_role_covers(role: str | None, required_role: str) -> bool:
     return TEAM_ROLE_ORDER.get(role or "", 0) >= TEAM_ROLE_ORDER.get(required_role, 0)
 
+def document_owner_is_active(store, scope_type: str, scope_id: str) -> bool:
+    if scope_type == "project":
+        owner = store.projects.get(scope_id)
+    elif scope_type == "team":
+        owner = store.teams.get(scope_id)
+    else:
+        return False
+    return bool(owner and owner.status == "active")
+
+
 
 def highest_role(roles: list[str]) -> str | None:
     if not roles:
@@ -137,6 +147,7 @@ def actor_direct_team_roles(store, actor_type: str, actor_id: str) -> dict[str, 
             membership.member_actor_type != actor_type
             or membership.member_actor_id != actor_id
             or membership.status != "active"
+            or not document_owner_is_active(store, "team", membership.team_id)
         ):
             continue
         existing = roles.get(membership.team_id)
@@ -191,7 +202,11 @@ def authorized_project_tag_ids(
     action: str = "workspace_query",
 ) -> set[str]:
     if is_system_admin(store, actor_type, actor_id):
-        return set(store.projects)
+        return {
+            project_id
+            for project_id, project in store.projects.items()
+            if project.status == "active"
+        }
     project_ids: set[str] = set()
     for project_id in store.projects:
         decision = resolve_access(
@@ -257,7 +272,8 @@ def resolve_access(
             explanation="The actor is inactive or missing.",
         )
         return _persist_decision(store, decision, persist)
-    if project_id not in store.projects:
+    project = store.projects.get(project_id)
+    if project is None:
         decision = _decision(
             store,
             actor_type=actor_type,
@@ -271,6 +287,22 @@ def resolve_access(
             source_type=None,
             source_id=None,
             explanation="The project was not found.",
+        )
+        return _persist_decision(store, decision, persist)
+    if project.status != "active":
+        decision = _decision(
+            store,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            project_id=project_id,
+            action=action,
+            required_role=required_role,
+            allowed=False,
+            reason="project_retired",
+            effective_role=None,
+            source_type=None,
+            source_id=None,
+            explanation="The project is retired.",
         )
         return _persist_decision(store, decision, persist)
     if actor.system_role == "admin":

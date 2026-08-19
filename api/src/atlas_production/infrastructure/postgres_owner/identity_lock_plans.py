@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    directory_alias_owner_key,
-    directory_subject_owner_key,
-    identity_actor_owner_key,
-    identity_email_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (directory_alias_owner_key,
+directory_subject_owner_key,
+identity_actor_owner_key,
+identity_email_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.modules.identity_access.directory_ports import (
     ScopedDirectoryImportChangeSet,
 )

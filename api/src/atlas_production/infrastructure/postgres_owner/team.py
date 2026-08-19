@@ -11,11 +11,9 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasTeamRow,
     AtlasUserRow,
 )
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.modules.identity_access.records import (
@@ -257,12 +255,14 @@ class TeamRepository:
             actor = session.get(AtlasUserRow, actor_id)
             if actor is None or not actor.active or actor.actor_type != "user":
                 raise TeamAuthorizationConflict("Team actor is no longer active")
+            team_id = change_set.authorization_team_id
+            team = session.get(AtlasTeamRow, team_id) if team_id else None
+            if team_id and (team is None or team.status != "active"):
+                raise TeamAuthorizationConflict("Team authority changed")
             if actor.system_role == "admin":
                 continue
             if change_set.authorization_requires_system_admin:
                 raise TeamAuthorizationConflict("System Admin authority changed")
-            team_id = change_set.authorization_team_id
-            team = session.get(AtlasTeamRow, team_id) if team_id else None
             membership = session.scalar(
                 select(AtlasTeamMembershipRow).where(
                     AtlasTeamMembershipRow.team_id == team_id,
@@ -272,7 +272,7 @@ class TeamRepository:
                     AtlasTeamMembershipRow.role == "admin",
                 ).limit(1)
             ) if team_id else None
-            if team is None or team.status != "active" or membership is None:
+            if membership is None:
                 raise TeamAuthorizationConflict("Team Admin authority changed")
 
     @staticmethod

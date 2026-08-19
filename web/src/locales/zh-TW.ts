@@ -1716,6 +1716,7 @@ export const zhTW = {
 "messages.project.please_sign_in_before_using_project_management": "使用專案管理功能前請先登入。",
 "messages.project.tag_was_not_found": "找不到專案標籤。",
 "messages.project.was_not_found": "找不到專案。",
+"messages.project.was_not_found_or_is_retired": "找不到專案或專案已停用；請先重新啟用，再修改其他設定。",
 "messages.provider.choose_another_default_before_disabling_connection": "停用此供應商連線前，請先選擇另一個預設連線。",
 "messages.answer_behavior.custom_guidance_was_updated": "回答行為提示已更新。",
 "messages.answer_behavior.custom_guidance_was_cleared": "回答行為提示已清除。",

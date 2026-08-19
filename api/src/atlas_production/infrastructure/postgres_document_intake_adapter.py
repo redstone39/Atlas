@@ -8,6 +8,7 @@ individually committing compatibility methods.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
@@ -47,13 +48,11 @@ from atlas_production.infrastructure.postgres_owner.document_processing import (
     DocumentLifecycleMutationCommand,
     SessionFactory,
 )
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.infrastructure.postgres_owner.project import (
     ActionAwareAclAuthority,
 )
@@ -89,6 +88,7 @@ from atlas_production.rbac import (
     ACTION_REQUIRED_ROLE,
     TEAM_ROLE_ORDER,
     direct_team_role,
+    document_owner_is_active,
     effective_document_scope,
     is_system_admin,
     resolve_access,
@@ -283,6 +283,7 @@ def _authorization_state(
                 project_id=row.project_id,
                 name=row.name,
                 policy_profile_id=row.policy_profile_id,
+                status=cast(Literal["active", "retired"], row.status),
             )
             for row in project_rows
         },
@@ -595,10 +596,10 @@ class PostgresDocumentIntakeAdapter:
             else:
                 row = session.get(AtlasProjectRow, scope_id)
                 exists = row is not None
-                active = exists
+                active = bool(row is not None and row.status == "active")
                 label = row.name if row is not None else None
                 can_upload = bool(
-                    exists
+                    active
                     and resolve_access(
                         state,
                         actor_type=actor_type,
@@ -988,31 +989,43 @@ class PostgresDocumentIntakeAdapter:
                     and original_artifact.owner_scope_type == document.scope_type
                     and original_artifact.owner_scope_id == document.scope_id
                 )
+                owner_active = document_owner_is_active(
+                    authorization_state,
+                    document.scope_type,
+                    document.scope_id,
+                )
                 if document.scope_type == "team":
-                    admin = system_admin or team_role_covers(
-                        direct_team_role(
-                            authorization_state,
-                            actor_type,
-                            actor_id,
-                            document.scope_id or "",
-                        ),
-                        "admin",
+                    admin = owner_active and (
+                        system_admin
+                        or team_role_covers(
+                            direct_team_role(
+                                authorization_state,
+                                actor_type,
+                                actor_id,
+                                document.scope_id or "",
+                            ),
+                            "admin",
+                        )
                     )
                 else:
-                    admin = system_admin or bool(
-                        document.scope_id
-                        and resolve_access(
+                    admin = owner_active and (
+                        system_admin
+                        or resolve_access(
                             authorization_state,
                             actor_type=actor_type,
                             actor_id=actor_id,
-                            project_id=document.scope_id,
+                            project_id=document.scope_id or "",
                             action="permission_manage",
                             persist=False,
                         ).allowed
                     )
-                edit = admin or document.uploader_actor_id == actor_id
+                edit = owner_active and (
+                    admin or document.uploader_actor_id == actor_id
+                )
+                owner_operational = owner_active
                 download = bool(
-                    document.lifecycle_status == "active"
+                    owner_operational
+                    and document.lifecycle_status == "active"
                     and artifact_available
                     and source_allows_original_download(
                         document.content_type,
@@ -1023,10 +1036,15 @@ class PostgresDocumentIntakeAdapter:
                     )
                     and (document.allow_member_download or admin)
                 )
-                view = edit or download or bool(
-                    document.allow_member_download
-                    and any(
-                        (tag.tag_type, tag.tag_id) in workspace_scope for tag in tags
+                view = owner_operational and (
+                    edit
+                    or download
+                    or bool(
+                        document.allow_member_download
+                        and any(
+                            (tag.tag_type, tag.tag_id) in workspace_scope
+                            for tag in tags
+                        )
                     )
                 )
                 return DocumentLibraryItemProjection(

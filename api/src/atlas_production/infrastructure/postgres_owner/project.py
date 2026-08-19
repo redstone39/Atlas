@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -15,12 +15,10 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasUserRow,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_subject_owner_key,)
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import (
     AccessDecisionWriter,
@@ -56,6 +54,7 @@ def _project_row(record: ProjectRecord) -> AtlasProjectRow:
         project_id=record.project_id,
         name=record.name,
         policy_profile_id=record.policy_profile_id,
+        status=record.status,
     )
 
 
@@ -78,6 +77,7 @@ def _project_record(row: AtlasProjectRow) -> ProjectRecord:
         project_id=row.project_id,
         name=row.name,
         policy_profile_id=row.policy_profile_id,
+        status=cast(Literal["active", "retired"], row.status),
     )
 
 
@@ -581,6 +581,14 @@ class ActionAwareAclAuthority:
                 reason="project_missing", effective_role=None,
                 source_type=None, source_id=None,
                 explanation="The project was not found.",
+            )
+        if project.status != "active":
+            return _access_decision(
+                actor_type=actor_type, actor_id=actor_id, project_id=project_id,
+                action=action, required_role=required_role, allowed=False,
+                reason="project_retired", effective_role=None,
+                source_type=None, source_id=None,
+                explanation="The project is retired.",
             )
         if actor.system_role == "admin":
             return _access_decision(

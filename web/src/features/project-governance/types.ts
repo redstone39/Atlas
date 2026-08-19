@@ -16,6 +16,7 @@ export interface ProjectAdminSummary {
   project_id: string;
   name: string;
   policy_profile_id: string;
+  status: "active" | "retired";
 }
 
 export interface ProjectAdminListResult {

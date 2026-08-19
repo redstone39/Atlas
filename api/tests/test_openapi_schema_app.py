@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "8f42f5bf8d33d3c34cb93f6c8b0efd26ede3cba623362995f0acd12c227618b8"
+    "aaa3e10961342ddc557c3d265015d7ea305ba75280c374b67bfd6be12d71c682"
 )
 
 
@@ -29,6 +29,20 @@ def test_schema_only_app_matches_fixed_openapi_without_runtime_services() -> Non
     assert vars(app.state) == {"_state": {}}
     assert app.openapi() == json.loads(FIXTURE.read_text())
     assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == EXPECTED_FIXTURE_SHA256
+
+
+def test_project_lifecycle_schema_uses_only_active_and_retired() -> None:
+    schema = create_openapi_app().openapi()
+    schemas = schema["components"]["schemas"]
+
+    assert schemas["ProjectAdminSummary"]["properties"]["status"]["enum"] == [
+        "active",
+        "retired",
+    ]
+    assert schemas["ProjectUpdateRequest"]["properties"]["status"]["anyOf"][0][
+        "enum"
+    ] == ["active", "retired"]
+    assert "patch" in schema["paths"]["/api/v1/admin/projects/{project_id}"]
 
 
 def test_directory_transport_schema_exposes_only_supported_literals() -> None:

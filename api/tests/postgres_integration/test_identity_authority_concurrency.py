@@ -225,7 +225,10 @@ def test_browser_session_and_raw_agent_authority_use_current_rows(
             actor_type="service_account", created_at=NOW,
         ))
         session.add(AtlasProjectRow(
-            project_id=project_id, name="T011", policy_profile_id="policy-default"
+            project_id=project_id,
+            name="T011",
+            policy_profile_id="policy-default",
+            status="active",
         ))
         session.add(AtlasPermissionGrantRow(
             grant_id=f"grant-{PREFIX}-agent", project_id=project_id,

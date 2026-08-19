@@ -26,13 +26,11 @@ from atlas_production.infrastructure.postgres_owner.identity import (
     IdentityScopeAcceptanceChangeSet,
     IdentitySessionChangeSet,
 )
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.infrastructure.postgres_owner.project import (
     ProjectAclChangeSet,
     ProjectAclRepository,
@@ -494,7 +492,7 @@ def test_postgres_runtime_has_only_engine_session_factory_and_bootstrap(monkeypa
         assert [field.name for field in fields(repository_type)] == ["session_factory"]
 
 
-def test_target_owner_lock_keys_are_isolated_from_legacy_retrieval_keys() -> None:
+def test_retrieval_currentness_uses_target_owner_keys_without_reverse_dependency() -> None:
     assert identity_actor_owner_key("user-1") == "identity:actor:user-1"
     assert team_owner_key("team-1") == "team:team:team-1"
     assert team_subject_owner_key("user", "user-1") == "team:subject:user:user-1"
@@ -514,18 +512,22 @@ def test_target_owner_lock_keys_are_isolated_from_legacy_retrieval_keys() -> Non
         source = (owner_root / "postgres_owner" / module_name).read_text()
         assert "persistence.retrieval_currentness import" not in source
 
-    retrieval_source = (
+    persistence_source = (
         owner_root / "persistence" / "retrieval_currentness.py"
     ).read_text()
-    for legacy_identity in (
-        'f"identity:{actor_id}"',
-        'f"acl-subject:{actor_type}:{actor_id}"',
-        'f"project:{scope_id}"',
-        'f"team:{team_id}"',
-        'f"acl-subject:team:{team_id}"',
+    assert "postgres_owner.lock_keys import" not in persistence_source
+
+    retrieval_source = (owner_root / "postgres_turn_knowledge_rows.py").read_text()
+    for owner_key in (
+        "identity_actor_owner_key(actor_id)",
+        'project_acl_subject_owner_key("user", actor_id)',
+        'team_subject_owner_key("user", actor_id)',
+        "project_owner_key(project_id)",
+        "team_owner_key(team_id)",
+        'project_acl_subject_owner_key("team", team_id)',
         'f"document-processing:document:{document_id}"',
     ):
-        assert legacy_identity in retrieval_source
+        assert owner_key in retrieval_source
 
 
 def test_audit_owner_exposes_no_arbitrary_reader_factory() -> None:
@@ -716,6 +718,13 @@ def test_identity_scope_acceptance_uses_one_session_for_audit_and_team_writer() 
         scalar_results=(
             _current_invite_row(scope_type="project"),
             _current_user_row(),
+            None,
+            AtlasProjectRow(
+                project_id="project-unit",
+                name="Unit",
+                policy_profile_id="policy-default",
+                status="active",
+            ),
         )
     )
     IdentityRepository(SessionFactory(project_session)).identity_scope_acceptance(
@@ -729,6 +738,65 @@ def test_identity_scope_acceptance_uses_one_session_for_audit_and_team_writer() 
     )
     assert any(isinstance(row, AtlasPermissionGrantRow) for row in project_session.merged)
     assert project_session.commits == 1
+
+
+def test_project_invite_acceptance_waits_for_reactivation() -> None:
+    retired_session = RecordingSession(
+        scalar_results=(
+            _current_invite_row(scope_type="project"),
+            _current_user_row(),
+            None,
+            AtlasProjectRow(
+                project_id="project-unit",
+                name="Unit",
+                policy_profile_id="policy-default",
+                status="retired",
+            ),
+        )
+    )
+    acceptance = IdentityScopeAcceptanceChangeSet(
+        user=_user(),
+        expected_user=_expected_user(),
+        invite=_invite(scope_type="project"),
+        project_grant=_grant(),
+        audit_events=(_event("audit-scope-project-retired"),),
+    )
+
+    with pytest.raises(
+        IdentityCurrentnessConflict,
+        match="Project is no longer active",
+    ):
+        IdentityRepository(
+            SessionFactory(retired_session)
+        ).identity_scope_acceptance(acceptance)
+
+    assert retired_session.commits == 0
+    assert retired_session.rollbacks == 1
+    assert retired_session.merged == []
+
+    active_session = RecordingSession(
+        scalar_results=(
+            _current_invite_row(scope_type="project"),
+            _current_user_row(),
+            None,
+            AtlasProjectRow(
+                project_id="project-unit",
+                name="Unit",
+                policy_profile_id="policy-default",
+                status="active",
+            ),
+        )
+    )
+    IdentityRepository(SessionFactory(active_session)).identity_scope_acceptance(
+        acceptance
+    )
+    assert active_session.commits == 1
+    assert any(
+        isinstance(row, AtlasPermissionGrantRow)
+        for row in active_session.merged
+    )
+
+
 def _scoped_import_session(
     *,
     fail_on_audit: bool = False,
@@ -1052,6 +1120,7 @@ def test_team_project_and_session_bound_audit_writers_have_closed_shapes() -> No
                     project_id="project-1",
                     name="Project 1",
                     policy_profile_id="default",
+                    status="active",
                 ),
             ),
             grants=(_grant(),),

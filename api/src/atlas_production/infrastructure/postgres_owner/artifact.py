@@ -17,9 +17,14 @@ from atlas_production.infrastructure.persistence.document_intake import (
 )
 from atlas_production.infrastructure.persistence.identity_access import (
     AtlasSessionRow,
+    AtlasTeamRow,
     AtlasUserRow,
 )
+from atlas_production.infrastructure.persistence.project_governance import (
+    AtlasProjectRow,
+)
 from atlas_production.infrastructure.persistence.retrieval_currentness import (
+    document_owner_row_is_active,
     read_effective_document_scope_with_team_ids,
 )
 from atlas_production.infrastructure.postgres_locks import (
@@ -30,13 +35,11 @@ from atlas_production.infrastructure.postgres_owner.audit import (
     AccessDecisionWriter,
     AuditEventWriter,
 )
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.modules.artifact_storage.records import (
     ArtifactOperationRecord,
     ArtifactRecord,
@@ -1097,6 +1100,15 @@ class NewDocumentOriginalArtifactPublicationWriter:
                 request
             ),
         )
+        if any(
+            not document_owner_row_is_active(
+                self._session, scope_type, scope_id
+            )
+            for scope_type, scope_id in request.verified_tag_scopes
+        ):
+            raise ArtifactCommandConflict(
+                "new-document original owner is no longer active"
+            )
         _active_control(self._session, request.fence)
         alternate_attempt = self._session.execute(
             select(rows.AtlasArtifactWriteAttemptRow)
@@ -2361,7 +2373,14 @@ class ProtectedArtifactOpenCommand:
                     raise ArtifactCommandConflict(
                         "owner scope administration currentness changed"
                     )
+                owner_active = document_owner_row_is_active(
+                    session,
+                    document.scope_type,
+                    document.scope_id,
+                )
                 allowed = (
+                    owner_active
+                    and
                     resolved_scope == set(request.candidate_scope)
                     and team_ids == set(request.candidate_team_ids)
                     and bool(authority_scope.intersection(resolved_scope))
@@ -2372,7 +2391,9 @@ class ProtectedArtifactOpenCommand:
                     )
                 )
                 policy_denial_reason = (
-                    "source_download_restricted"
+                    "owner_retired"
+                    if not owner_active
+                    else "source_download_restricted"
                     if document.source_download_restricted
                     else (
                         "member_download_policy"

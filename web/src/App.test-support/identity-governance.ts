@@ -6,11 +6,13 @@ import type {
 import type { SessionState } from "../features/identity-session/index";
 import type {
   ProjectAccessGrant,
+  ProjectAdminSummary,
   ProjectMemberRole,
 } from "../features/project-governance/index";
 import type {
   TeamMemberSummary,
   TeamMembershipRecord,
+  TeamRecord,
 } from "../features/team-administration/index";
 import type { UserAdminSummary } from "../features/user-administration/types";
 
@@ -19,7 +21,12 @@ import { jsonResponse } from "./protocol";
 
 export function createIdentityGovernanceHandler(
   getSession: () => SessionState,
+  setSession: (session: SessionState) => void,
 ): MockApiHandler {
+  const suspendedTeamRoles = new Map<
+    string,
+    SessionState["team_roles"][string]
+  >();
   let projectAccessGrants: ProjectAccessGrant[] = [
     {
       grant_id: "grant-project-member-proj-admin-live-user-user-project-admin-001",
@@ -42,6 +49,38 @@ export function createIdentityGovernanceHandler(
       status: "active",
       created_at: "2026-07-09T00:00:00Z",
       revoked_at: null,
+    },
+  ];
+  let projects: ProjectAdminSummary[] = [
+    {
+      project_id: "proj-admin-live",
+      name: "Admin Live Project",
+      policy_profile_id: "policy-default-governed",
+      status: "active",
+    },
+    {
+      project_id: "proj-signal-integrity-alpha",
+      name: "Signal Integrity Alpha",
+      policy_profile_id: "policy-default-governed",
+      status: "active",
+    },
+  ];
+  let teams: TeamRecord[] = [
+    {
+      team_id: "team-platform",
+      name: "Platform",
+      parent_team_id: null,
+      status: "active",
+      created_at: "2026-07-08T00:00:00Z",
+      inherit_parent_documents: true,
+    },
+    {
+      team_id: "team-si",
+      name: "Signal Integrity",
+      parent_team_id: "team-platform",
+      status: "active",
+      created_at: "2026-07-08T00:00:00Z",
+      inherit_parent_documents: true,
     },
   ];
   const projectSubjectDirectory: Record<
@@ -627,18 +666,6 @@ export function createIdentityGovernanceHandler(
       });
     }
     if (url.pathname === "/api/v1/admin/projects" && method === "GET") {
-      const projects = [
-        {
-          project_id: "proj-admin-live",
-          name: "Admin Live Project",
-          policy_profile_id: "policy-default-governed",
-        },
-        {
-          project_id: "proj-signal-integrity-alpha",
-          name: "Signal Integrity Alpha",
-          policy_profile_id: "policy-default-governed",
-        },
-      ];
       return jsonResponse({
         projects:
           session.system_role === "admin"
@@ -785,6 +812,19 @@ export function createIdentityGovernanceHandler(
       url.pathname.startsWith("/api/v1/admin/projects/") &&
       method === "PATCH"
     ) {
+      const projectId = url.pathname.split("/").at(-1) ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      projects = projects.map((project) =>
+        project.project_id === projectId
+          ? {
+              ...project,
+              ...(typeof body.name === "string" ? { name: body.name } : {}),
+              ...(body.status === "active" || body.status === "retired"
+                ? { status: body.status }
+                : {}),
+            }
+          : project,
+      );
       return jsonResponse({
         request_id: "project-update",
         status: "applied",
@@ -794,27 +834,9 @@ export function createIdentityGovernanceHandler(
       });
     }
     if (url.pathname === "/api/v1/admin/teams" && method === "GET") {
-      const allTeams = [
-        {
-          team_id: "team-platform",
-          name: "Platform",
-          parent_team_id: null,
-          status: "active" as const,
-          created_at: "2026-07-08T00:00:00Z",
-          inherit_parent_documents: true,
-        },
-        {
-          team_id: "team-si",
-          name: "Signal Integrity",
-          parent_team_id: "team-platform",
-          status: "active" as const,
-          created_at: "2026-07-08T00:00:00Z",
-          inherit_parent_documents: true,
-        },
-      ];
       const visibleTeamIds =
         session.system_role === "admin"
-          ? new Set(allTeams.map((team) => team.team_id))
+          ? new Set(teams.map((team) => team.team_id))
           : new Set(
               Object.entries(session.team_roles)
                 .filter(([, role]) => role === "admin")
@@ -824,7 +846,7 @@ export function createIdentityGovernanceHandler(
         return jsonResponse({ message_code: "team.admin_access_is_required", message_params: {} }, 403);
       }
       return jsonResponse({
-        teams: allTeams.filter((team) => visibleTeamIds.has(team.team_id)),
+        teams: teams.filter((team) => visibleTeamIds.has(team.team_id)),
         memberships: teamMemberships.filter(
           (membership) =>
             membership.status === "active" && visibleTeamIds.has(membership.team_id),
@@ -867,6 +889,43 @@ export function createIdentityGovernanceHandler(
       !url.pathname.includes("/members") &&
       method === "PATCH"
     ) {
+      const teamId = url.pathname.split("/").at(-1) ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      teams = teams.map((team) =>
+        team.team_id === teamId
+          ? {
+              ...team,
+              ...(typeof body.name === "string" ? { name: body.name } : {}),
+              ...(body.status === "active" || body.status === "retired"
+                ? { status: body.status }
+                : {}),
+              ...("parent_team_id" in body
+                ? { parent_team_id: body.parent_team_id ?? null }
+                : {}),
+              ...(typeof body.inherit_parent_documents === "boolean"
+                ? { inherit_parent_documents: body.inherit_parent_documents }
+                : {}),
+            }
+          : team,
+      );
+      if (body.status === "retired") {
+        const currentRole = session.team_roles[teamId];
+        if (currentRole !== undefined) {
+          suspendedTeamRoles.set(teamId, currentRole);
+          const { [teamId]: _retiredRole, ...activeTeamRoles } =
+            session.team_roles;
+          setSession({ ...session, team_roles: activeTeamRoles });
+        }
+      } else if (body.status === "active") {
+        const restoredRole = suspendedTeamRoles.get(teamId);
+        if (restoredRole !== undefined) {
+          setSession({
+            ...session,
+            team_roles: { ...session.team_roles, [teamId]: restoredRole },
+          });
+          suspendedTeamRoles.delete(teamId);
+        }
+      }
       return jsonResponse({
         request_id: "team-update",
         status: "applied",

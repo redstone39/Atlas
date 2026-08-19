@@ -21,6 +21,7 @@ export interface ManagementCapabilities {
   system_role: "user" | "admin" | "operator" | null;
   team_roles: Readonly<Record<string, "member" | "uploader" | "admin">>;
   available_projects: ReadonlyArray<{
+    membership_status: "active" | "revoked" | "missing";
     role: "viewer" | "contributor" | "admin" | null;
   }>;
 }
@@ -220,14 +221,16 @@ function hasDocumentLibraryAccess(session: ManagementCapabilities) {
   if (Object.values(session.team_roles).some((role) => role === "uploader" || role === "admin")) {
     return true;
   }
-  return session.available_projects.some((project) =>
-    ["contributor", "admin"].includes(project.role ?? ""),
+  return session.available_projects.some(
+    (project) =>
+      project.membership_status === "active" &&
+      ["contributor", "admin"].includes(project.role ?? ""),
   );
 }
 
 function hasProjectManagementAccess(session: ManagementCapabilities) {
-  return session.available_projects.some((project) =>
-    project.role === "admin",
+  return session.available_projects.some(
+    (project) => project.membership_status === "active" && project.role === "admin",
   );
 }
 

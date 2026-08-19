@@ -65,18 +65,17 @@ export const teamAdministrationApi = {
     }),
   updateTeam: (
     teamId: string,
-    name: string,
-    parentTeamId: string | null,
-    status: "active" | "retired",
-    inheritParentDocuments: boolean,
+    updates: {
+      name?: string;
+      parent_team_id?: string | null;
+      status?: "active" | "retired";
+      inherit_parent_documents?: boolean;
+    },
   ) =>
     requestJson<AdminActionResult>(`/api/v1/admin/teams/${teamId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        name,
-        parent_team_id: parentTeamId,
-        status,
-        inherit_parent_documents: inheritParentDocuments,
+        ...updates,
         idempotency_key: `team-update-${teamId}`,
       }),
     }),

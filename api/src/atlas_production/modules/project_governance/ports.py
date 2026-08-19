@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
@@ -20,7 +20,13 @@ class ProjectGovernanceRepository(Protocol):
 
     def list_projects(self) -> list[ProjectRecord]: ...
 
-    def put_project(self, project: ProjectRecord) -> None: ...
+    def put_project(
+        self,
+        project: ProjectRecord,
+        *,
+        expected_project: ProjectRecord | None,
+        authorization: Literal["system_admin", "permission_manage"],
+    ) -> None: ...
 
     def get_user(self, actor_id: str) -> UserRecord | None: ...
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import and_, exists, false, or_, select, text, tuple_
+from sqlalchemy import and_, exists, or_, select, tuple_
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -266,87 +265,75 @@ def read_effective_document_scope_with_team_ids(
     )
     can_administer_owner_scope = False
     if owner_scope_type is not None and owner_scope_id is not None:
-        can_administer_owner_scope = is_system_admin(
-            state, actor_type, actor_id
-        ) or (
-            owner_scope_type == "team"
-            and team_role_covers(
-                direct_team_role(state, actor_type, actor_id, owner_scope_id),
-                "admin",
+        owner_scope = (owner_scope_type, owner_scope_id)
+        can_administer_owner_scope = owner_scope in resolved_scope and (
+            is_system_admin(state, actor_type, actor_id)
+            or (
+                owner_scope_type == "team"
+                and team_role_covers(
+                    direct_team_role(
+                        state, actor_type, actor_id, owner_scope_id
+                    ),
+                    "admin",
+                )
             )
-        ) or (
-            owner_scope_type == "project"
-            and resolve_access(
-                state,
-                actor_type=actor_type,
-                actor_id=actor_id,
-                project_id=owner_scope_id,
-                action="permission_manage",
-                persist=False,
-            ).allowed
+            or (
+                owner_scope_type == "project"
+                and resolve_access(
+                    state,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    project_id=owner_scope_id,
+                    action="permission_manage",
+                    persist=False,
+                ).allowed
+            )
         )
     return resolved_scope, effective_team_ids, can_administer_owner_scope
 
 
-def lock_current_retrieval_scope(
+def document_owner_row_is_active(
     session: Session,
-    *,
-    advisory_lock_key: Callable[[str], int],
-    actor_type: str,
-    actor_id: str,
-    scope: set[tuple[str, str]],
-    document_ids: set[str],
-    team_ids: set[str],
-) -> None:
-    """Fence exact ACL and document owners through final candidate SQL."""
-
-    owner_keys = {
-        f"identity:{actor_id}",
-        f"acl-subject:{actor_type}:{actor_id}",
-        *(
-            f"project:{scope_id}"
-            for scope_type, scope_id in scope
-            if scope_type == "project"
-        ),
-        *(
-            f"team:{team_id}"
-            for team_id in team_ids
-        ),
-        *(
-            f"acl-subject:team:{team_id}"
-            for team_id in team_ids
-        ),
-        *(
-            f"document-processing:document:{document_id}"
-            for document_id in document_ids
-        ),
-    }
-    for owner_key in sorted(owner_keys):
-        session.execute(
-            text("SELECT pg_advisory_xact_lock_shared(:lock_key)"),
-            {"lock_key": advisory_lock_key(owner_key)},
-        )
+    scope_type: str,
+    scope_id: str | None,
+) -> bool:
+    if not scope_id:
+        return False
+    if scope_type == "project":
+        owner = session.get(AtlasProjectRow, scope_id, populate_existing=True)
+    elif scope_type == "team":
+        owner = session.get(AtlasTeamRow, scope_id, populate_existing=True)
+    else:
+        return False
+    return bool(owner and owner.status == "active")
 
 
-def current_document_scope_clause(
-    document_id_column: Any,
-    scope: set[tuple[str, str]],
+def _active_document_owner_clause(
+    scope_type_column: Any,
+    scope_id_column: Any,
 ) -> ColumnElement[bool]:
-    """Correlated final-SQL guard for a document's current direct tags."""
-
-    if not scope:
-        return false()
-    return exists(
-        select(1)
-        .select_from(AtlasDocumentTagRow)
-        .where(
-            AtlasDocumentTagRow.document_id == document_id_column,
-            tuple_(
-                AtlasDocumentTagRow.tag_type,
-                AtlasDocumentTagRow.tag_id,
-            ).in_(sorted(scope)),
-        )
+    return or_(
+        and_(
+            scope_type_column == "project",
+            exists(
+                select(1).where(
+                    AtlasProjectRow.project_id == scope_id_column,
+                    AtlasProjectRow.status == "active",
+                )
+            ),
+        ),
+        and_(
+            scope_type_column == "team",
+            exists(
+                select(1).where(
+                    AtlasTeamRow.team_id == scope_id_column,
+                    AtlasTeamRow.status == "active",
+                )
+            ),
+        ),
     )
+
+
 
 
 def read_current_document_ids_for_scope(
@@ -371,6 +358,10 @@ def read_current_document_ids_for_scope(
                     AtlasDocumentTagRow.tag_type,
                     AtlasDocumentTagRow.tag_id,
                 ).in_(sorted(scope)),
+                _active_document_owner_clause(
+                    AtlasDocumentRow.scope_type,
+                    AtlasDocumentRow.scope_id,
+                ),
             )
             .distinct()
         ).scalars()

@@ -7,15 +7,25 @@ from types import SimpleNamespace
 
 import pytest
 
+from atlas_production.infrastructure.postgres_owner import (
+    document_processing as processing_owner,
+)
 from atlas_production.infrastructure import (
     postgres_document_intake_adapter as intake_adapter,
+)
+from atlas_production.infrastructure import (
+    postgres_document_upload as document_upload,
 )
 from atlas_production.infrastructure.postgres_document_intake_adapter import (
     DocumentIntakeJourneyFacade,
     PostgresDocumentIntakeAdapter,
 )
+from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
 from atlas_production.infrastructure.postgres_document_processing_adapter import (
     PostgresDocumentProcessingAdapter,
+)
+from atlas_production.infrastructure.processing_jobs_authorization import (
+    RbacProcessingJobsAuthorization,
 )
 from atlas_production.infrastructure.postgres_document_upload import (
     NewDocumentUploadCommand,
@@ -53,7 +63,8 @@ from atlas_production.modules.processing_pipeline.public import (
     ProcessingProfilePin,
     VerifiedDocumentRestoreSet,
 )
-from atlas_production.modules.identity_access.records import UserRecord
+from atlas_production.modules.identity_access.records import TeamRecord, UserRecord
+from atlas_production.modules.project_governance.records import ProjectRecord
 from atlas_production.shared.public import AuditEventRecord
 
 
@@ -134,9 +145,10 @@ def _command() -> NewDocumentUploadInput:
         audit_events=(audit,),
         execution_snapshot=SimpleNamespace(acceptance_request_digest="f" * 64),  # type: ignore[arg-type]
         authorization_decisions=(
-            SimpleNamespace(  # type: ignore[arg-type]
+            SimpleNamespace(
                 decision_id="decision-1",
                 allowed=True,
+                actor_type="user",
                 actor_id="user-1",
                 action="document_register",
                 scope_type="project",
@@ -235,6 +247,62 @@ class _ProjectionExecuteRows:
         return list(self.values)
 
 
+class _RequestedScopeSession:
+    def __init__(self, project: AtlasProjectRow) -> None:
+        self.project = project
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def get(self, row_type, key):
+        if row_type is AtlasProjectRow and key == self.project.project_id:
+            return self.project
+        return None
+
+
+def test_requested_project_scope_marks_retired_project_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = UserRecord(
+        "user-admin", "Admin", None, "admin", None, True, "user", NOW
+    )
+    project = AtlasProjectRow(
+        project_id="project-retired",
+        name="Retired",
+        policy_profile_id="policy-default",
+        status="retired",
+    )
+    session = _RequestedScopeSession(project)
+    monkeypatch.setattr(intake_adapter, "read_session_actor", lambda *_args: actor)
+    monkeypatch.setattr(
+        intake_adapter,
+        "_authorization_state",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        intake_adapter,
+        "resolve_access",
+        lambda *_args, **_kwargs: SimpleNamespace(allowed=True),
+    )
+
+    projection = PostgresDocumentIntakeAdapter(
+        lambda: session
+    ).requested_scope_projection(
+        actor_type="user",
+        actor_id=actor.actor_id,
+        presented_browser_session_token="browser-token",
+        scope_type="project",
+        scope_id=project.project_id,
+    )
+
+    assert projection.exists is True
+    assert projection.active is False
+    assert projection.can_upload is False
+
+
 class _ProjectionSession:
     def __init__(self, documents, tags, artifacts):
         self.documents = documents
@@ -285,6 +353,12 @@ def _project_download_capabilities(
     original_scope: set[tuple[str, str]] | None = None,
     team_source_restricted: bool = False,
     artifacts: tuple[object, ...] | None = None,
+    project_member_download: bool = False,
+    project_status: str = "active",
+    team_status: str = "active",
+    actor_id: str = "user-1",
+    system_admin: bool = False,
+    capability: str = "download_available",
 ) -> dict[str, bool]:
     team_document = replace(
         _command().document,
@@ -301,7 +375,7 @@ def _project_download_capabilities(
         document_id="document-project",
         scope_type="project",
         scope_id="project-1",
-        allow_member_download=False,
+        allow_member_download=project_member_download,
         original_artifact_id="artifact-project",
         uploader_actor_id="user-uploader",
     )
@@ -322,6 +396,12 @@ def _project_download_capabilities(
             document_id=project_document.document_id,
             tag_type="project",
             tag_id="project-1",
+            created_at=NOW,
+        ),
+        SimpleNamespace(
+            document_id=project_document.document_id,
+            tag_type="team",
+            tag_id="team-1",
             created_at=NOW,
         ),
     )
@@ -346,13 +426,39 @@ def _project_download_capabilities(
         artifacts,
     )
     actor = UserRecord(
-        "user-1", "User", None, "member", None, True, "user", NOW
+        actor_id,
+        "User",
+        None,
+        "admin" if system_admin else "member",
+        None,
+        True,
+        "user",
+        NOW,
+    )
+    authorization_state = ProcessingJobAuthorizationState(
+        users={actor.actor_id: actor},
+        projects={
+            "project-1": ProjectRecord(
+                "project-1", "Project", "policy-default", project_status
+            )
+        },
+        teams={
+            "team-1": TeamRecord(
+                "team-1", "Team", None, team_status, NOW, True
+            )
+        },
+        team_memberships={},
+        permission_grants={},
     )
     monkeypatch.setattr(intake_adapter, "acquire_mixed_owner_locks", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(intake_adapter, "read_session_actor", lambda *_args: actor)
     monkeypatch.setattr(intake_adapter, "_document_record", lambda row: row)
-    monkeypatch.setattr(intake_adapter, "_authorization_state", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(intake_adapter, "is_system_admin", lambda *_args: False)
+    monkeypatch.setattr(
+        intake_adapter,
+        "_authorization_state",
+        lambda *_args, **_kwargs: authorization_state,
+    )
+    monkeypatch.setattr(intake_adapter, "is_system_admin", lambda *_args: system_admin)
     monkeypatch.setattr(
         intake_adapter,
         "direct_team_role",
@@ -386,14 +492,364 @@ def _project_download_capabilities(
         lambda: session
     ).document_library_projection(
         actor_type="user",
-        actor_id="user-1",
+        actor_id=actor_id,
         presented_browser_session_token="browser-token",
     )
 
     return {
-        item.document.document_id: item.download_available
+        item.document.document_id: getattr(item, capability)
         for item in projection.items
     }
+
+
+@pytest.mark.parametrize(
+    "actor",
+    (
+        UserRecord("system-admin", "Admin", None, "admin", None, True, "user", NOW),
+        UserRecord("user-uploader", "Uploader", None, "member", None, True, "user", NOW),
+    ),
+)
+def test_retired_project_denies_document_control_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    actor: UserRecord,
+) -> None:
+    document = replace(
+        _command().document,
+        uploader_actor_id="user-uploader",
+        scope_type="project",
+        scope_id="project-1",
+    )
+    session = SimpleNamespace(scalar=lambda _statement: object())
+    monkeypatch.setattr(
+        processing_owner,
+        "acquire_mixed_owner_locks",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        processing_owner,
+        "_document_record",
+        lambda _row: document,
+    )
+    monkeypatch.setattr(
+        processing_owner.identity_rows,
+        "read_session_actor",
+        lambda *_args: actor,
+    )
+
+    def state(status: str) -> ProcessingJobAuthorizationState:
+        return ProcessingJobAuthorizationState(
+            users={actor.actor_id: actor},
+            projects={
+                "project-1": ProjectRecord(
+                    "project-1", "Project", "policy-default", status
+                )
+            },
+            teams={},
+            team_memberships={},
+            permission_grants={},
+        )
+
+    monkeypatch.setattr(
+        processing_owner._JobTransitionReadSql,
+        "_authorization_state",
+        staticmethod(lambda *_args, **_kwargs: state("retired")),
+    )
+    with pytest.raises(processing_owner._ProcessingControlAuthorizationDenied):
+        processing_owner._authorize_document_control(
+            session,
+            document=document,
+            presented_browser_session_token="browser-token",
+            expected_actor_type=actor.actor_type,
+            expected_actor_id=actor.actor_id,
+        )
+
+    monkeypatch.setattr(
+        processing_owner._JobTransitionReadSql,
+        "_authorization_state",
+        staticmethod(lambda *_args, **_kwargs: state("active")),
+    )
+    assert processing_owner._authorize_document_control(
+        session,
+        document=document,
+        presented_browser_session_token="browser-token",
+        expected_actor_type=actor.actor_type,
+        expected_actor_id=actor.actor_id,
+    ) == actor
+
+
+@pytest.mark.parametrize(
+    "actor",
+    (
+        UserRecord("system-admin", "Admin", None, "admin", None, True, "user", NOW),
+        UserRecord("user-uploader", "Uploader", None, "member", None, True, "user", NOW),
+    ),
+)
+def test_retired_team_denies_document_control_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    actor: UserRecord,
+) -> None:
+    document = replace(
+        _command().document,
+        uploader_actor_id="user-uploader",
+        scope_type="team",
+        scope_id="team-1",
+    )
+    session = SimpleNamespace(scalar=lambda _statement: object())
+    monkeypatch.setattr(
+        processing_owner,
+        "acquire_mixed_owner_locks",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        processing_owner,
+        "_document_record",
+        lambda _row: document,
+    )
+    monkeypatch.setattr(
+        processing_owner.identity_rows,
+        "read_session_actor",
+        lambda *_args: actor,
+    )
+
+    def state(status: str) -> ProcessingJobAuthorizationState:
+        return ProcessingJobAuthorizationState(
+            users={actor.actor_id: actor},
+            projects={},
+            teams={
+                "team-1": TeamRecord(
+                    "team-1", "Team", None, status, NOW, True
+                )
+            },
+            team_memberships={},
+            permission_grants={},
+        )
+
+    monkeypatch.setattr(
+        processing_owner._JobTransitionReadSql,
+        "_authorization_state",
+        staticmethod(lambda *_args, **_kwargs: state("retired")),
+    )
+    with pytest.raises(processing_owner._ProcessingControlAuthorizationDenied):
+        processing_owner._authorize_document_control(
+            session,
+            document=document,
+            presented_browser_session_token="browser-token",
+            expected_actor_type=actor.actor_type,
+            expected_actor_id=actor.actor_id,
+        )
+
+    monkeypatch.setattr(
+        processing_owner._JobTransitionReadSql,
+        "_authorization_state",
+        staticmethod(lambda *_args, **_kwargs: state("active")),
+    )
+    assert processing_owner._authorize_document_control(
+        session,
+        document=document,
+        presented_browser_session_token="browser-token",
+        expected_actor_type=actor.actor_type,
+        expected_actor_id=actor.actor_id,
+    ) == actor
+
+
+@pytest.mark.parametrize(
+    "actor",
+    (
+        UserRecord("system-admin", "Admin", None, "admin", None, True, "user", NOW),
+        UserRecord("user-uploader", "Uploader", None, "member", None, True, "user", NOW),
+    ),
+)
+def test_retired_project_denies_job_control_until_reactivation(
+    actor: UserRecord,
+) -> None:
+    document = replace(
+        _command().document,
+        uploader_actor_id="user-uploader",
+        scope_type="project",
+        scope_id="project-1",
+    )
+
+    def projection(status: str):
+        return SimpleNamespace(
+            document=document,
+            tag_refs=(("project", "project-1"), ("team", "team-1")),
+            authorization_state=ProcessingJobAuthorizationState(
+                users={actor.actor_id: actor},
+                projects={
+                    "project-1": ProjectRecord(
+                        "project-1", "Project", "policy-default", status
+                    )
+                },
+                teams={},
+                team_memberships={},
+                permission_grants={},
+            ),
+        )
+
+    authority = RbacProcessingJobsAuthorization()
+    assert authority.can_read(projection("retired"), actor) is False
+    assert authority.can_control(projection("retired"), actor) is False
+    assert authority.can_read(projection("active"), actor) is (
+        actor.system_role == "admin"
+    )
+    assert authority.can_control(projection("active"), actor) is True
+
+
+@pytest.mark.parametrize(
+    "actor",
+    (
+        UserRecord("system-admin", "Admin", None, "admin", None, True, "user", NOW),
+        UserRecord("user-uploader", "Uploader", None, "member", None, True, "user", NOW),
+    ),
+)
+def test_retired_team_denies_job_control_until_reactivation(
+    actor: UserRecord,
+) -> None:
+    document = replace(
+        _command().document,
+        uploader_actor_id="user-uploader",
+        scope_type="team",
+        scope_id="team-1",
+    )
+
+    def projection(status: str):
+        return SimpleNamespace(
+            document=document,
+            tag_refs=(("team", "team-1"), ("project", "project-1")),
+            authorization_state=ProcessingJobAuthorizationState(
+                users={actor.actor_id: actor},
+                projects={},
+                teams={
+                    "team-1": TeamRecord(
+                        "team-1", "Team", None, status, NOW, True
+                    )
+                },
+                team_memberships={},
+                permission_grants={},
+            ),
+        )
+
+    authority = RbacProcessingJobsAuthorization()
+    assert authority.can_read(projection("retired"), actor) is False
+    assert authority.can_control(projection("retired"), actor) is False
+    assert authority.can_read(projection("active"), actor) is (
+        actor.system_role == "admin"
+    )
+    assert authority.can_control(projection("active"), actor) is True
+
+
+@pytest.mark.parametrize(
+    ("actor_id", "system_admin"),
+    (("user-uploader", False), ("system-admin", True)),
+)
+def test_retired_project_hides_document_actions_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_id: str,
+    system_admin: bool,
+) -> None:
+    retired = _project_download_capabilities(
+        monkeypatch,
+        team_role="member",
+        project_admin=False,
+        project_status="retired",
+        actor_id=actor_id,
+        system_admin=system_admin,
+        capability="can_edit",
+    )
+    assert retired["document-project"] is False
+
+    active = _project_download_capabilities(
+        monkeypatch,
+        team_role="member",
+        project_admin=False,
+        project_status="active",
+        actor_id=actor_id,
+        system_admin=system_admin,
+        capability="can_edit",
+    )
+    assert active["document-project"] is True
+
+
+@pytest.mark.parametrize("capability", ("can_view", "download_available"))
+def test_retired_project_hides_cross_tagged_document_reads_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+) -> None:
+    retired = _project_download_capabilities(
+        monkeypatch,
+        team_role="member",
+        project_admin=False,
+        project_status="retired",
+        project_member_download=True,
+        capability=capability,
+    )
+    assert retired["document-project"] is False
+
+    active = _project_download_capabilities(
+        monkeypatch,
+        team_role="member",
+        project_admin=False,
+        project_status="active",
+        project_member_download=True,
+        capability=capability,
+    )
+    assert active["document-project"] is True
+
+
+@pytest.mark.parametrize(
+    ("actor_id", "system_admin"),
+    (("user-uploader", False), ("system-admin", True)),
+)
+def test_retired_team_hides_document_actions_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    actor_id: str,
+    system_admin: bool,
+) -> None:
+    retired = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        team_status="retired",
+        actor_id=actor_id,
+        system_admin=system_admin,
+        capability="can_edit",
+    )
+    assert retired["document-team"] is False
+
+    active = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        team_status="active",
+        actor_id=actor_id,
+        system_admin=system_admin,
+        capability="can_edit",
+    )
+    assert active["document-team"] is True
+
+
+@pytest.mark.parametrize("capability", ("can_view", "download_available"))
+def test_retired_team_hides_cross_tagged_document_reads_until_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+) -> None:
+    retired = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        team_status="retired",
+        capability=capability,
+    )
+    assert retired["document-team"] is False
+
+    active = _project_download_capabilities(
+        monkeypatch,
+        team_role="admin",
+        project_admin=False,
+        team_status="active",
+        capability=capability,
+    )
+    assert active["document-team"] is True
 
 
 @pytest.mark.parametrize(
@@ -521,6 +977,77 @@ def test_named_upload_requires_one_complete_document_graph() -> None:
     with pytest.raises(ValueError, match="graph is incomplete"):
         _validate_input(replace(command, audit_events=()))
 
+
+@pytest.mark.parametrize("scope_type", ("project", "team"))
+def test_upload_terminal_rejects_retired_owner_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    scope_type: str,
+) -> None:
+    events: list[str] = []
+    scope_id = f"{scope_type}-1"
+    command = _command()
+    command.document.scope_type = scope_type
+    command.document.scope_id = scope_id
+    command.tags[0].tag_type = scope_type
+    command.tags[0].tag_id = scope_id
+    command.artifact_publication.artifact.owner_scope_type = scope_type
+    command.artifact_publication.artifact.owner_scope_id = scope_id
+    command.artifact_publication.verified_tag_scopes = frozenset(
+        {(scope_type, scope_id)}
+    )
+    command.authorization_decisions[0].scope_type = scope_type
+    command.authorization_decisions[0].scope_id = scope_id
+    command = replace(
+        command,
+        audit_events=(
+            replace(
+                command.audit_events[0],
+                project_id=scope_id if scope_type == "project" else None,
+                scope_type=scope_type,
+                scope_id=scope_id,
+            ),
+        ),
+    )
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get(self, row_type, _key, **_kwargs):
+            assert row_type.__name__ == f"Atlas{scope_type.title()}Row"
+            return SimpleNamespace(status="retired")
+
+        def rollback(self):
+            events.append("rollback")
+
+    monkeypatch.setattr(
+        document_upload,
+        "new_document_original_artifact_lock_identities",
+        lambda _publication: (),
+    )
+    monkeypatch.setattr(
+        document_upload,
+        "acquire_mixed_owner_locks",
+        lambda *_args, **kwargs: events.append(
+            f"locks:{f'{scope_type}:{scope_type}:{scope_id}' in kwargs['exclusive_identity_keys']}"
+        ),
+    )
+    monkeypatch.setattr(
+        document_upload,
+        "NewDocumentOriginalArtifactPublicationWriter",
+        lambda _session: pytest.fail("retired owner must not publish"),
+    )
+
+    with pytest.raises(
+        document_upload.DocumentUploadReplayConflict,
+        match=f"{scope_type.title()} is no longer active",
+    ):
+        NewDocumentUploadCommand(Session).execute(command)
+
+    assert events == ["locks:True", "rollback"]
 
 def test_upload_and_adapter_do_not_recreate_an_aggregate_or_generic_uow() -> None:
     source = inspect.getsource(NewDocumentUploadCommand)

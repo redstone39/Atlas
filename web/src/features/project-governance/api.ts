@@ -25,12 +25,18 @@ export const projectGovernanceApi = {
         idempotency_key: `project-${projectId}`,
       }),
     }),
-  updateProject: (projectId: string, name: string, policyProfileId: string) =>
+  updateProject: (
+    projectId: string,
+    updates: {
+      name?: string;
+      policy_profile_id?: string;
+      status?: "active" | "retired";
+    },
+  ) =>
     requestJson<AdminActionResult>(`/api/v1/admin/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        name,
-        policy_profile_id: policyProfileId,
+        ...updates,
         idempotency_key: `project-update-${projectId}`,
       }),
     }),

@@ -23,6 +23,7 @@ from atlas_production.infrastructure.persistence.document_intake import AtlasDoc
 from atlas_production.infrastructure.persistence.processing_pipeline import (
     AtlasProcessingIdentityRow as _AtlasProcessingIdentityRow,  # noqa: F401
 )
+from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
 from atlas_production.infrastructure.postgres_locks import (
     acquire_mixed_owner_locks,
     acquire_owner_locks,
@@ -272,6 +273,11 @@ def _delete_authority_fixture(
             delete(AtlasDocumentRow).where(AtlasDocumentRow.document_id == PARENT_ID)
         )
         session.execute(
+            delete(AtlasProjectRow).where(
+                AtlasProjectRow.project_id == "project-c3-authority"
+            )
+        )
+        session.execute(
             delete(AtlasStorageRequestLeaseRow).where(
                 AtlasStorageRequestLeaseRow.lease_id.in_((LEASE_ID, READ_LEASE_ID))
             )
@@ -328,6 +334,11 @@ def _seed_authority_fixture(
             delete(AtlasDocumentRow).where(AtlasDocumentRow.document_id == PARENT_ID)
         )
         session.execute(
+            delete(AtlasProjectRow).where(
+                AtlasProjectRow.project_id == "project-c3-authority"
+            )
+        )
+        session.execute(
             delete(AtlasStorageRequestLeaseRow).where(
                 AtlasStorageRequestLeaseRow.lease_id.in_((LEASE_ID, READ_LEASE_ID))
             )
@@ -375,6 +386,14 @@ def _seed_authority_fixture(
         )
         session.add(AtlasArtifactWriteAttemptRow(**_payload(_expected_attempt())))
         session.add(AtlasStorageRequestLeaseRow(**_payload(_write_lease())))
+        session.add(
+            AtlasProjectRow(
+                project_id="project-c3-authority",
+                name="C3 authority project",
+                policy_profile_id="default",
+                status="active",
+            )
+        )
         session.add(AtlasDocumentRow(**asdict(_document())))
         session.commit()
     return previous_control

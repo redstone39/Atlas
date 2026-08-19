@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 import inspect
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,6 +65,7 @@ from atlas_production.infrastructure.postgres_project_adapter import (
 from atlas_production.infrastructure.postgres_team_adapter import (
     PostgresTeamAccessRepository,
 )
+from atlas_production.rbac import actor_direct_team_roles
 from atlas_production.modules.identity_access.agent_contracts import (
     AgentAuditCommand,
 )
@@ -381,6 +383,22 @@ class _PagedTeamOwner:
         )
 
 
+def test_session_direct_team_roles_exclude_retired_teams() -> None:
+    repository = PostgresIdentityAccessRepository(lambda: None)
+    team_owner = _PagedTeamOwner()
+    team_owner.teams[0] = replace(team_owner.teams[0], status="retired")
+    repository.team_owner = team_owner
+    actor = UserRecord(
+        "user-unit", "User", None, "user", None, True, "user", NOW
+    )
+
+    roles = repository._direct_team_roles(actor)
+
+    assert "team-0000" not in roles
+    assert roles["team-0001"] == "member"
+    assert len(roles) == 500
+
+
 def test_team_public_lists_are_complete_past_500() -> None:
     repository = PostgresTeamAccessRepository(lambda: None)
     repository.owner = _PagedTeamOwner()
@@ -391,7 +409,12 @@ def test_team_public_lists_are_complete_past_500() -> None:
 class _PagedProjectOwner:
     def __init__(self) -> None:
         self.projects = [
-            ProjectRecord(f"project-{index:04d}", f"Project {index}", "policy")
+            ProjectRecord(
+                f"project-{index:04d}",
+                f"Project {index}",
+                "policy",
+                "active",
+            )
             for index in range(501)
         ]
         self.grants = [
@@ -645,6 +668,7 @@ def test_team_adapter_commits_hierarchy_mutation_and_audit_together() -> None:
     assert owner.change_sets[0].authorization_actor_ids == ("user-admin",)
     assert owner.change_sets[0].current_actor_ids == ("user-admin",)
     assert owner.change_sets[0].authorization_requires_system_admin is True
+    assert owner.change_sets[0].authorization_team_id is None
 
 
 def test_team_adapter_separates_authorizing_actor_from_current_target() -> None:
@@ -684,12 +708,13 @@ def test_team_adapter_separates_authorizing_actor_from_current_target() -> None:
 class _ProjectOwnerCapture:
     def __init__(self) -> None:
         self.change_sets = []
+        self.project = None
 
     def project_acl(self, change_set) -> None:
         self.change_sets.append(change_set)
 
     def get_project(self, _project_id: str):
-        return None
+        return self.project
 
     def get_grant(self, _grant_id: str):
         return None
@@ -699,12 +724,16 @@ def test_project_adapter_commits_project_grant_and_audit_together() -> None:
     repository = PostgresProjectGovernanceRepository(lambda: None)
     owner = _ProjectOwnerCapture()
     repository.owner = owner
-    project = ProjectRecord("project-unit", "Unit", "policy-default")
+    project = ProjectRecord("project-unit", "Unit", "policy-default", "active")
     grant = PermissionGrantRecord(
         "grant-unit", project.project_id, "user", "user-admin", "admin",
         "allow", "active", NOW,
     )
-    repository.put_project(project)
+    repository.put_project(
+        project,
+        expected_project=None,
+        authorization="system_admin",
+    )
     repository.put_grant(grant)
     event = repository.append_audit(ProjectAuditCommand(
         "project_created", "user-admin", "project:project-unit",
@@ -717,6 +746,44 @@ def test_project_adapter_commits_project_grant_and_audit_together() -> None:
     assert owner.change_sets[0].audit_events == (event,)
     assert owner.change_sets[0].authorization_actor_id == "user-admin"
     assert owner.change_sets[0].authorization_requires_system_admin is True
+
+
+def test_project_adapter_carries_permission_manage_into_owner_transaction() -> None:
+    repository = PostgresProjectGovernanceRepository(lambda: None)
+    owner = _ProjectOwnerCapture()
+    project = ProjectRecord("project-unit", "Renamed", "policy-default", "active")
+    expected_project = ProjectRecord(
+        "project-unit", "Unit", "policy-default", "active"
+    )
+    owner.project = ProjectRecord(
+        "project-unit", "Concurrent Rename", "policy-default", "active"
+    )
+    repository.owner = owner
+
+    repository.put_project(
+        project,
+        expected_project=expected_project,
+        authorization="permission_manage",
+    )
+    event = repository.append_audit(
+        ProjectAuditCommand(
+            "project_updated",
+            "user-project-admin",
+            "project:project-unit",
+            project.project_id,
+            "project.is_updated",
+            {"policy_profile_id": "policy-default", "status": "active"},
+        )
+    )
+
+    change_set = owner.change_sets[0]
+    assert change_set.projects == (project,)
+    assert change_set.expected_projects == ((project.project_id, expected_project),)
+    assert change_set.audit_events == (event,)
+    assert change_set.authorization_actor_id == "user-project-admin"
+    assert change_set.authorization_project_id == project.project_id
+    assert change_set.authorization_action == "permission_manage"
+    assert change_set.authorization_requires_system_admin is False
 
 
 class _Rows:
@@ -748,7 +815,10 @@ class _AclSession:
     ) -> None:
         self.actor = actor
         self.project = AtlasProjectRow(
-            project_id="project-unit", name="Unit", policy_profile_id="policy-default"
+            project_id="project-unit",
+            name="Unit",
+            policy_profile_id="policy-default",
+            status="active",
         )
         self.team = AtlasTeamRow(
             team_id="team-unit", name="Unit", parent_team_id=None,
@@ -933,6 +1003,21 @@ def _team(
         team_id=team_id, name=team_id, parent_team_id=parent,
         status=status, created_at=NOW, inherit_parent_documents=inherit,
     )
+
+
+def test_direct_team_roles_exclude_retired_team_membership() -> None:
+    membership = _membership("team-unit", role="admin")
+    store = SimpleNamespace(
+        teams={"team-unit": _team("team-unit", None, status="retired")},
+        team_memberships={membership.membership_id: membership},
+    )
+
+    assert actor_direct_team_roles(store, "user", "user-unit") == {}
+
+    store.teams["team-unit"].status = "active"
+    assert actor_direct_team_roles(store, "user", "user-unit") == {
+        "team-unit": "admin"
+    }
 
 
 def test_direct_actor_tier_beats_team_deny_and_same_tier_deny_wins() -> None:
@@ -1143,6 +1228,13 @@ def test_workspace_scope_labels_include_empty_admin_projects_and_teams() -> None
         project_id="project-empty",
         name="New Project",
         policy_profile_id="policy-default",
+        status="active",
+    )
+    retired_project = AtlasProjectRow(
+        project_id="project-retired",
+        name="Retired Project",
+        policy_profile_id="policy-default",
+        status="retired",
     )
     team = _team("team-empty", None)
     session = _AclSession(
@@ -1150,7 +1242,7 @@ def test_workspace_scope_labels_include_empty_admin_projects_and_teams() -> None
         teams=[team],
         memberships=[],
         grants=[],
-        projects=[project],
+        projects=[project, retired_project],
     )
     authority = ActionAwareAclAuthority(lambda: session)
 
@@ -1291,6 +1383,43 @@ def test_scope_resolver_handles_system_admin_and_inactive_actor(
     assert can_administer is expected
 
 
+def test_scope_resolver_excludes_retired_project_for_system_admin() -> None:
+    project = AtlasProjectRow(
+        project_id="project-unit",
+        name="Unit",
+        policy_profile_id="policy-default",
+        status="retired",
+    )
+    session = _AclSession(
+        actor=_actor(system_role="admin"),
+        projects=[project],
+    )
+
+    scope, _, can_administer = _resolved_owner_scope(
+        session, ("project", "project-unit")
+    )
+
+    assert scope == set()
+    assert can_administer is False
+
+
+def test_scope_resolver_excludes_retired_team_owner_admin_bypass() -> None:
+    session = _AclSession(
+        actor=_actor(),
+        teams=[_team("team-unit", None, status="retired")],
+        memberships=[_membership("team-unit", role="admin")],
+        grants=[],
+        projects=[],
+    )
+
+    scope, _, can_administer = _resolved_owner_scope(
+        session, ("team", "team-unit")
+    )
+
+    assert scope == set()
+    assert can_administer is False
+
+
 def test_scope_resolver_rejects_cross_wired_owner_arguments() -> None:
     session = _AclSession(actor=_actor())
 
@@ -1300,6 +1429,27 @@ def test_scope_resolver_rejects_cross_wired_owner_arguments() -> None:
             actor_type="user",
             actor_id="user-unit",
             owner_scope_type="team",
+        )
+
+
+def test_owner_commit_rejects_retired_project_before_system_admin_bypass() -> None:
+    project = AtlasProjectRow(
+        project_id="project-unit",
+        name="Unit",
+        policy_profile_id="policy-default",
+        status="retired",
+    )
+    session = _AclSession(actor=_actor(system_role="admin"), projects=[project])
+
+    with pytest.raises(IdentityAuthorizationConflict, match="no longer active"):
+        IdentityRepository._validate_authorization(
+            session,
+            IdentitySessionChangeSet(
+                authorization_actor_id="user-unit",
+                authorization_scope_type="project",
+                authorization_scope_id="project-unit",
+                authorization_requires_system_admin=True,
+            ),
         )
 
 
@@ -1339,6 +1489,54 @@ def test_team_owner_rejects_inactive_current_target() -> None:
             session,
             TeamGovernanceChangeSet(
                 current_actor_ids=("user-unit",),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("team_status", "membership_role"),
+    (("retired", "admin"), ("active", "member")),
+)
+def test_team_owner_commit_revalidates_active_direct_admin_authority(
+    team_status: str,
+    membership_role: str,
+) -> None:
+    session = _AclSession(
+        actor=_actor(),
+        teams=[_team("team-unit", None, status=team_status)],
+        memberships=[_membership("team-unit", role=membership_role)],
+        grants=[],
+        projects=[],
+    )
+    session.scalar = lambda _statement: (
+        session.memberships[0] if membership_role == "admin" else None
+    )
+
+    with pytest.raises(TeamAuthorizationConflict, match="authority changed"):
+        TeamRepository._validate_authorization(
+            session,
+            TeamGovernanceChangeSet(
+                authorization_actor_ids=("user-unit",),
+                authorization_team_id="team-unit",
+            ),
+        )
+
+
+def test_team_owner_commit_rejects_retired_target_before_system_admin_bypass() -> None:
+    session = _AclSession(
+        actor=_actor(system_role="admin"),
+        teams=[_team("team-unit", None, status="retired")],
+        memberships=[],
+        grants=[],
+        projects=[],
+    )
+
+    with pytest.raises(TeamAuthorizationConflict, match="authority changed"):
+        TeamRepository._validate_authorization(
+            session,
+            TeamGovernanceChangeSet(
+                authorization_actor_ids=("user-unit",),
+                authorization_team_id="team-unit",
             ),
         )
 
@@ -1611,9 +1809,11 @@ class _FailingProjectOwner(_ProjectOwnerCapture):
 def test_project_audit_failure_discards_typed_staging() -> None:
     repository = PostgresProjectGovernanceRepository(lambda: None)
     repository.owner = _FailingProjectOwner()
-    repository.put_project(ProjectRecord(
-        "project-failed", "Failed", "policy-default",
-    ))
+    repository.put_project(
+        ProjectRecord("project-failed", "Failed", "policy-default", "active"),
+        expected_project=None,
+        authorization="system_admin",
+    )
     with pytest.raises(RuntimeError, match="audit write failed"):
         repository.append_audit(ProjectAuditCommand(
             "project_created", "user-admin", "project:project-failed",

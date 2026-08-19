@@ -12,6 +12,7 @@ class ProjectCreateRequest(BaseModel):
 class ProjectUpdateRequest(BaseModel):
     name: str | None = None
     policy_profile_id: str | None = None
+    status: Literal["active", "retired"] | None = None
     idempotency_key: str
 
 
@@ -19,6 +20,7 @@ class ProjectAdminSummary(BaseModel):
     project_id: str
     name: str
     policy_profile_id: str
+    status: Literal["active", "retired"]
 
 
 class ProjectAdminListResult(BaseModel):

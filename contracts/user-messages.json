@@ -645,6 +645,9 @@
     "project.was_not_found": {
       "params": {}
     },
+    "project.was_not_found_or_is_retired": {
+      "params": {}
+    },
     "provider.configuration_changed_refresh_and_try_again": {
       "params": {}
     },

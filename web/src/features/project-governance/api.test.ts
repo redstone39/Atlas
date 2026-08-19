@@ -22,7 +22,11 @@ describe("project governance API contract", () => {
   it("preserves Project and Project Member request generators", async () => {
     const fetchMock = successfulFetch();
     await projectGovernanceApi.createProject("project-a", "Project A");
-    await projectGovernanceApi.updateProject("project-a", "Project A2", "policy-a");
+    await projectGovernanceApi.updateProject("project-a", {
+      name: "Project A2",
+      policy_profile_id: "policy-a",
+      status: "retired",
+    });
     await projectGovernanceApi.addProjectMember(
       "project-a",
       "team",
@@ -56,6 +60,7 @@ describe("project governance API contract", () => {
           name: "Project A2",
           policy_profile_id: "policy-a",
           idempotency_key: "project-update-project-a",
+          status: "retired",
         },
       },
       {

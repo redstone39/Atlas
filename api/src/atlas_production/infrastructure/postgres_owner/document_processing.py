@@ -31,13 +31,11 @@ from atlas_production.infrastructure.postgres_locks import (
     acquire_owner_locks,
 )
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
-from atlas_production.infrastructure.postgres_owner.lock_keys import (
-    identity_actor_owner_key,
-    project_acl_subject_owner_key,
-    project_owner_key,
-    team_owner_key,
-    team_subject_owner_key,
-)
+from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
+project_acl_subject_owner_key,
+project_owner_key,
+team_owner_key,
+team_subject_owner_key,)
 from atlas_production.modules.artifact_storage.records import (
     ArtifactRecord,
     ArtifactScopeBindingRecord,
@@ -86,6 +84,7 @@ from atlas_production.modules.processing_pipeline.canonical_processing import (
 from atlas_production.modules.project_governance.records import ProjectRecord
 from atlas_production.rbac import (
     direct_team_role,
+    document_owner_is_active,
     effective_document_scope,
     is_system_admin,
     resolve_access,
@@ -6872,29 +6871,38 @@ def _authorize_document_control(
         actor_id=actor.actor_id,
         scope_bindings=((document.scope_type, document.scope_id or ""),),
     )
-    allowed = bool(
+    owner_active = document_owner_is_active(
+        authority, document.scope_type, document.scope_id
+    )
+    allowed = owner_active and bool(
         document.uploader_actor_id == actor.actor_id
         or is_system_admin(authority, actor.actor_type, actor.actor_id)
     )
     if document.scope_type == "team":
-        allowed = allowed or team_role_covers(
-            direct_team_role(
-                authority,
-                actor.actor_type,
-                actor.actor_id,
-                document.scope_id or "",
-            ),
-            "admin",
+        allowed = allowed or (
+            owner_active
+            and team_role_covers(
+                direct_team_role(
+                    authority,
+                    actor.actor_type,
+                    actor.actor_id,
+                    document.scope_id or "",
+                ),
+                "admin",
+            )
         )
     elif document.scope_type == "project" and document.scope_id:
-        allowed = allowed or resolve_access(
-            authority,
-            actor_type=actor.actor_type,
-            actor_id=actor.actor_id,
-            project_id=document.scope_id,
-            action="permission_manage",
-            persist=False,
-        ).allowed
+        allowed = allowed or (
+            owner_active
+            and resolve_access(
+                authority,
+                actor_type=actor.actor_type,
+                actor_id=actor.actor_id,
+                project_id=document.scope_id,
+                action="permission_manage",
+                persist=False,
+            ).allowed
+        )
     if not allowed:
         raise _ProcessingControlAuthorizationDenied(actor)
     return actor
@@ -12077,37 +12085,55 @@ class DocumentLifecycleMutationCommand:
                         )
                         or ((expected_document.scope_type, expected_document.scope_id or ""),),
                     )
-                    allowed = is_system_admin(
+                    owner_active = document_owner_is_active(
+                        authority,
+                        expected_document.scope_type,
+                        expected_document.scope_id,
+                    )
+                    allowed = owner_active and is_system_admin(
                         authority, actor.actor_type, actor.actor_id
                     )
-                    if control_action == "edit" and (
-                        expected_document.uploader_actor_id == actor.actor_id
+                    if (
+                        owner_active
+                        and control_action == "edit"
+                        and expected_document.uploader_actor_id == actor.actor_id
                     ):
                         allowed = True
                     if expected_document.scope_type == "team":
-                        required_team_role = "uploader" if control_action == "edit" else "admin"
-                        allowed = allowed or team_role_covers(
-                            direct_team_role(
-                                authority,
-                                actor.actor_type,
-                                actor.actor_id,
-                                expected_document.scope_id or "",
-                            ),
-                            required_team_role,
+                        required_team_role = (
+                            "uploader" if control_action == "edit" else "admin"
                         )
-                    elif expected_document.scope_type == "project" and expected_document.scope_id:
-                        allowed = allowed or resolve_access(
-                            authority,
-                            actor_type=actor.actor_type,
-                            actor_id=actor.actor_id,
-                            project_id=expected_document.scope_id,
-                            action=(
-                                "document_register"
-                                if control_action == "edit"
-                                else "permission_manage"
-                            ),
-                            persist=False,
-                        ).allowed
+                        allowed = allowed or (
+                            owner_active
+                            and team_role_covers(
+                                direct_team_role(
+                                    authority,
+                                    actor.actor_type,
+                                    actor.actor_id,
+                                    expected_document.scope_id or "",
+                                ),
+                                required_team_role,
+                            )
+                        )
+                    elif (
+                        expected_document.scope_type == "project"
+                        and expected_document.scope_id
+                    ):
+                        allowed = allowed or (
+                            owner_active
+                            and resolve_access(
+                                authority,
+                                actor_type=actor.actor_type,
+                                actor_id=actor.actor_id,
+                                project_id=expected_document.scope_id,
+                                action=(
+                                    "document_register"
+                                    if control_action == "edit"
+                                    else "permission_manage"
+                                ),
+                                persist=False,
+                            ).allowed
+                        )
                     if not allowed:
                         if (
                             denial_audit_event is None
