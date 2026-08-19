@@ -24,6 +24,10 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_turn_access_grant_releases',
         'atlas_turn_access_grants',
         'atlas_turn_acceptance_resources',
+        'atlas_prompt_skill_catalog_revisions',
+        'atlas_prompt_skill_controls',
+        'atlas_prompt_skill_idempotency',
+        'atlas_prompt_skill_revisions',
         'atlas_turn_answer_behavior_revisions',
         'atlas_turn_grant_document_resources',
         'atlas_turn_grant_resource_snapshots',
@@ -1664,6 +1668,42 @@ def upgrade() -> None:
     bind = op.get_bind()
     for table in _atr020_tables():
         table.create(bind=bind, checkfirst=False)
+    op.execute(
+        """
+        INSERT INTO atlas_prompt_skill_catalog_revisions (
+            category,
+            catalog_revision,
+            catalog_digest,
+            refs,
+            created_by,
+            created_at
+        ) VALUES
+            (
+                'understanding',
+                1,
+                '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+                '[]'::jsonb,
+                NULL,
+                CURRENT_TIMESTAMP
+            ),
+            (
+                'planner',
+                1,
+                '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+                '[]'::jsonb,
+                NULL,
+                CURRENT_TIMESTAMP
+            ),
+            (
+                'answer',
+                1,
+                '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+                '[]'::jsonb,
+                NULL,
+                CURRENT_TIMESTAMP
+            )
+        """
+    )
     # ### end Alembic commands ###
 
 

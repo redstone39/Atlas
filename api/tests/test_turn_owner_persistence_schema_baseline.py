@@ -10,6 +10,7 @@ from atlas_production.infrastructure.persistence import (
     context_engineering,
     conversation,
     retrieval,
+    prompt_skills,
     result_governance,
     turn_runtime,
     answer_behavior,
@@ -53,6 +54,7 @@ def test_development_baseline_registers_every_owner_table() -> None:
         retrieval.OWNER_TABLES,
         result_governance.TURN_RESULT_GOVERNANCE_OWNER_TABLES,
         turn_runtime.OWNER_TABLES,
+        prompt_skills.OWNER_TABLES,
         answer_behavior.OWNER_TABLES,
     )
     assert baseline.ATR020_OWNER_TABLES == expected

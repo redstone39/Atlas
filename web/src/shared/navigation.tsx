@@ -9,6 +9,7 @@ import {
   Route,
   ShieldCheck,
   Users,
+  WandSparkles,
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -74,6 +75,12 @@ const MODELS_ITEM: ManagementNavItem = {
   descriptionKey: "settings.managementModels",
   icon: Cpu,
 };
+const PROMPT_SKILLS_ITEM: ManagementNavItem = {
+  route: "/admin/prompt-skills",
+  titleKey: "nav.promptSkills",
+  descriptionKey: "settings.managementPromptSkills",
+  icon: WandSparkles,
+};
 const PROCESSING_PLUGINS_ITEM: ManagementNavItem = {
   route: "/admin/plugins",
   titleKey: "nav.plugins",
@@ -105,7 +112,12 @@ export const IDENTITY_ACCESS_ITEMS = [
   PROJECTS_ITEM,
 ];
 export const KNOWLEDGE_CONTENT_ITEMS = [DOCUMENT_LIBRARY_ITEM];
-export const AI_AUTOMATION_ITEMS = [MODELS_ITEM, PROCESSING_PLUGINS_ITEM, AGENTS_ITEM];
+export const AI_AUTOMATION_ITEMS = [
+  MODELS_ITEM,
+  PROMPT_SKILLS_ITEM,
+  PROCESSING_PLUGINS_ITEM,
+  AGENTS_ITEM,
+];
 export const SYSTEM_OPERATIONS_ITEMS = [AUDIT_ITEM, SYSTEM_STATUS_ITEM];
 export const ADMIN_MANAGEMENT_ITEMS: ManagementNavItem[] = [
   ...IDENTITY_ACCESS_ITEMS,

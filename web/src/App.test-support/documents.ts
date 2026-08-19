@@ -503,6 +503,9 @@ export function createDocumentsHandler(
         updated_at: "2026-07-15T00:01:01Z",
       });
     }
+    if (url.pathname === "/api/v1/admin/prompt-skills" && method === "GET") {
+      return jsonResponse({ items: [] });
+    }
     if (url.pathname === "/api/v1/admin/processing-plugins" && method === "GET") {
       return jsonResponse({ items: [] });
     }

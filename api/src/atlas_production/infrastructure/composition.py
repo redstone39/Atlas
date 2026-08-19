@@ -129,6 +129,9 @@ from atlas_production.infrastructure.postgres_owner.turn_runtime import Postgres
 from atlas_production.infrastructure.postgres_owner.answer_behavior import (
     PostgresAnswerBehaviorOwner,
 )
+from atlas_production.infrastructure.postgres_owner.prompt_skills import (
+    PostgresPromptSkillOwner,
+)
 from atlas_production.infrastructure.notes_collaboration_client import (
     HttpNotesCollaborationClient,
 )
@@ -187,6 +190,7 @@ from atlas_production.modules.project_governance.service import ProjectGovernanc
 from atlas_production.modules.notes.service import NotesApplicationService
 from atlas_production.modules.workspace_turn.public import WorkspaceTurnApplication
 from atlas_production.modules.answer_behavior.public import AnswerBehaviorService
+from atlas_production.modules.prompt_skills.public import PromptSkillService
 from atlas_production.providers import default_provider_adapter_factory
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
 from atlas_production.modules.artifact_storage.records import (
@@ -217,6 +221,7 @@ class ApiComposition:
     processing_jobs: ProcessingJobsApplication
     model_routing: ModelRoutingService
     answer_behavior: AnswerBehaviorService
+    prompt_skills: PromptSkillService
     notes: NotesApplicationService
     ops_readiness: OpsReadinessService
     conversation_audit: ConversationAuditService
@@ -406,6 +411,8 @@ def build_api_composition(
     )
     audit_reader, audit_writer = build_postgres_audit_adapter(session_factory)
     agent_runtime = AgentRuntimeApplication(agent_query_authority, audit_writer)
+    prompt_skill_owner = PostgresPromptSkillOwner(session_factory)
+    prompt_skills = PromptSkillService(prompt_skill_owner)
 
     processing_registry = ProcessingRegistryService(
         PostgresProcessingAdapter(session_factory),
@@ -594,6 +601,7 @@ def build_api_composition(
         processing_jobs=processing_jobs,
         model_routing=model_routing,
         answer_behavior=answer_behavior,
+        prompt_skills=prompt_skills,
         notes=notes,
         ops_readiness=ops_readiness,
         conversation_audit=conversation_audit,

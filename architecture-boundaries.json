@@ -210,6 +210,16 @@
       ]
     },
     {
+      "id": "prompt_skills",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/prompt_skills"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/prompt_skills/public.py"
+      ]
+    },
+    {
       "id": "turn_execution",
       "role": "module",
       "path_prefixes": [
@@ -361,6 +371,7 @@
         "web/src/features/ops/index.ts",
         "web/src/features/processing-plugins/index.ts",
         "web/src/features/project-governance/index.ts",
+        "web/src/features/prompt-skills/index.ts",
         "web/src/features/team-administration/index.ts",
         "web/src/features/user-administration/index.ts",
         "web/src/features/workspace/index.ts"

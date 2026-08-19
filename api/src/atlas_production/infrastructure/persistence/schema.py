@@ -17,6 +17,7 @@ from . import identity_access as _identity_access
 from . import model_routing as _model_routing
 from . import notes as _notes
 from . import processing_pipeline as _processing_pipeline
+from . import prompt_skills as _prompt_skills
 from . import project_governance as _project_governance
 from . import result_governance as _result_governance
 from . import retrieval as _retrieval

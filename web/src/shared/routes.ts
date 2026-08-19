@@ -14,6 +14,7 @@ export type StaticAppRoute =
   | "/admin/teams"
   | "/admin/projects"
   | "/admin/models"
+  | "/admin/prompt-skills"
   | "/admin/plugins"
   | "/admin/agents"
   | "/admin/audit"
@@ -112,6 +113,7 @@ const STATIC_ROUTES = new Set<StaticAppRoute>([
   "/admin/teams",
   "/admin/projects",
   "/admin/models",
+  "/admin/prompt-skills",
   "/admin/plugins",
   "/admin/agents",
   "/admin/audit",

@@ -182,6 +182,9 @@ function emptyAdminListResponse(pathname: string): unknown {
   if (pathname === "/api/v1/admin/agent-users") {
     return { agents: [] };
   }
+  if (pathname === "/api/v1/admin/prompt-skills") {
+    return { items: [] };
+  }
   if (pathname === "/api/v1/admin/processing-plugins") {
     return { items: [] };
   }

@@ -14,6 +14,7 @@ import { DocumentLibraryScreen } from "./(authenticated)/admin/document-library/
 import { ModelsScreen } from "./(authenticated)/admin/models/screen";
 import { OpsScreen } from "./(authenticated)/admin/ops/screen";
 import { PluginsScreen } from "./(authenticated)/admin/plugins/screen";
+import { PromptSkillsScreen } from "./(authenticated)/admin/prompt-skills/screen";
 import { ProjectsScreen as AdminProjectsScreen } from "./(authenticated)/admin/projects/screen";
 import { TeamsScreen as AdminTeamsScreen } from "./(authenticated)/admin/teams/screen";
 import { UsersScreen } from "./(authenticated)/admin/users/screen";
@@ -109,6 +110,8 @@ function authenticatedScreen(pathname: string): ReactNode {
       return <AdminProjectsScreen />;
     case "/admin/models":
       return <ModelsScreen />;
+    case "/admin/prompt-skills":
+      return <PromptSkillsScreen />;
     case "/admin/plugins": {
       const params = new URLSearchParams(window.location.search);
       const requestedRunId = params.get("run") || null;

@@ -18,6 +18,7 @@ dependencies = [
     "psycopg[binary]>=3.2,<3.4",
     "qdrant-client==1.18.0",
     "sqlalchemy>=2.0,<2.1",
+    "pyyaml>=6.0,<7",
     "uvicorn>=0.35,<0.36",
     "tiktoken>=0.13,<0.14",
     "ldap3==2.9.1",

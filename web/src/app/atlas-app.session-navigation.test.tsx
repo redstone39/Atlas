@@ -260,6 +260,7 @@ it("/settings exposes full management entry points for admins", async () => {
       "Projects",
       "Document Library",
       "Models",
+      "Skill slots",
       "Agents",
       "Processing Plugins",
       "Audit",
