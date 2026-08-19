@@ -683,6 +683,13 @@ class BindContextV1(_StrictModel):
     context_pack_ref: OpaqueRef
 
 
+class ReserveAcceptanceModelActionV1(_StrictModel):
+    execution_id: Identity
+    expected_version: int = Field(ge=1)
+    fencing_token: int = Field(ge=1)
+    context_tokens: int = Field(ge=0)
+
+
 class RequestModelActionV1(_StrictModel):
     execution_id: Identity
     expected_version: int = Field(ge=1)
@@ -949,6 +956,10 @@ class TurnRuntimeOwner(Protocol):
 
     def bind_context(self, command: BindContextV1) -> ExecutionSnapshotV1: ...
 
+    def reserve_acceptance_model_action(
+        self, command: ReserveAcceptanceModelActionV1
+    ) -> ExecutionSnapshotV1: ...
+
     def request_model_action(self, command: RequestModelActionV1) -> ExecutionSnapshotV1: ...
 
     def claim_schema_retry(self, command: ClaimSchemaRetryV1) -> ExecutionSnapshotV1: ...
@@ -1017,6 +1028,7 @@ __all__ = [
     "AcceptExecutionV1",
     "StageAcceptanceResourceV1",
     "BindContextV1",
+    "ReserveAcceptanceModelActionV1",
     "RequestModelActionV1",
     "ClaimSchemaRetryV1",
     "RecordReasoningProgressV1",

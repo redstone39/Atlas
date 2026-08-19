@@ -207,6 +207,25 @@ class Runtime:
         })
         return self.snapshot_value
 
+    def reserve_acceptance_model_action(self, command):
+        self.calls.append("reserve_acceptance_model_action")
+        assert self.snapshot_value.state is ExecutionState.ACCEPTED
+        if (
+            command.context_tokens
+            > self.snapshot_value.policy.context_token_budget
+        ):
+            raise ValueError("per-invocation context token budget exceeded")
+        if (
+            self.snapshot_value.budget.provider_invocations
+            >= self.snapshot_value.policy.max_provider_invocations
+        ):
+            raise TurnRuntimeBudgetExceeded("provider invocation budget exhausted")
+        budget = self.snapshot_value.budget.model_copy(update={
+            "provider_invocations": self.snapshot_value.budget.provider_invocations + 1,
+            "context_tokens": self.snapshot_value.budget.context_tokens + command.context_tokens,
+        })
+        return self._move(ExecutionState.ACCEPTED, budget=budget)
+
     def request_model_action(self, command):
         self.calls.append("request_model_action")
         self.model_action_repairs.append(command.contract_repair)

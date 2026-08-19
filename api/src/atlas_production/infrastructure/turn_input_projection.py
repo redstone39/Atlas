@@ -53,6 +53,7 @@ from atlas_production.modules.turn_runtime.public import (
     ClaimSchemaRetryV1,
     ExecutionPromptSkillSelectionTraceV1,
     ExecutionSnapshotV1,
+    ReserveAcceptanceModelActionV1,
     RecordExecutionPromptSkillSelectionV1,
     SchemaRetryOriginCode,
     TurnRouteSnapshotV2,
@@ -515,7 +516,7 @@ class ProviderTurnInputProjector:
                     node="resolver",
                     status="not_applicable",
                 )
-            elif self._skill_selector_model is None:
+            elif self._skill_selector_model is None or self._runtime is None:
                 selection = ExecutionPromptSkillSelectionTraceV1(
                     category="understanding",
                     node="resolver",
@@ -529,6 +530,19 @@ class ProviderTurnInputProjector:
                     candidates=candidates,
                 )
                 try:
+                    context_tokens = (
+                        self._skill_selector_model.estimate_selection_request_tokens(
+                            snapshot, request
+                        )
+                    )
+                    snapshot = self._runtime.reserve_acceptance_model_action(
+                        ReserveAcceptanceModelActionV1(
+                            execution_id=snapshot.execution_id,
+                            expected_version=snapshot.version,
+                            fencing_token=snapshot.lease.fencing_token,
+                            context_tokens=context_tokens,
+                        )
+                    )
                     result = self._skill_selector_model.select(snapshot, request)
                     refs = resolve_selected_skill_refs(
                         candidates,

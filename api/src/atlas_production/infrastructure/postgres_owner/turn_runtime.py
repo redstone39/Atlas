@@ -49,6 +49,7 @@ from atlas_production.modules.turn_runtime.public import (
     RecordReasoningProgressV1,
     ReleaseIntentV1,
     RenewExecutionLeaseV1,
+    ReserveAcceptanceModelActionV1,
     RequestModelActionV1,
     RoutePolicyV1,
     RuntimeEventV1,
@@ -911,6 +912,48 @@ class PostgresTurnRuntimeOwner:
                 accepted_refs=accepted,
             )
             raise
+
+    def reserve_acceptance_model_action(
+        self, command: ReserveAcceptanceModelActionV1
+    ) -> ExecutionSnapshotV1:
+        with self._session_factory() as session, session.begin():
+            changed = self._cas_execution(
+                session,
+                execution_id=command.execution_id,
+                expected_version=command.expected_version,
+                fencing_token=command.fencing_token,
+                from_states=(ExecutionState.ACCEPTED.value,),
+                to_state=ExecutionState.ACCEPTED.value,
+            )
+            budget = session.scalar(
+                update(AtlasTurnBudgetCounterRow)
+                .where(
+                    AtlasTurnBudgetCounterRow.execution_id == command.execution_id,
+                    AtlasTurnBudgetCounterRow.provider_invocations + 1
+                    <= changed.max_provider_invocations,
+                    command.context_tokens <= changed.context_token_budget,
+                )
+                .values(
+                    provider_invocations=AtlasTurnBudgetCounterRow.provider_invocations
+                    + 1,
+                    context_tokens=AtlasTurnBudgetCounterRow.context_tokens
+                    + command.context_tokens,
+                )
+                .returning(AtlasTurnBudgetCounterRow)
+            )
+            if budget is None:
+                raise TurnRuntimeBudgetExceeded(
+                    "provider invocation or per-invocation context token budget exceeded"
+                )
+            self._append_event(
+                session,
+                execution_id=command.execution_id,
+                sequence=changed.version,
+                event_type="model_action_requested",
+                state=changed.state,
+            )
+            session.flush()
+            return self._snapshot(session, command.execution_id)
 
     def request_model_action(self, command: RequestModelActionV1) -> ExecutionSnapshotV1:
         with self._session_factory() as session, session.begin():

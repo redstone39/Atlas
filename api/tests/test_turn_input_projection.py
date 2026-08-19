@@ -562,6 +562,11 @@ def test_understanding_selection_is_persisted_once_and_only_reaches_resolver() -
     class Selector:
         def __init__(self):
             self.requests = []
+            self.estimates = []
+
+        def estimate_selection_request_tokens(self, snapshot, request):
+            self.estimates.append((snapshot, request))
+            return 7
 
         def select(self, snapshot, request):
             self.requests.append((snapshot, request))
@@ -600,6 +605,11 @@ def test_understanding_selection_is_persisted_once_and_only_reaches_resolver() -
 
     assert rewritten == "比較文件 A。"
     assert len(selector.requests) == 1
+    assert len(selector.estimates) == 1
+    assert selector.estimates[0][1] is selector.requests[0][1]
+    assert selector.requests[0][0].budget.provider_invocations == 1
+    assert refreshed.budget.provider_invocations == 1
+    assert refreshed.budget.context_tokens == 7
     selector_context = selector.requests[0][1].node_context
     assert selector_context.original_user_input == projections.value.original_user_input
     assert selector_context.authorized_rewritten_context["recent_exchanges"]
@@ -635,6 +645,9 @@ def test_understanding_selector_failure_runs_baseline_resolver_without_retry() -
         def __init__(self):
             self.calls = 0
 
+        def estimate_selection_request_tokens(self, snapshot, request):
+            return 7
+
         def select(self, snapshot, request):
             self.calls += 1
             raise DeepReasoningContractError("selector_contract_invalid")
@@ -666,11 +679,92 @@ def test_understanding_selector_failure_runs_baseline_resolver_without_retry() -
     ).project(snapshot=accepted, recent_tail=_history(), summary=None)
 
     assert selector.calls == 1
+    assert refreshed.budget.provider_invocations == 1
+    assert refreshed.budget.context_tokens == 7
     assert rewritten == "baseline rewritten request"
     assert len(routing.requests) == 2
     selection = refreshed.prompt_skill_selections[0]
     assert selection.status == "baseline_fallback"
     assert selection.fallback_code == "selector_contract_invalid"
+    assert selection.selected_skills == []
+    assert "optional_understanding_skills" not in json.loads(
+        routing.requests[0].messages[0].content
+    )
+
+
+def test_understanding_selector_budget_exhaustion_skips_provider_call() -> None:
+    candidate = PromptSkillSelectorCandidateV1(
+        selection_id="understanding:budget:1:" + "c" * 64,
+        name="budget",
+        description="Optional understanding guidance.",
+        ref=PromptSkillRefV1(
+            category="understanding",
+            name="budget",
+            revision=1,
+            content_digest="c" * 64,
+        ),
+    )
+
+    class Catalog:
+        def read_catalog(self, ref):
+            return PromptSkillCatalogV1(ref=ref, skills=[candidate])
+
+        def read_instructions(self, ref):
+            raise AssertionError("budget-exhausted selector cannot read instructions")
+
+    class Selector:
+        def __init__(self):
+            self.calls = 0
+
+        def estimate_selection_request_tokens(self, snapshot, request):
+            return 7
+
+        def select(self, snapshot, request):
+            self.calls += 1
+            raise AssertionError("budget-exhausted selector cannot call Provider")
+
+    routing = _Routing(
+        [
+            _completed({"resolver_context": "baseline resolver context"}, 1),
+            _completed({"rewritten_question": "baseline rewritten request"}, 2),
+        ]
+    )
+    runtime = Runtime()
+    exhausted_budget = runtime.snapshot_value.budget.model_copy(
+        update={
+            "provider_invocations": (
+                runtime.snapshot_value.policy.max_provider_invocations
+            )
+        }
+    )
+    accepted = runtime.snapshot_value.model_copy(
+        update={
+            "state": ExecutionState.ACCEPTED,
+            "version": 2,
+            "budget": exhausted_budget,
+            "prompt_skill_selections": [],
+        }
+    )
+    runtime.snapshot_value = accepted
+    selector = Selector()
+
+    refreshed, rewritten = ProviderTurnInputProjector(
+        routing,
+        _Projections(),
+        runtime,
+        prompt_skill_catalog=Catalog(),
+        prompt_skill_exact_reader=Catalog(),
+        skill_selector_model=selector,
+    ).project(snapshot=accepted, recent_tail=_history(), summary=None)
+
+    assert selector.calls == 0
+    assert rewritten == "baseline rewritten request"
+    assert refreshed.budget.provider_invocations == (
+        refreshed.policy.max_provider_invocations
+    )
+    selection = refreshed.prompt_skill_selections[0]
+    assert selection.status == "baseline_fallback"
+    assert selection.fallback_code == "selector_unavailable"
     assert selection.selected_skills == []
     assert "optional_understanding_skills" not in json.loads(
         routing.requests[0].messages[0].content

@@ -55,6 +55,7 @@ from atlas_production.modules.turn_runtime.public import (
     RecordExecutionPromptSkillSelectionV1,
     RecordReasoningProgressV1,
     RenewExecutionLeaseV1,
+    ReserveAcceptanceModelActionV1,
     RequestModelActionV1,
     RoutePolicyV1,
     StageAcceptanceResourceV1,
@@ -446,6 +447,97 @@ def _accept_and_bind(owner: PostgresTurnRuntimeOwner, snapshot: object):
             context_pack_ref="context-1",
         )
     )
+
+
+def test_acceptance_model_reservation_claims_budget_without_advancing_state(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _allocate(owner, "acceptance-model-reservation")
+    accepted = owner.accept(
+        AcceptExecutionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            grant_ref="grant-1",
+            catalog_ref="catalog-1",
+        )
+    )
+
+    reserved = owner.reserve_acceptance_model_action(
+        ReserveAcceptanceModelActionV1(
+            execution_id=accepted.execution_id,
+            expected_version=accepted.version,
+            fencing_token=accepted.lease.fencing_token,
+            context_tokens=7,
+        )
+    )
+
+    assert reserved.state is ExecutionState.ACCEPTED
+    assert reserved.version == accepted.version + 1
+    assert reserved.budget.provider_invocations == 1
+    assert reserved.budget.context_tokens == 7
+    event = owner.events(reserved.execution_id)[-1]
+    assert (event.event_type, event.state, event.sequence) == (
+        "model_action_requested",
+        ExecutionState.ACCEPTED,
+        reserved.version,
+    )
+
+    recorded = owner.record_prompt_skill_selection(
+        RecordExecutionPromptSkillSelectionV1(
+            execution_id=reserved.execution_id,
+            expected_version=reserved.version,
+            fencing_token=reserved.lease.fencing_token,
+            selection=ExecutionPromptSkillSelectionTraceV1(
+                category="understanding",
+                node="resolver",
+                status="not_applicable",
+            ),
+        )
+    )
+    bound = owner.bind_context(
+        BindContextV1(
+            execution_id=recorded.execution_id,
+            expected_version=recorded.version,
+            fencing_token=recorded.lease.fencing_token,
+            context_pack_ref="context-1",
+        )
+    )
+    assert bound.state is ExecutionState.CONTEXT_READY
+    assert bound.budget.provider_invocations == 1
+    assert bound.budget.context_tokens == 7
+
+
+def test_acceptance_model_reservation_rolls_back_on_context_budget_exhaustion(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    snapshot = _allocate(owner, "acceptance-model-reservation-budget")
+    accepted = owner.accept(
+        AcceptExecutionV1(
+            execution_id=snapshot.execution_id,
+            expected_version=snapshot.version,
+            fencing_token=snapshot.lease.fencing_token,
+            grant_ref="grant-1",
+            catalog_ref="catalog-1",
+        )
+    )
+
+    with pytest.raises(TurnRuntimeBudgetExceeded):
+        owner.reserve_acceptance_model_action(
+            ReserveAcceptanceModelActionV1(
+                execution_id=accepted.execution_id,
+                expected_version=accepted.version,
+                fencing_token=accepted.lease.fencing_token,
+                context_tokens=accepted.policy.context_token_budget + 1,
+            )
+        )
+
+    current = owner.snapshot(accepted.execution_id)
+    assert current.state is ExecutionState.ACCEPTED
+    assert current.version == accepted.version
+    assert current.budget == accepted.budget
 
 
 def test_prompt_skill_selection_commits_safe_event_and_jsonb(
