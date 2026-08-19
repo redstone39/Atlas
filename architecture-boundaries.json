@@ -200,6 +200,16 @@
       ]
     },
     {
+      "id": "turn_experience",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/turn_experience"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/turn_experience/public.py"
+      ]
+    },
+    {
       "id": "answer_behavior",
       "role": "module",
       "path_prefixes": [

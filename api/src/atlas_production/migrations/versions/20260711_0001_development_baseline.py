@@ -53,6 +53,7 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_turn_evidence_identities',
         'atlas_turn_execution_leases',
         'atlas_turn_executions',
+        'atlas_turn_experiences',
         'atlas_turn_knowledge_catalogs',
         'atlas_turn_governed_answer_draft_releases',
         'atlas_turn_governed_answer_drafts',

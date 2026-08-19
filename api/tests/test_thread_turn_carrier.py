@@ -298,12 +298,17 @@ def test_startup_sweeper_default_respects_runtime_read_limit() -> None:
     assert runtime.sweeps == [500]
 
 
-def test_api_lifespan_stops_carrier_reconciler_then_expiry_sweeper() -> None:
+def test_api_lifespan_stops_carrier_experience_release_then_expiry() -> None:
     order: list[str] = []
 
     class CarrierLifecycle:
         def shutdown(self) -> None:
             order.append("carrier_shutdown")
+
+    class ExperienceLifecycle:
+        def stop(self) -> None:
+            order.append("experience_reconciler_stop")
+
 
     class ReconcilerLifecycle:
         def stop(self) -> None:
@@ -317,6 +322,7 @@ def test_api_lifespan_stops_carrier_reconciler_then_expiry_sweeper() -> None:
     values.update(
         turn_execution_carrier=CarrierLifecycle(),
         turn_resource_release_reconciler=ReconcilerLifecycle(),
+        turn_experience_reconciler=ExperienceLifecycle(),
         turn_lease_failure_sweeper=SweeperLifecycle(),
     )
 
@@ -325,6 +331,7 @@ def test_api_lifespan_stops_carrier_reconciler_then_expiry_sweeper() -> None:
 
     assert order == [
         "carrier_shutdown",
+        "experience_reconciler_stop",
         "release_reconciler_stop",
         "sweeper_stop",
     ]

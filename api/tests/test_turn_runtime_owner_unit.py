@@ -9,6 +9,7 @@ from atlas_production.infrastructure.postgres_owner import turn_runtime
 from atlas_production.infrastructure.postgres_owner.turn_runtime import (
     PostgresTurnRuntimeOwner,
     _bounded_limit,
+    _completed_scan_limit,
     _digest_model,
     _stable_id,
 )
@@ -127,7 +128,8 @@ def test_repository_has_complete_public_surface_and_no_cross_owner_imports() -> 
         "find_execution", "snapshot", "allocate", "accept", "bind_context", "request_model_action", "claim_schema_retry", "record_reasoning_progress", "begin_tool",
         "complete_tool", "begin_governance", "prepare_terminal", "commit_terminal",
         "fail_carrier", "finalize_expired", "renew_lease", "fail_expired_leases",
-        "pending_release_intents", "complete_release_intent", "events",
+        "completed_terminal_outcomes", "pending_release_intents",
+        "complete_release_intent", "events",
     ):
         assert callable(getattr(PostgresTurnRuntimeOwner, method))
     source = inspect.getsource(turn_runtime)
@@ -144,3 +146,9 @@ def test_repository_has_complete_public_surface_and_no_cross_owner_imports() -> 
 def test_bounded_claim_and_sweep_limits(limit: int) -> None:
     with pytest.raises(ValueError):
         _bounded_limit(limit)
+
+
+@pytest.mark.parametrize("limit", (0, 101))
+def test_completed_scan_has_consumer_bound(limit: int) -> None:
+    with pytest.raises(ValueError):
+        _completed_scan_limit(limit)

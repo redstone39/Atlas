@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Identity, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -435,6 +435,9 @@ class AtlasTurnTerminalOutcomeRow(OrmBase):
     execution_id: Mapped[str] = mapped_column(
         String(200), ForeignKey("atlas_turn_executions.execution_id", ondelete="RESTRICT"), primary_key=True
     )
+    scan_sequence: Mapped[int] = mapped_column(
+        BigInteger, Identity(), nullable=False, unique=True
+    )
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     terminal_intent_ref: Mapped[str | None] = mapped_column(
         String(300), ForeignKey("atlas_turn_terminal_intents.terminal_intent_ref", ondelete="RESTRICT"), nullable=True
@@ -446,6 +449,11 @@ class AtlasTurnTerminalOutcomeRow(OrmBase):
     __table_args__ = (
         CheckConstraint("outcome IN ('completed','failed')", name="ck_atlas_turn_terminal_outcome"),
         CheckConstraint("(outcome = 'completed' AND terminal_intent_ref IS NOT NULL AND failure_code IS NULL) OR (outcome = 'failed' AND terminal_intent_ref IS NULL AND failure_code IS NOT NULL)", name="ck_atlas_turn_terminal_outcome_shape"),
+        Index(
+            "ix_atlas_turn_terminal_outcome_scan_execution",
+            "scan_sequence",
+            "execution_id",
+        ),
     )
 
 

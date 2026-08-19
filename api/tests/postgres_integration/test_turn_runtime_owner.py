@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import timedelta
 import json
 from threading import Barrier, Event, current_thread
@@ -58,6 +58,7 @@ from atlas_production.modules.turn_runtime.public import (
     RequestModelActionV1,
     RoutePolicyV1,
     StageAcceptanceResourceV1,
+    TerminalCompletionCursorV1,
     TurnRouteSnapshotV2,
 )
 
@@ -603,6 +604,17 @@ def _prepare(owner: PostgresTurnRuntimeOwner, snapshot: object):
             governed_answer_draft_ref="answer-draft-1",
             citation_binding_draft_ref="citation-draft-1",
             audit_draft_ref="audit-draft-1",
+        )
+    )
+
+def _complete(owner: PostgresTurnRuntimeOwner, suffix: str):
+    prepared = _prepare(owner, _accept_and_bind(owner, _allocate(owner, suffix)))
+    return owner.commit_terminal(
+        CommitTerminalV1(
+            execution_id=prepared.execution_id,
+            expected_version=prepared.version,
+            fencing_token=prepared.lease.fencing_token,
+            terminal_commit_intent_ref=prepared.terminal_commit_intent_ref,
         )
     )
 
@@ -1471,3 +1483,104 @@ def test_completed_and_fenced_failure_have_one_terminal_winner(
             )
         ).all()
         assert len(rows) == 1
+
+
+def test_completed_terminal_scan_is_bounded_strict_and_excludes_failed(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    first = _complete(owner, "completed-scan-a")
+    second = _complete(owner, "completed-scan-b")
+    failed = _allocate(owner, "completed-scan-failed")
+    owner.fail_carrier(
+        FailCarrierExecutionV1(
+            execution_id=failed.execution_id,
+            expected_version=failed.version,
+            holder_id=failed.lease.holder_id,
+            expected_lease_version=failed.lease.lease_version,
+            fencing_token=failed.lease.fencing_token,
+            failure_code="provider_failed",
+            detected_by="carrier",
+        )
+    )
+    first_outcome = owner.terminal_outcome(first.execution_id)
+    assert first_outcome is not None
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.execute(
+            update(AtlasTurnTerminalOutcomeRow)
+            .where(
+                AtlasTurnTerminalOutcomeRow.execution_id.in_(
+                    [first.execution_id, second.execution_id]
+                )
+            )
+            .values(committed_at=first_outcome.committed_at)
+        )
+
+    page_one = owner.completed_terminal_outcomes(after=None, limit=1)
+    expected = sorted([first.execution_id, second.execution_id])
+    assert [item.execution_id for item in page_one] == expected[:1]
+
+    appended = _complete(owner, "completed-scan-c")
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.execute(
+            update(AtlasTurnTerminalOutcomeRow)
+            .where(
+                AtlasTurnTerminalOutcomeRow.execution_id == appended.execution_id
+            )
+            .values(committed_at=first_outcome.committed_at - timedelta(days=1))
+        )
+    cursor = TerminalCompletionCursorV1(
+        scan_sequence=page_one[0].scan_sequence,
+        execution_id=page_one[0].execution_id,
+    )
+    page_two = owner.completed_terminal_outcomes(after=cursor, limit=100)
+    assert [item.execution_id for item in page_two] == [expected[1], appended.execution_id]
+    assert failed.execution_id not in {
+        item.execution_id for item in [*page_one, *page_two]
+    }
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        owner.completed_terminal_outcomes(after=None, limit=0)
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        owner.completed_terminal_outcomes(after=None, limit=101)
+
+
+def test_completed_terminal_scan_waits_for_inflight_outcome_commit(
+    postgres_runtime: PostgresRuntime,
+) -> None:
+    owner = _owner(postgres_runtime)
+    completed = _complete(owner, "completed-scan-inflight")
+    outcome = owner.terminal_outcome(completed.execution_id)
+    assert outcome is not None
+    with postgres_runtime.session_factory() as session, session.begin():
+        session.execute(
+            delete(AtlasTurnTerminalOutcomeRow).where(
+                AtlasTurnTerminalOutcomeRow.execution_id == completed.execution_id
+            )
+        )
+
+    with postgres_runtime.session_factory() as writer:
+        transaction = writer.begin()
+        writer.add(
+            AtlasTurnTerminalOutcomeRow(
+                execution_id=outcome.execution_id,
+                scan_sequence=outcome.scan_sequence,
+                outcome=outcome.outcome,
+                terminal_intent_ref=outcome.terminal_commit_intent_ref,
+                failure_code=outcome.failure_code,
+                detected_by=None,
+                committed_at=outcome.committed_at,
+            )
+        )
+        writer.flush()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending_scan = pool.submit(
+                owner.completed_terminal_outcomes,
+                after=None,
+                limit=100,
+            )
+            with pytest.raises(FutureTimeoutError):
+                pending_scan.result(timeout=0.2)
+            transaction.commit()
+            scanned = pending_scan.result(timeout=3)
+
+    assert any(item.execution_id == completed.execution_id for item in scanned)

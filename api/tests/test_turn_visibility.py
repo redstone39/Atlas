@@ -226,6 +226,7 @@ class _Runtime:
     def terminal_outcome(self, execution_id):
         return TerminalOutcomeV1(
             execution_id=execution_id,
+            scan_sequence=1,
             outcome="completed",
             terminal_commit_intent_ref=f"terminal-{execution_id}",
             evidence_pack_ref=f"evidence-pack-{execution_id}",

@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Callable
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -53,6 +53,7 @@ from atlas_production.modules.turn_runtime.public import (
     RoutePolicyV1,
     RuntimeEventV1,
     StageAcceptanceResourceV1,
+    TerminalCompletionCursorV1,
     TerminalOutcomeV1,
     TurnRuntimeBudgetExceeded,
     TurnRuntimeCurrentnessConflict,
@@ -73,6 +74,11 @@ _MAX_READ_LIMIT = 500
 def _bounded_limit(limit: int) -> int:
     if limit < 1 or limit > _MAX_READ_LIMIT:
         raise ValueError("turn-runtime limit must be between 1 and 500")
+    return limit
+
+def _completed_scan_limit(limit: int) -> int:
+    if limit < 1 or limit > 100:
+        raise ValueError("completed terminal scan limit must be between 1 and 100")
     return limit
 
 
@@ -247,6 +253,7 @@ class PostgresTurnRuntimeOwner:
             if outcome.outcome == "failed":
                 return TerminalOutcomeV1(
                     execution_id=outcome.execution_id,
+                    scan_sequence=outcome.scan_sequence,
                     outcome="failed",
                     failure_code=outcome.failure_code,
                     committed_at=outcome.committed_at,
@@ -259,6 +266,7 @@ class PostgresTurnRuntimeOwner:
                     "completed terminal outcome has no immutable intent refs"
                 )
             return TerminalOutcomeV1(
+                scan_sequence=outcome.scan_sequence,
                 execution_id=outcome.execution_id,
                 outcome="completed",
                 terminal_commit_intent_ref=outcome.terminal_intent_ref,
@@ -268,6 +276,59 @@ class PostgresTurnRuntimeOwner:
                 audit_draft_ref=intent.audit_draft_ref,
                 committed_at=outcome.committed_at,
             )
+
+    def completed_terminal_outcomes(
+        self,
+        *,
+        after: TerminalCompletionCursorV1 | None,
+        limit: int,
+    ) -> list[TerminalOutcomeV1]:
+        statement = (
+            select(AtlasTurnTerminalOutcomeRow, AtlasTurnTerminalIntentRow)
+            .join(
+                AtlasTurnTerminalIntentRow,
+                AtlasTurnTerminalIntentRow.terminal_intent_ref
+                == AtlasTurnTerminalOutcomeRow.terminal_intent_ref,
+            )
+            .where(AtlasTurnTerminalOutcomeRow.outcome == "completed")
+        )
+        if after is not None:
+            statement = statement.where(
+                tuple_(
+                    AtlasTurnTerminalOutcomeRow.scan_sequence,
+                    AtlasTurnTerminalOutcomeRow.execution_id,
+                )
+                > (after.scan_sequence, after.execution_id)
+            )
+        statement = statement.order_by(
+            AtlasTurnTerminalOutcomeRow.scan_sequence,
+            AtlasTurnTerminalOutcomeRow.execution_id,
+        ).limit(_completed_scan_limit(limit))
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                text("LOCK TABLE atlas_turn_terminal_outcomes IN SHARE MODE")
+            )
+            rows = session.execute(statement).all()
+            outcomes: list[TerminalOutcomeV1] = []
+            for outcome, intent in rows:
+                if intent.execution_id != outcome.execution_id:
+                    raise TurnRuntimeTerminalConflict(
+                        "completed terminal scan found mismatched immutable intent"
+                    )
+                outcomes.append(
+                    TerminalOutcomeV1(
+                        execution_id=outcome.execution_id,
+                        scan_sequence=outcome.scan_sequence,
+                        outcome="completed",
+                        terminal_commit_intent_ref=outcome.terminal_intent_ref,
+                        evidence_pack_ref=intent.evidence_pack_ref,
+                        governed_answer_draft_ref=intent.governed_answer_draft_ref,
+                        citation_binding_draft_ref=intent.citation_binding_draft_ref,
+                        audit_draft_ref=intent.audit_draft_ref,
+                        committed_at=outcome.committed_at,
+                    )
+                )
+            return outcomes
 
     @staticmethod
     def _active_lease_clause(execution_id: str, fencing_token: int):

@@ -105,6 +105,10 @@ from atlas_production.infrastructure.turn_model_input_adapter import (
 from atlas_production.infrastructure.turn_input_projection import (
     ProviderTurnInputProjector,
 )
+from atlas_production.infrastructure.turn_experience_recorder import TurnExperienceRecorder
+from atlas_production.infrastructure.turn_experience_reconciler import (
+    TurnExperienceReconciler,
+)
 from atlas_production.infrastructure.turn_release_reconciler import (
     TurnResourceReleaseReconciler,
 )
@@ -126,6 +130,9 @@ from atlas_production.modules.citation_preview.protected_read import (
 )
 from atlas_production.infrastructure.postgres_owner.audit_v1 import PostgresAuditV1Store
 from atlas_production.infrastructure.postgres_owner.turn_runtime import PostgresTurnRuntimeOwner
+from atlas_production.infrastructure.postgres_owner.turn_experience import (
+    PostgresTurnExperienceStore,
+)
 from atlas_production.infrastructure.postgres_owner.answer_behavior import (
     PostgresAnswerBehaviorOwner,
 )
@@ -233,6 +240,7 @@ class ApiComposition:
     document_restore_proofs: PostgresDocumentRestoreProofProvider
     turn_execution_carrier: ThreadTurnCarrier
     turn_resource_release_reconciler: TurnResourceReleaseReconciler
+    turn_experience_reconciler: TurnExperienceReconciler
     turn_lease_failure_sweeper: TurnLeaseFailureSweeper
 
 
@@ -473,6 +481,17 @@ def build_api_composition(
     )
     generation_retention = PostgresGenerationRetentionOwner(session_factory)
     strict_results = PostgresResultGovernanceV1Store(session_factory)
+    turn_experience_store = PostgresTurnExperienceStore(session_factory)
+    turn_experience_recorder = TurnExperienceRecorder(
+        strict_runtime,
+        strict_results,
+        turn_experience_store,
+    )
+    turn_experience_reconciler = TurnExperienceReconciler(
+        runtime=strict_runtime,
+        recorder=turn_experience_recorder,
+    )
+    turn_experience_reconciler.start()
     strict_citations = PostgresCitationV1Store(session_factory)
     protected_citations = ProtectedCitationReadService(
         bindings=strict_citations,
@@ -499,6 +518,7 @@ def build_api_composition(
         citation=strict_citations,
         audit=strict_audit,
         evaluator=StrictPostHocClaimEvaluator(model_routing, strict_runtime),
+        experience_recorder=turn_experience_recorder,
         reasoning_model=strict_turn_model,
         skill_selector_model=strict_turn_model,
         prompt_skill_catalog=prompt_skill_owner,
@@ -624,6 +644,7 @@ def build_api_composition(
         document_restore_proofs=document_restore_proofs,
         turn_execution_carrier=turn_execution_carrier,
         turn_resource_release_reconciler=turn_resource_release_reconciler,
+        turn_experience_reconciler=turn_experience_reconciler,
         document_library=document_library,
         turn_lease_failure_sweeper=turn_lease_failure_sweeper,
     )

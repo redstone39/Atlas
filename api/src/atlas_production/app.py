@@ -54,14 +54,23 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
             finally:
                 try:
                     stop = getattr(
-                        selected.turn_resource_release_reconciler, "stop", None
+                        selected.turn_experience_reconciler, "stop", None
                     )
                     if callable(stop):
                         stop()
                 finally:
-                    stop = getattr(selected.turn_lease_failure_sweeper, "stop", None)
-                    if callable(stop):
-                        stop()
+                    try:
+                        stop = getattr(
+                            selected.turn_resource_release_reconciler, "stop", None
+                        )
+                        if callable(stop):
+                            stop()
+                    finally:
+                        stop = getattr(
+                            selected.turn_lease_failure_sweeper, "stop", None
+                        )
+                        if callable(stop):
+                            stop()
 
     app = FastAPI(title="Atlas Production API", version="0.1.0", lifespan=lifespan)
 

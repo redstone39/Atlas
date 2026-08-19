@@ -450,7 +450,7 @@ class _RuntimeSession:
 
 def test_terminal_outcome_read_exposes_completed_refs_or_failed_code() -> None:
     completed = SimpleNamespace(
-        execution_id="execution-1", outcome="completed",
+        execution_id="execution-1", scan_sequence=1, outcome="completed",
         terminal_intent_ref="intent-1", failure_code=None, committed_at=NOW,
     )
     intent = SimpleNamespace(
@@ -462,12 +462,13 @@ def test_terminal_outcome_read_exposes_completed_refs_or_failed_code() -> None:
     assert owner.terminal_outcome("execution-1").evidence_pack_ref == "pack-1"  # type: ignore[union-attr]
 
     failed = SimpleNamespace(
-        execution_id="execution-2", outcome="failed",
+        execution_id="execution-2", scan_sequence=2, outcome="failed",
         terminal_intent_ref=None, failure_code="carrier_lost", committed_at=NOW,
     )
     owner = PostgresTurnRuntimeOwner(lambda: _RuntimeSession(failed))
     assert owner.terminal_outcome("execution-2").failure_code == "carrier_lost"  # type: ignore[union-attr]
     with pytest.raises(ValidationError):
         TerminalOutcomeV1(
-            execution_id="execution-3", outcome="completed", failure_code="bad", committed_at=NOW
+            execution_id="execution-3", scan_sequence=3,
+            outcome="completed", failure_code="bad", committed_at=NOW,
         )

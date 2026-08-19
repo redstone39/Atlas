@@ -891,8 +891,14 @@ class RuntimeEventV1(_StrictModel):
         return self
 
 
+class TerminalCompletionCursorV1(_StrictModel):
+    scan_sequence: int = Field(ge=1)
+    execution_id: Identity
+
+
 class TerminalOutcomeV1(_StrictModel):
     execution_id: Identity
+    scan_sequence: int = Field(ge=1)
     outcome: Literal["completed", "failed"]
     terminal_commit_intent_ref: OpaqueRef | None = None
     evidence_pack_ref: OpaqueRef | None = None
@@ -927,6 +933,13 @@ class TurnRuntimeOwner(Protocol):
     def snapshot(self, execution_id: Identity) -> ExecutionSnapshotV1: ...
 
     def terminal_outcome(self, execution_id: Identity) -> TerminalOutcomeV1 | None: ...
+    def completed_terminal_outcomes(
+        self,
+        *,
+        after: TerminalCompletionCursorV1 | None,
+        limit: int,
+    ) -> list[TerminalOutcomeV1]: ...
+
 
     def allocate(self, command: AllocateExecutionV1) -> ExecutionSnapshotV1: ...
 
@@ -1019,6 +1032,7 @@ __all__ = [
     "ReleaseIntentV1",
     "CompleteReleaseIntentV1",
     "RuntimeEventV1",
+    "TerminalCompletionCursorV1",
     "TerminalOutcomeV1",
     "TurnRuntimeOwner",
 ]

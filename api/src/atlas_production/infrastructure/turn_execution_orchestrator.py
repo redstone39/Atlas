@@ -22,6 +22,9 @@ from atlas_production.infrastructure.turn_execution_foundation import (
     _schema_retry_origin,
     _validate_model_input,
 )
+from atlas_production.infrastructure.turn_experience_recorder import (
+    TurnExperienceRecorder,
+)
 from atlas_production.infrastructure.turn_execution_reasoning import (
     _ReasoningTerminationReason as ReasoningTerminationReason,
     _completed_correction,
@@ -227,6 +230,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         citation: CitationBindingDraftOwnerV2,
         audit: TurnAuditDraftOwnerV2,
         evaluator: PostHocAnswerEvaluatorV2,
+        experience_recorder: TurnExperienceRecorder,
         reasoning_model: DeepReasoningModel | None = None,
         skill_selector_model: SkillSelectorModel | None = None,
         prompt_skill_catalog: PromptSkillCatalog | None = None,
@@ -241,6 +245,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._citation = citation
         self._audit = audit
         self._evaluator = evaluator
+        self._experience_recorder = experience_recorder
         self._reasoning_model = reasoning_model
         self._skill_selector_model = skill_selector_model
         self._prompt_skill_catalog = prompt_skill_catalog
@@ -2360,6 +2365,13 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             )
         )
         self._runtime.commit_terminal(_commit_terminal_command(snapshot))
+        try:
+            self._experience_recorder.record_execution(execution_id)
+        except Exception:
+            logger.warning(
+                "turn_experience_recording_failed execution_id=%s",
+                execution_id,
+            )
 
     def _fail_active(self, snapshot: ExecutionSnapshotV1, failure_code: str) -> None:
         try:

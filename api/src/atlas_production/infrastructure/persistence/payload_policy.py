@@ -164,6 +164,11 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
         1_048_576,
         "turn_audit_draft",
     ),
+    "atlas_turn_experiences.payload": (
+        "derived_experience_metadata",
+        GENERAL_METADATA_MAX_BYTES,
+        "turn_experience_v1",
+    ),
     "atlas_turn_retrieval_evidence_packs.lineage_items": (
         "result_lineage",
         32768,

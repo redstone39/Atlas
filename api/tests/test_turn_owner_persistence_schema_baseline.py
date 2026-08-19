@@ -13,6 +13,7 @@ from atlas_production.infrastructure.persistence import (
     prompt_skills,
     result_governance,
     turn_runtime,
+    turn_experience,
     answer_behavior,
 )
 
@@ -53,6 +54,7 @@ def test_development_baseline_registers_every_owner_table() -> None:
         conversation.OWNER_TABLES,
         retrieval.OWNER_TABLES,
         result_governance.TURN_RESULT_GOVERNANCE_OWNER_TABLES,
+        turn_experience.TURN_EXPERIENCE_OWNER_TABLES,
         turn_runtime.OWNER_TABLES,
         prompt_skills.OWNER_TABLES,
         answer_behavior.OWNER_TABLES,

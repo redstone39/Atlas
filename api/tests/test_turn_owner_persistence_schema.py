@@ -12,6 +12,7 @@ from atlas_production.infrastructure.persistence import (
     retrieval,
     result_governance,
     turn_runtime,
+    turn_experience,
     answer_behavior,
 )
 from atlas_production.infrastructure.persistence.schema import OrmBase
@@ -38,6 +39,9 @@ OWNER_BY_TABLE.update(
 )
 OWNER_BY_TABLE.update(
     {name: "audit" for name in audit_events.TURN_AUDIT_OWNER_TABLES}
+)
+OWNER_BY_TABLE.update(
+    {name: "turn_experience" for name in turn_experience.TURN_EXPERIENCE_OWNER_TABLES}
 )
 
 
@@ -66,9 +70,34 @@ def test_owner_tables_are_registered_once_and_partitioned() -> None:
         + len(result_governance.TURN_RESULT_GOVERNANCE_OWNER_TABLES)
         + len(citation_preview.TURN_CITATION_OWNER_TABLES)
         + len(audit_events.TURN_AUDIT_OWNER_TABLES)
+        + len(turn_experience.TURN_EXPERIENCE_OWNER_TABLES)
     )
     assert expected <= set(OrmBase.metadata.tables)
-    assert len(expected) == 47
+    assert len(expected) == 48
+
+
+def test_turn_experience_identity_payload_and_scan_constraints() -> None:
+    table_name = "atlas_turn_experiences"
+    assert _unique_columns(
+        table_name, "uq_atlas_turn_experience_execution_schema"
+    ) == ["execution_id", "schema_version"]
+    assert {
+        "ck_atlas_turn_experience_schema",
+        "ck_atlas_turn_experience_reasoning_mode",
+        "ck_atlas_turn_experience_digest",
+        "ck_atlas_turn_experience_payload_bytes",
+    } <= _constraint_names(table_name, CheckConstraint)
+    table = OrmBase.metadata.tables[table_name]
+    scan_index = next(
+        index
+        for index in table.indexes
+        if index.name == "ix_atlas_turn_experience_scan_execution"
+    )
+    assert [column.name for column in scan_index.columns] == [
+        "scan_sequence",
+        "execution_id",
+    ]
+    assert not table.foreign_keys
 
 
 def test_owner_tables_have_no_cross_owner_foreign_keys() -> None:
@@ -365,6 +394,16 @@ def test_terminal_events_and_release_intents_are_single_winner_shapes() -> None:
     assert "ck_atlas_turn_terminal_outcome_shape" in _constraint_names(
         "atlas_turn_terminal_outcomes", CheckConstraint
     )
+    terminal_outcomes = OrmBase.metadata.tables["atlas_turn_terminal_outcomes"]
+    terminal_scan_index = next(
+        index
+        for index in terminal_outcomes.indexes
+        if index.name == "ix_atlas_turn_terminal_outcome_scan_execution"
+    )
+    assert [column.name for column in terminal_scan_index.columns] == [
+        "scan_sequence",
+        "execution_id",
+    ]
     assert "uq_atlas_turn_release_intent_idempotency" in _constraint_names(
         "atlas_turn_release_intents", UniqueConstraint
     )

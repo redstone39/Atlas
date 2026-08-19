@@ -1167,6 +1167,19 @@ class Audit:
         return TurnAuditDraftV2(**command.model_dump(exclude={"idempotency_key"}), digest=DIGEST, created_at=NOW)
 
 
+class ExperienceRecorder:
+    def __init__(self, runtime, *, fail: bool = False):
+        self.runtime = runtime
+        self.fail = fail
+        self.calls = []
+
+    def record_execution(self, execution_id):
+        assert self.runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+        self.calls.append(execution_id)
+        if self.fail:
+            raise RuntimeError("experience store unavailable")
+
+
 def search(query, docs=("kh_document_A",)):
     return {
         "action": "search_knowledge", "query_text": query, "document_handles": list(docs),
@@ -1257,6 +1270,7 @@ def _orchestrator(
     selector_errors=(),
     selected_context_error=None,
     selected_repair_context_error=None,
+    experience_failure=False,
 ):
     runtime = Runtime(policy=policy, reasoning_mode=reasoning_mode)
     retrieval = Retrieval()
@@ -1272,16 +1286,22 @@ def _orchestrator(
         selected_repair_context_error=selected_repair_context_error,
     )
     evaluator = Evaluator(results, assessment_outcomes)
+    experience_recorder = ExperienceRecorder(
+        runtime,
+        fail=experience_failure,
+    )
     orchestrator = StatelessTurnExecutionOrchestrator(
         runtime=runtime, model=model, model_inputs=Inputs(), retrieval=retrieval,
         result_governance=Governance(order), citation=Citation(order), audit=Audit(order),
         evaluator=evaluator,
+        experience_recorder=experience_recorder,
         reasoning_model=reasoning_model,
         skill_selector_model=reasoning_model,
         prompt_skill_catalog=prompt_skill_catalog or EmptyPromptSkillCatalog(),
         prompt_skill_exact_reader=prompt_skill_catalog or EmptyPromptSkillCatalog(),
     )
     orchestrator.test_evaluator = evaluator
+    orchestrator.test_experience_recorder = experience_recorder
     orchestrator.test_reasoning_model = reasoning_model
     return orchestrator, runtime, retrieval, model, order
 
@@ -1633,7 +1653,22 @@ def test_repeated_interleaved_multicall_and_terminal_materialization_order():
         [c for c in runtime.calls if c.startswith("complete:")]
     )
     assert runtime.calls[-1] == "commit_terminal"
+    assert orchestrator.test_experience_recorder.calls == ["exec-1"]
     assert model.session.discarded is True
+
+
+def test_experience_recording_failure_does_not_change_completed_turn(caplog) -> None:
+    orchestrator, runtime, _retrieval, _model, _order = _orchestrator(
+        [finalize()],
+        experience_failure=True,
+    )
+
+    orchestrator.run("exec-1")
+
+    assert runtime.snapshot_value.state is ExecutionState.TERMINAL_COMPLETED
+    assert runtime.calls[-1] == "commit_terminal"
+    assert orchestrator.test_experience_recorder.calls == ["exec-1"]
+    assert "turn_experience_recording_failed execution_id=exec-1" in caplog.text
 
 
 def test_standard_mode_does_not_call_planner_or_process_evaluator() -> None:
