@@ -70,7 +70,7 @@ def runtime_policy() -> dict[str, object]:
         "schema_version": "model-route-runtime-policy-v8",
         "tokenizer_profile": "cl100k_base",
         "max_tool_executions": 12,
-        "max_provider_invocations": 26,
+        "max_provider_invocations": 33,
         "max_reasoning_revision_cycles": 2,
         "max_catalog_pages": 5,
         "max_search_rounds": 6,
