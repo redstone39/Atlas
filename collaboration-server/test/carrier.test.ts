@@ -12,6 +12,7 @@ import { NotesCarrier, type ConnectionContext } from "../src/carrier.js";
 import { canonicalBody, deriveChangeSet } from "../src/changes.js";
 import type { CarrierConfig } from "../src/config.js";
 import { NOTE_EXTENSIONS } from "../src/note-extensions.js";
+import { installProcessShutdown } from "../src/process-shutdown.js";
 import type { TimerDriver } from "../src/room-state.js";
 import type {
   AuthorizationResult,
@@ -351,6 +352,59 @@ async function runningCarrier(api: FakeApi, timers = new ManualTimers()): Promis
   await carrier.listen();
   return { carrier, url: `ws://127.0.0.1:${carrier.server.address.port}/collaboration`, timers };
 }
+
+test("process shutdown destroys once and removes every signal handler", async () => {
+  const signals = ["SIGINT", "SIGQUIT", "SIGTERM"] as const;
+  const baseline = Object.fromEntries(
+    signals.map(signal => [signal, process.listenerCount(signal)]),
+  ) as Record<(typeof signals)[number], number>;
+  let destroyCalls = 0;
+  const control = installProcessShutdown({
+    destroy: async () => {
+      destroyCalls += 1;
+    },
+  });
+
+  const first = control.shutdown();
+  const second = control.shutdown();
+  assert.equal(first, second);
+  await first;
+  assert.equal(destroyCalls, 1);
+  for (const signal of signals) {
+    assert.equal(process.listenerCount(signal), baseline[signal]);
+  }
+});
+
+test("process shutdown reports destroy rejection without an unhandled rejection", async () => {
+  const signals = ["SIGINT", "SIGQUIT", "SIGTERM"] as const;
+  const baseline = Object.fromEntries(
+    signals.map(signal => [signal, process.listenerCount(signal)]),
+  ) as Record<(typeof signals)[number], number>;
+  const previousExitCode = process.exitCode;
+  const originalConsoleError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...values: unknown[]) => {
+    errors.push(values);
+  };
+  const failure = new Error("synthetic shutdown failure");
+  try {
+    const control = installProcessShutdown({
+      destroy: async () => {
+        throw failure;
+      },
+    });
+    await control.shutdown();
+    assert.equal(process.exitCode, 1);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.[1], failure);
+    for (const signal of signals) {
+      assert.equal(process.listenerCount(signal), baseline[signal]);
+    }
+  } finally {
+    console.error = originalConsoleError;
+    process.exitCode = previousExitCode;
+  }
+});
 
 test("two real providers converge on text, bold, link, and list only after durable append", async t => {
   const api = new FakeApi();

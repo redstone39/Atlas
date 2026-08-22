@@ -126,6 +126,10 @@ function PdfEvidencePage({
         pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
         loadingTask = pdfjs.getDocument({ data: bytes });
         const documentProxy = await loadingTask.promise;
+        const javaScriptActions = await documentProxy.getJSActions();
+        if (javaScriptActions && Object.keys(javaScriptActions).length > 0) {
+          throw new Error("pdf_scripting_forbidden");
+        }
         if (cancelled) return;
         const page = await documentProxy.getPage(1);
         if (cancelled) return;

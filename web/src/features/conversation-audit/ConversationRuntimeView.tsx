@@ -549,7 +549,9 @@ function ExecutionSkillSelectionPanel({
                     <AuditTraceValue
                       key={`${skill.name}:${skill.revision}:${skill.content_digest}`}
                       label={t("audit.promptSkillSelectedRef")}
-                      value={`${skill.name} · r${skill.revision} · ${skill.content_digest}`}
+                      value={`${skill.name} · ${t("audit.promptSkillCatalogRevisionValue", {
+                        revision: skill.revision,
+                      })} · ${skill.content_digest}`}
                     />
                   ))
                 ) : (

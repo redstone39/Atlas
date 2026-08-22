@@ -109,6 +109,7 @@ export class NotesCarrier {
       address: config.host,
       port: config.port,
       quiet: true,
+      stopOnSignals: false,
       yDocOptions: { gc: false, gcFilter: () => false },
       unloadImmediately: true,
       websocketOptions: { maxPayload: 16 * 1024 * 1024 },

@@ -164,10 +164,12 @@ describe("Atlas production web: Skill slots", () => {
     render(<App />);
     await openPlanningSlot();
     fireEvent.click(screen.getByRole("button", { name: /compare-options/i }));
-    expect(await screen.findByText("r1")).toBeInTheDocument();
-    expect(screen.getByText("r2")).toBeInTheDocument();
+    expect(await screen.findByText("Revision 1")).toBeInTheDocument();
+    expect(screen.getByText("Revision 2")).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
-    expect(await screen.findByRole("dialog", { name: "compare-options r2" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "compare-options · Revision 2" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Use a decision table.")).toBeInTheDocument();
     expect(screen.getByText("Apache-2.0")).toBeInTheDocument();
   });
@@ -268,7 +270,7 @@ describe("Atlas production web: Skill slots", () => {
     fireEvent.click(await screen.findByRole("option", { name: "New revision" }));
     fireEvent.click(screen.getByLabelText("Existing skill"));
     fireEvent.click(
-      await screen.findByRole("option", { name: "compare-options · r2" }),
+      await screen.findByRole("option", { name: "compare-options · Revision 2" }),
     );
     const file = new File(
       ["---\nname: compare-options\ndescription: Compare options.\n---\nUse a new table."],

@@ -600,7 +600,10 @@ function PromptSkillsManager({
           <DialogHeader>
             <DialogTitle>
               {revisionDetail
-                ? `${revisionDetail.ref.name} r${revisionDetail.ref.revision}`
+                ? t("promptSkills.skillRevisionOption", {
+                    name: revisionDetail.ref.name,
+                    revision: revisionDetail.ref.revision,
+                  })
                 : t("promptSkills.revisionDetail")}
             </DialogTitle>
             <DialogDescription>

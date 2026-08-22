@@ -12406,80 +12406,76 @@ class AcceptProcessingExecutionCommand:
             else Session(bind=connection, join_transaction_mode="rollback_only")
         )
         with session:
-            try:
-                acquire_mixed_owner_locks(
+            acquire_mixed_owner_locks(
+                session,
+                shared_domain_keys=(
+                    (
+                        "model-routing:configuration-control",
+                        "processing-registry:configuration-control",
+                    )
+                    if execution_snapshot is None
+                    else ()
+                ),
+                exclusive_identity_keys=(
+                    "document:job-idempotency:"
+                    f"{idempotency_scope}:{idempotency_key}",
+                ),
+            )
+            existing = session.scalar(
+                select(async_rows.AtlasProcessingJobRow).where(
+                    async_rows.AtlasProcessingJobRow.idempotency_scope
+                    == idempotency_scope,
+                    async_rows.AtlasProcessingJobRow.idempotency_key
+                    == idempotency_key,
+                )
+            )
+            if existing is not None:
+                if (
+                    existing.document_id != document_id
+                    or existing.document_version_id != document_version_id
+                    or existing.job_kind != job_kind
+                    or existing.processing_generation is None
+                ):
+                    raise ValueError("idempotency_key_reused")
+                request_snapshot = session.get(
+                    async_rows.AtlasProcessingRequestSnapshotRow,
+                    existing.job_id,
+                )
+                if request_snapshot is None:
+                    raise ValueError("processing execution snapshot is missing")
+                accepted_snapshot = _processing_execution_snapshot(
+                    request_snapshot.payload
+                )
+                if (
+                    accepted_snapshot.acceptance_request_digest
+                    != acceptance_request_digest
+                ):
+                    raise ValueError("idempotency_key_reused")
+                return _job_record(existing)
+            snapshot = execution_snapshot
+            if snapshot is None:
+                snapshot = _capture_processing_execution_snapshot(
                     session,
-                    shared_domain_keys=(
-                        (
-                            "model-routing:configuration-control",
-                            "processing-registry:configuration-control",
-                        )
-                        if execution_snapshot is None
-                        else ()
-                    ),
-                    exclusive_identity_keys=(
-                        "document:job-idempotency:"
-                        f"{idempotency_scope}:{idempotency_key}",
-                    ),
-                )
-                existing = session.scalar(
-                    select(async_rows.AtlasProcessingJobRow).where(
-                        async_rows.AtlasProcessingJobRow.idempotency_scope
-                        == idempotency_scope,
-                        async_rows.AtlasProcessingJobRow.idempotency_key
-                        == idempotency_key,
-                    )
-                )
-                if existing is not None:
-                    if (
-                        existing.document_id != document_id
-                        or existing.document_version_id != document_version_id
-                        or existing.job_kind != job_kind
-                        or existing.processing_generation is None
-                    ):
-                        raise ValueError("idempotency_key_reused")
-                    request_snapshot = session.get(
-                        async_rows.AtlasProcessingRequestSnapshotRow,
-                        existing.job_id,
-                    )
-                    if request_snapshot is None:
-                        raise ValueError("processing execution snapshot is missing")
-                    accepted_snapshot = _processing_execution_snapshot(
-                        request_snapshot.payload
-                    )
-                    if (
-                        accepted_snapshot.acceptance_request_digest
-                        != acceptance_request_digest
-                    ):
-                        raise ValueError("idempotency_key_reused")
-                    return _job_record(existing)
-                snapshot = execution_snapshot
-                if snapshot is None:
-                    snapshot = _capture_processing_execution_snapshot(
-                        session,
-                        media_type=media_type,
-                        acceptance_request_digest=acceptance_request_digest,
-                        configuration_locks_held=True,
-                    )
-                elif snapshot.acceptance_request_digest != acceptance_request_digest:
-                    raise ValueError("processing execution snapshot request is mismatched")
-                job = ProcessingExecutionAcceptanceWriter(session).accept_job(
                     media_type=media_type,
-                    document_id=document_id,
-                    document_version_id=document_version_id,
-                    job_kind=job_kind,
-                    idempotency_scope=idempotency_scope,
-                    idempotency_key=idempotency_key,
-                    created_by=created_by,
-                    progress_total=progress_total,
-                    execution_snapshot=snapshot,
-                    acceptance_identity=acceptance_identity,
+                    acceptance_request_digest=acceptance_request_digest,
+                    configuration_locks_held=True,
                 )
-                session.commit()
-                return job
-            except Exception:
-                session.rollback()
-                raise
+            elif snapshot.acceptance_request_digest != acceptance_request_digest:
+                raise ValueError("processing execution snapshot request is mismatched")
+            job = ProcessingExecutionAcceptanceWriter(session).accept_job(
+                media_type=media_type,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                job_kind=job_kind,
+                idempotency_scope=idempotency_scope,
+                idempotency_key=idempotency_key,
+                created_by=created_by,
+                progress_total=progress_total,
+                execution_snapshot=snapshot,
+                acceptance_identity=acceptance_identity,
+            )
+            session.commit()
+            return job
 
 
 @dataclass(frozen=True, slots=True)

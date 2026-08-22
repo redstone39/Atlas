@@ -578,7 +578,7 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
       ),
     ).toBeInTheDocument();
     expect(executionSelections).toHaveTextContent(
-      `evidence-answer · r2 · ${"4".repeat(64)}`,
+      `evidence-answer · Catalog revision 2 · ${"4".repeat(64)}`,
     );
     expect(executionSelections).toHaveTextContent(
       "1 · insufficient · revised",
@@ -600,7 +600,7 @@ it("/admin/audit shows global conversation history with a bounded runtime trace"
     expect(initialSelection).toHaveTextContent(/Plan generation\s*1/);
     expect(initialSelection).toHaveTextContent(/Selection status\s*selected/);
     expect(initialSelection).toHaveTextContent(
-      `evidence-review · r2 · ${"9".repeat(64)}`,
+      `evidence-review · Catalog revision 2 · ${"9".repeat(64)}`,
     );
 
     const replannerSelection = selectionNodes[1].closest(".rounded-md.border.p-3");

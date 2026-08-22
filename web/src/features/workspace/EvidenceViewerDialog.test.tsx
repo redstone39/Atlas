@@ -200,6 +200,30 @@ describe("EvidenceViewerDialog", () => {
     expect(screen.queryByTestId("evidence-watermark")).not.toBeInTheDocument();
   });
 
+  it("rejects a PDF with embedded scripting before rendering a page", async () => {
+    const getPage = vi.fn();
+    pdfMocks.getDocument.mockReturnValue({
+      promise: Promise.resolve({
+        getJSActions: vi.fn(async () => ({ OpenAction: ["app.alert('blocked')"] })),
+        getPage,
+      }),
+      destroy: vi.fn(async () => undefined),
+    });
+
+    render(
+      <EvidenceViewerDialog
+        evidence={pdfPreview()}
+        loading={false}
+        onClose={vi.fn()}
+        watermark={watermark}
+      />,
+    );
+
+    expect(await screen.findByText("Evidence content unavailable")).toBeInTheDocument();
+    expect(getPage).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("evidence-watermark")).not.toBeInTheDocument();
+  });
+
   it("cancels PDF rendering when the preview is replaced", async () => {
     vi.mocked(URL.createObjectURL).mockReturnValue("blob:image-preview");
     const { rerender } = render(
@@ -270,11 +294,12 @@ function mockSuccessfulPdfRender() {
     render,
   }));
   const destroy = vi.fn(async () => undefined);
+  const getJSActions = vi.fn(async () => null);
   pdfMocks.getDocument.mockReturnValue({
-    promise: Promise.resolve({ getPage }),
+    promise: Promise.resolve({ getJSActions, getPage }),
     destroy,
   });
-  return { cancel, destroy, getPage, getViewport, render };
+  return { cancel, destroy, getJSActions, getPage, getViewport, render };
 }
 
 function previewBlob(content: string) {
