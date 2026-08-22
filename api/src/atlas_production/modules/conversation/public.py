@@ -77,6 +77,11 @@ class ConversationV1(_StrictModel):
     created_at: AwareDatetime
     updated_at: AwareDatetime
 
+class ConversationScanCursorV1(_StrictModel):
+    updated_at: AwareDatetime
+    conversation_id: Identity
+
+
 
 class ConversationArchiveV1(_StrictModel):
     idempotency_key: Identity
@@ -105,6 +110,11 @@ class ConversationTurnMemberV1(_StrictModel):
     role: Literal["user", "assistant"]
     ordinal: int = Field(ge=1)
     created_at: AwareDatetime
+
+class ConversationTurnCursorV1(_StrictModel):
+    ordinal: int = Field(ge=1)
+    turn_id: Identity
+
 
 
 class AppendTurnMemberV1(_StrictModel):
@@ -178,6 +188,22 @@ class ConversationOwner(Protocol):
 
     def candidate_turns(self, conversation_id: Identity) -> list[ConversationTurnMemberV1]: ...
 
+    def list_active_updated_before(
+        self,
+        *,
+        cutoff: AwareDatetime,
+        after: ConversationScanCursorV1 | None,
+        limit: int,
+    ) -> list[ConversationV1]: ...
+
+    def candidate_turns_after(
+        self,
+        conversation_id: Identity,
+        *,
+        after: ConversationTurnCursorV1 | None,
+        limit: int,
+    ) -> list[ConversationTurnMemberV1]: ...
+
 
 class ConversationRetryLineageOwner(Protocol):
     """Owner-private projection; it does not extend Workspace or HTTP DTOs."""
@@ -201,9 +227,11 @@ __all__ = [
     "ConversationCreateV1",
     "ConversationMembershipConflict",
     "ConversationScopeTagV1",
+    "ConversationScanCursorV1",
     "ConversationOwner",
     "ConversationRetryLineageOwner",
     "ConversationTurnMemberV1",
+    "ConversationTurnCursorV1",
     "ConversationV1",
     "CreateTurnV1",
     "RetryTurnV1",

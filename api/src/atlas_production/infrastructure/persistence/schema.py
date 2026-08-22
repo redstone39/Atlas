@@ -11,6 +11,7 @@ from . import audit_events as _audit_events
 from . import authorization as _authorization
 from . import citation_preview as _citation_preview
 from . import conversation as _conversation
+from . import conversation_review as _conversation_review
 from . import context_engineering as _context_engineering
 from . import document_intake as _document_intake
 from . import identity_access as _identity_access

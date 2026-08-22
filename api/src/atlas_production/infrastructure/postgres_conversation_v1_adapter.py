@@ -1,6 +1,7 @@
 """Public Conversation adapter over owner-local PostgreSQL persistence."""
 
 from __future__ import annotations
+from datetime import datetime
 
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -23,8 +24,10 @@ from atlas_production.modules.conversation.public import (
     ConversationArchiveResultV1,
     ConversationArchiveV1,
     ConversationCreateV1,
+    ConversationScanCursorV1,
     ConversationMembershipConflict,
     ConversationTurnMemberV1,
+    ConversationTurnCursorV1,
     ConversationV1,
     TurnFeedbackError,
     TurnFeedbackRevisionV1,
@@ -266,6 +269,36 @@ class PostgresConversationV1Adapter:
             raise ValueError("turn_id must be non-empty")
         record = self._store.get_turn(turn_id)
         return None if record is None else _turn(record)
+
+    def list_active_updated_before(
+        self,
+        *,
+        cutoff: datetime,
+        after: ConversationScanCursorV1 | None,
+        limit: int,
+    ) -> list[ConversationV1]:
+        cursor = None if after is None else (after.updated_at, after.conversation_id)
+        return [
+            _conversation(record)
+            for record in self._store.list_active_updated_before(
+                cutoff=cutoff, after=cursor, limit=limit
+            )
+        ]
+
+    def candidate_turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after: ConversationTurnCursorV1 | None,
+        limit: int,
+    ) -> list[ConversationTurnMemberV1]:
+        cursor = None if after is None else (after.ordinal, after.turn_id)
+        return [
+            _turn(record)
+            for record in self._store.candidate_turns_after(
+                conversation_id, after=cursor, limit=limit
+            )
+        ]
 
     def candidate_turns(self, conversation_id: str) -> list[ConversationTurnMemberV1]:
         return [_turn(record) for record in self._store.candidate_turns(conversation_id)]

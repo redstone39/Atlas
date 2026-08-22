@@ -13,7 +13,7 @@ import hashlib
 import json
 from typing import Callable, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
@@ -603,6 +603,65 @@ class PostgresConversationV1Store:
                 )
             ).all()
             return tuple(_conversation(row) for row in rows)
+
+    def list_active_updated_before(
+        self,
+        *,
+        cutoff: datetime,
+        after: tuple[datetime, str] | None,
+        limit: int,
+    ) -> tuple[ConversationRecord, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("conversation scan limit must be between 1 and 100")
+        statement = select(AtlasTurnConversationRow).where(
+            AtlasTurnConversationRow.status == "active",
+            AtlasTurnConversationRow.updated_at <= cutoff,
+        )
+        if after is not None:
+            statement = statement.where(
+                tuple_(
+                    AtlasTurnConversationRow.updated_at,
+                    AtlasTurnConversationRow.conversation_id,
+                )
+                > after
+            )
+        with self._session_factory() as session:
+            rows = session.scalars(
+                statement.order_by(
+                    AtlasTurnConversationRow.updated_at,
+                    AtlasTurnConversationRow.conversation_id,
+                ).limit(limit)
+            ).all()
+            return tuple(_conversation(row) for row in rows)
+
+    def candidate_turns_after(
+        self,
+        conversation_id: str,
+        *,
+        after: tuple[int, str] | None,
+        limit: int,
+    ) -> tuple[TurnMemberRecord, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("conversation turn scan limit must be between 1 and 100")
+        statement = select(AtlasTurnConversationMemberRow).where(
+            AtlasTurnConversationMemberRow.conversation_id == conversation_id
+        )
+        if after is not None:
+            statement = statement.where(
+                tuple_(
+                    AtlasTurnConversationMemberRow.ordinal,
+                    AtlasTurnConversationMemberRow.turn_id,
+                )
+                > after
+            )
+        with self._session_factory() as session:
+            rows = session.scalars(
+                statement.order_by(
+                    AtlasTurnConversationMemberRow.ordinal,
+                    AtlasTurnConversationMemberRow.turn_id,
+                ).limit(limit)
+            ).all()
+            return tuple(_member(row) for row in rows)
 
     def candidate_turns(self, conversation_id: str) -> tuple[TurnMemberRecord, ...]:
         with self._session_factory() as session:
