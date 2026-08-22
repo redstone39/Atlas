@@ -126,6 +126,13 @@ def parse_skill_file(
     )
 
 
+def validate_prompt_skill_source(*, expected_name: str, source: str) -> str:
+    parsed = parse_skill_file("SKILL.md", source.encode("utf-8"))
+    if parsed.name != expected_name or parsed.source != source:
+        raise _invalid("prompt_skills.path_and_frontmatter_name_must_match")
+    return parsed.content_digest
+
+
 class PromptSkillService:
     def __init__(self, repository: PromptSkillRepository) -> None:
         self._repository = repository
@@ -228,4 +235,9 @@ class PromptSkillService:
         )
 
 
-__all__ = ["ParsedPromptSkill", "PromptSkillService", "parse_skill_file"]
+__all__ = [
+    "ParsedPromptSkill",
+    "PromptSkillService",
+    "parse_skill_file",
+    "validate_prompt_skill_source",
+]

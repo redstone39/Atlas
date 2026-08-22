@@ -1,4 +1,5 @@
 from .api_models import (
+    PromptSkillApprovedPublishV1,
     PromptSkillCatalogRefV1,
     PromptSkillCatalogV1,
     PromptSkillCategory,
@@ -13,11 +14,22 @@ from .api_models import (
     PromptSkillSummaryV1,
 )
 from .contracts import PromptSkillError
-from .ports import PromptSkillAdmin, PromptSkillCatalog, PromptSkillExactReader
-from .service import MAX_PROMPT_SKILL_SOURCE_BYTES, PromptSkillService
+from .ports import (
+    PromptSkillAdmin,
+    PromptSkillApprovedPublisher,
+    PromptSkillCatalog,
+    PromptSkillExactReader,
+)
+from .service import (
+    MAX_PROMPT_SKILL_SOURCE_BYTES,
+    PromptSkillService,
+    validate_prompt_skill_source,
+)
 
 
 __all__ = [
+    "PromptSkillApprovedPublishV1",
+    "PromptSkillApprovedPublisher",
     "MAX_PROMPT_SKILL_SOURCE_BYTES",
     "PromptSkillAdmin",
     "PromptSkillCatalog",
@@ -36,4 +48,5 @@ __all__ = [
     "PromptSkillSelectorCandidateV1",
     "PromptSkillService",
     "PromptSkillSummaryV1",
+    "validate_prompt_skill_source",
 ]

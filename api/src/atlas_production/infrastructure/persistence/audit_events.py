@@ -104,6 +104,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "previous_default_route_id",
         "prior_run_id",
         "processing_generation",
+        "prompt_skill_ref",
         "profile_id",
         "provider_type",
         "raw_sha256",

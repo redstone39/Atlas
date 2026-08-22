@@ -20,6 +20,7 @@ from atlas_production.infrastructure.postgres_audit_adapter import build_audit_e
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AuditEventWriter
 from atlas_production.modules.prompt_skills.public import (
+    PromptSkillApprovedPublishV1,
     PromptSkillCatalogRefV1,
     PromptSkillCatalogV1,
     PromptSkillCategory,
@@ -444,6 +445,255 @@ class PostgresPromptSkillOwner:
             except Exception:
                 session.rollback()
                 raise
+
+    def publish_enabled(
+        self,
+        *,
+        actor_id: str,
+        request: PromptSkillApprovedPublishV1,
+    ) -> PromptSkillMutationOutcomeV1:
+        session = self._session_factory()
+        with session:
+            try:
+                outcome = self.publish_enabled_in_session(
+                    session,
+                    actor_id=actor_id,
+                    request=request,
+                )
+                session.commit()
+                return outcome
+            except Exception:
+                session.rollback()
+                raise
+
+    def publish_enabled_in_session(
+        self,
+        session: Session,
+        *,
+        actor_id: str,
+        request: PromptSkillApprovedPublishV1,
+    ) -> PromptSkillMutationOutcomeV1:
+        operation = "publish_enabled"
+        digest = _request_digest(
+            {
+                "operation": operation,
+                "actor_id": actor_id,
+                "disposition": request.disposition,
+                "category": request.category,
+                "name": request.name,
+                "source_digest": request.source_digest,
+                "expected_catalogs": [
+                    ref.model_dump(mode="json") for ref in request.expected_catalogs
+                ],
+                "expected_target": (
+                    None
+                    if request.expected_target is None
+                    else request.expected_target.model_dump(mode="json")
+                ),
+            }
+        )
+        acquire_owner_locks(
+            session,
+            domain_keys=(
+                f"prompt-skills:idempotency:{request.idempotency_key}",
+                *(
+                    f"prompt-skills:{ref.category}:catalog"
+                    for ref in request.expected_catalogs
+                ),
+                f"prompt-skills:{request.category}:{request.name}",
+            ),
+        )
+        replay = self._replay(
+            session,
+            idempotency_key=request.idempotency_key,
+            operation=operation,
+            request_digest=digest,
+        )
+        if replay is not None:
+            return replay
+        latest_catalogs: dict[PromptSkillCategory, AtlasPromptSkillCatalogRevisionRow] = {}
+        for expected_catalog in request.expected_catalogs:
+            latest_catalog = session.scalar(
+                select(AtlasPromptSkillCatalogRevisionRow)
+                .where(
+                    AtlasPromptSkillCatalogRevisionRow.category
+                    == expected_catalog.category
+                )
+                .order_by(
+                    AtlasPromptSkillCatalogRevisionRow.catalog_revision.desc()
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            if latest_catalog is None:
+                raise _integrity_error()
+            self._validate_catalog(latest_catalog)
+            observed_catalog = PromptSkillCatalogRefV1(
+                category=expected_catalog.category,
+                catalog_revision=latest_catalog.catalog_revision,
+                catalog_digest=latest_catalog.catalog_digest,
+            )
+            if observed_catalog != expected_catalog:
+                raise PromptSkillError(
+                    "revision_conflict",
+                    "prompt_skills.catalog_revision_changed",
+                    412,
+                )
+            latest_catalogs[expected_catalog.category] = latest_catalog
+        latest_catalog = latest_catalogs[request.category]
+        parsed = parse_skill_file("SKILL.md", request.source.encode("utf-8"))
+        if (
+            parsed.name != request.name
+            or parsed.source != request.source
+            or parsed.content_digest != request.source_digest
+        ):
+            raise PromptSkillError(
+                "invalid_prompt_skill",
+                "prompt_skills.path_and_frontmatter_name_must_match",
+                422,
+            )
+        control = self._control_row(session, request.category, request.name)
+        if request.disposition == "add":
+            if control is not None:
+                raise PromptSkillError(
+                    "revision_conflict",
+                    "prompt_skills.head_revision_changed",
+                    412,
+                )
+            current_head = 0
+        else:
+            expected = request.expected_target
+            if expected is None or control is None:
+                raise PromptSkillError(
+                    "revision_conflict",
+                    "prompt_skills.head_revision_changed",
+                    412,
+                )
+            current = self._revision_row(
+                session, request.category, request.name, control.head_revision
+            )
+            catalog_refs = [
+                PromptSkillRefV1.model_validate(item) for item in latest_catalog.refs
+            ]
+            if (
+                current is None
+                or control.head_revision != expected.revision
+                or current.content_digest != expected.content_digest
+                or expected not in catalog_refs
+            ):
+                raise PromptSkillError(
+                    "revision_conflict",
+                    "prompt_skills.head_revision_changed",
+                    412,
+                )
+            current_head = control.head_revision
+        next_revision = current_head + 1
+        now = _now()
+        row = AtlasPromptSkillRevisionRow(
+            category=request.category,
+            name=request.name,
+            revision=next_revision,
+            source=parsed.source,
+            description=parsed.description,
+            license=parsed.license,
+            compatibility=parsed.compatibility,
+            skill_metadata=parsed.metadata,
+            instructions=parsed.instructions,
+            content_digest=parsed.content_digest,
+            created_by=actor_id,
+            created_at=now,
+        )
+        session.add(row)
+        session.flush()
+        if control is None:
+            control = AtlasPromptSkillControlRow(
+                category=request.category,
+                name=request.name,
+                head_revision=next_revision,
+                enabled_revision=next_revision,
+                control_revision=1,
+                updated_at=now,
+            )
+            session.add(control)
+        else:
+            control.head_revision = next_revision
+            control.enabled_revision = next_revision
+            control.control_revision += 1
+            control.updated_at = now
+        session.flush()
+        controls = list(
+            session.scalars(
+                select(AtlasPromptSkillControlRow)
+                .where(
+                    AtlasPromptSkillControlRow.category == request.category,
+                    AtlasPromptSkillControlRow.enabled_revision.is_not(None),
+                )
+                .order_by(AtlasPromptSkillControlRow.name)
+            )
+        )
+        refs: list[dict[str, object]] = []
+        for item in controls:
+            revision = self._revision_row(
+                session,
+                cast(PromptSkillCategory, item.category),
+                item.name,
+                cast(int, item.enabled_revision),
+            )
+            if revision is None:
+                raise _integrity_error()
+            refs.append(_ref(revision).model_dump(mode="json"))
+        next_catalog_revision = latest_catalog.catalog_revision + 1
+        catalog_digest = _canonical_digest(refs)
+        session.add(
+            AtlasPromptSkillCatalogRevisionRow(
+                category=request.category,
+                catalog_revision=next_catalog_revision,
+                catalog_digest=catalog_digest,
+                refs=refs,
+                created_by=actor_id,
+                created_at=now,
+            )
+        )
+        session.flush()
+        outcome = PromptSkillMutationOutcomeV1(
+            skill=self._summary(session, control),
+            revision=_revision(
+                row,
+                enabled_revision=next_revision,
+                include_body=False,
+            ),
+        )
+        audit = build_audit_event(
+            event_type="prompt_skill_candidate_approved",
+            actor_id=actor_id,
+            target_ref=(
+                f"prompt-skill:{request.category}:{request.name}:{next_revision}"
+            ),
+            project_id=None,
+            message_code="prompt_skills.candidate_was_approved",
+            metadata={
+                "category_id": request.category,
+                "logical_identity": request.name,
+                "revision": next_revision,
+                "digest": parsed.content_digest,
+                "trace_ref": (
+                    f"prompt-skill-catalog:{request.category}:"
+                    f"{next_catalog_revision}:{catalog_digest}"
+                ),
+                "request_id": request.idempotency_key,
+                "status": "enabled",
+            },
+        )
+        AuditEventWriter(session).append(audit)
+        self._store_replay(
+            session,
+            idempotency_key=request.idempotency_key,
+            operation=operation,
+            request_digest=digest,
+            outcome=outcome,
+            now=now,
+        )
+        return outcome
 
     def mutate_enabled(
         self,

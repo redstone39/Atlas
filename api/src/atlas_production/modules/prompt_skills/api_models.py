@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -89,7 +90,39 @@ class PromptSkillLifecycleRequest(_ClosedModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
 
 
+class PromptSkillApprovedPublishV1(_ClosedModel):
+    disposition: Literal["add", "revise"]
+    category: PromptSkillCategory
+    name: SkillName
+    source: str = Field(min_length=1, max_length=32_768)
+    source_digest: Digest
+    expected_catalogs: list[PromptSkillCatalogRefV1] = Field(
+        min_length=3, max_length=3
+    )
+    expected_target: PromptSkillRefV1 | None = None
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    def model_post_init(self, __context: object) -> None:
+        if hashlib.sha256(self.source.encode("utf-8")).hexdigest() != self.source_digest:
+            raise ValueError("approved Skill source digest does not bind source")
+        if [ref.category for ref in self.expected_catalogs] != [
+            "understanding",
+            "planner",
+            "answer",
+        ]:
+            raise ValueError("approved Skill requires ordered exact catalog preimages")
+        if self.disposition == "add" and self.expected_target is not None:
+            raise ValueError("add publication cannot carry an existing target")
+        if self.disposition == "revise" and (
+            self.expected_target is None
+            or self.expected_target.category != self.category
+            or self.expected_target.name != self.name
+        ):
+            raise ValueError("revise publication requires its exact target preimage")
+
+
 __all__ = [
+    "PromptSkillApprovedPublishV1",
     "PromptSkillCatalogRefV1",
     "PromptSkillCatalogV1",
     "PromptSkillCategory",

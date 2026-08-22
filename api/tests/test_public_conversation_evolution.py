@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,10 @@ from atlas_production.infrastructure.persistence.base import OrmBase
 from atlas_production.infrastructure.persistence import schema as _schema  # noqa: F401
 from atlas_production.infrastructure.persistence.payload_policy import (
     JSONB_PAYLOAD_REGISTRY,
+)
+from atlas_production.modules.consolidator.public import (
+    ConsolidatorExperienceBindingV1,
+    consolidation_run_ref,
 )
 from atlas_production.modules.conversation_review.public import (
     MAX_CASES,
@@ -28,6 +33,11 @@ from atlas_production.modules.learner.public import (
     learner_experience_ref,
     learner_run_ref,
 )
+from atlas_production.modules.prompt_skills.public import (
+    PromptSkillApprovedPublishV1,
+    PromptSkillCatalogRefV1,
+)
+from atlas_production.modules.skill_designer.public import add_draft_key
 
 
 PUBLIC_NOW = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
@@ -169,3 +179,103 @@ def test_public_learner_normalizes_labeled_unicode_secret_boundaries() -> None:
 
     assert value in candidates
     assert f"{value}-alternate" in candidates
+
+
+def _catalog_refs() -> list[PromptSkillCatalogRefV1]:
+    return [
+        PromptSkillCatalogRefV1(
+            category=category,
+            catalog_revision=index,
+            catalog_digest=str(index) * 64,
+        )
+        for index, category in enumerate(
+            (("understanding"), ("planner"), ("answer")),
+            start=1,
+        )
+    ]
+
+
+def test_public_consolidation_identity_requires_exactly_ten_experiences() -> None:
+    bindings = [
+        ConsolidatorExperienceBindingV1(
+            experience_ref=f"public-synthetic-experience-{index}",
+            experience_digest=f"{index:x}" * 64,
+            scan_sequence=index,
+        )
+        for index in range(1, 11)
+    ]
+
+    assert consolidation_run_ref(source_bindings=bindings) == consolidation_run_ref(
+        source_bindings=list(bindings)
+    )
+    with pytest.raises(ValueError, match="exactly ten"):
+        consolidation_run_ref(source_bindings=bindings[:9])
+
+
+def test_public_candidate_semantic_identity_normalizes_topic_and_goal() -> None:
+    first = add_draft_key(
+        category="planner",
+        topic=" Public Synthetic Planning ",
+        goal="Compare   public synthetic options",
+    )
+    replay = add_draft_key(
+        category="planner",
+        topic="public synthetic planning",
+        goal="compare public synthetic options",
+    )
+
+    assert first == replay
+    assert first != add_draft_key(
+        category="answer",
+        topic="public synthetic planning",
+        goal="compare public synthetic options",
+    )
+
+
+def test_public_approved_publication_pins_all_three_catalogs() -> None:
+    source = (
+        "---\n"
+        "name: public-synthetic-skill\n"
+        "description: Public synthetic skill.\n"
+        "---\n"
+        "Apply the public synthetic behavior."
+    )
+    request = PromptSkillApprovedPublishV1(
+        disposition="add",
+        category="planner",
+        name="public-synthetic-skill",
+        source=source,
+        source_digest=hashlib.sha256(source.encode()).hexdigest(),
+        expected_catalogs=_catalog_refs(),
+        idempotency_key="public-synthetic-publication",
+    )
+    assert [ref.category for ref in request.expected_catalogs] == [
+        "understanding",
+        "planner",
+        "answer",
+    ]
+
+    with pytest.raises(ValidationError):
+        PromptSkillApprovedPublishV1(
+            **{
+                **request.model_dump(),
+                "expected_catalogs": list(reversed(_catalog_refs())),
+            }
+        )
+
+
+def test_public_candidate_pipeline_tables_and_payloads_are_registered() -> None:
+    assert {
+        "atlas_consolidator_checkpoint",
+        "atlas_consolidation_runs",
+        "atlas_skill_designer_checkpoint",
+        "atlas_skill_design_runs",
+        "atlas_skill_candidates",
+        "atlas_skill_candidate_idempotency",
+    } <= set(OrmBase.metadata.tables)
+    assert {
+        "atlas_consolidation_runs.result_payload",
+        "atlas_skill_candidates.draft_payload",
+        "atlas_skill_candidates.approved_skill_ref",
+        "atlas_skill_candidate_idempotency.response_payload",
+    } <= set(JSONB_PAYLOAD_REGISTRY)

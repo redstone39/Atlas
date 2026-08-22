@@ -5,6 +5,7 @@ from typing import Protocol
 from atlas_production.modules.identity_access.records import UserRecord
 
 from .api_models import (
+    PromptSkillApprovedPublishV1,
     PromptSkillCatalogRefV1,
     PromptSkillCatalogV1,
     PromptSkillCategory,
@@ -25,6 +26,15 @@ class PromptSkillCatalog(Protocol):
 class PromptSkillExactReader(Protocol):
     def read_instructions(self, ref: PromptSkillRefV1) -> PromptSkillInstructionsV1: ...
 
+
+
+class PromptSkillApprovedPublisher(Protocol):
+    def publish_enabled(
+        self,
+        *,
+        actor_id: str,
+        request: PromptSkillApprovedPublishV1,
+    ) -> PromptSkillMutationOutcomeV1: ...
 
 class PromptSkillAdmin(Protocol):
     def list_skills(self, actor: UserRecord | None, category: PromptSkillCategory) -> PromptSkillListV1: ...
@@ -103,6 +113,7 @@ class PromptSkillRepository(PromptSkillCatalog, PromptSkillExactReader, Protocol
 
 
 __all__ = [
+    "PromptSkillApprovedPublisher",
     "PromptSkillAdmin",
     "PromptSkillCatalog",
     "PromptSkillExactReader",
