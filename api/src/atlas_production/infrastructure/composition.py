@@ -89,6 +89,24 @@ from atlas_production.infrastructure.context_compaction import (
 from atlas_production.infrastructure.conversation_token_usage import (
     PostgresConversationTokenUsageReader,
 )
+from atlas_production.infrastructure.conversation_review_source import (
+    ConversationReviewPublicationCoordinator,
+    ConversationReviewSource,
+)
+from atlas_production.infrastructure.conversation_reviewer import (
+    ProviderConversationReviewer,
+)
+from atlas_production.infrastructure.conversation_review_reconciler import (
+    ConversationReviewReconciler,
+)
+from atlas_production.infrastructure.consolidator_provider import ProviderConsolidator
+from atlas_production.infrastructure.skill_candidate_pipeline_reconciler import (
+    SkillCandidatePipelineReconciler,
+)
+from atlas_production.infrastructure.skill_designer_provider import ProviderSkillDesigner
+from atlas_production.infrastructure.learner_provider import ProviderLearner
+from atlas_production.infrastructure.learner_reconciler import LearnerReconciler
+from atlas_production.infrastructure.learner_source import LearnerSource
 from atlas_production.infrastructure.strict_posthoc_claim_evaluator import (
     StrictPostHocClaimEvaluator,
 )
@@ -120,10 +138,20 @@ from atlas_production.infrastructure.postgres_owner.retrieval_v1 import Postgres
 from atlas_production.infrastructure.postgres_owner.generation_retention import (
     PostgresGenerationRetentionOwner,
 )
+from atlas_production.infrastructure.postgres_owner.consolidator import (
+    PostgresConsolidatorOwner,
+)
+from atlas_production.infrastructure.postgres_owner.skill_designer import (
+    PostgresSkillDesignerOwner,
+)
 from atlas_production.infrastructure.postgres_owner.result_governance_v1 import (
     PostgresResultGovernanceV1Store,
 )
 from atlas_production.infrastructure.postgres_owner.citation_v1 import PostgresCitationV1Store
+from atlas_production.infrastructure.postgres_owner.conversation_review import (
+    PostgresConversationReviewOwner,
+)
+from atlas_production.infrastructure.postgres_owner.learner import PostgresLearnerOwner
 from atlas_production.modules.citation_preview.protected_read import (
     ProtectedCitationReadService,
     ProtectedDeclaredEvidenceReadService,
@@ -206,6 +234,9 @@ from atlas_production.modules.artifact_storage.records import (
     StorageFence,
     UNVERIFIED_TARGET_RISK_ACKNOWLEDGEMENT,
 )
+from atlas_production.modules.learner.public import LearnerExperienceReader
+from atlas_production.modules.skill_designer.public import SkillCandidateAdmin
+from atlas_production.modules.skill_designer.service import SkillCandidateAdminService
 from atlas_production.shared.public import utc_now_iso
 
 
@@ -233,6 +264,10 @@ class ApiComposition:
     ops_readiness: OpsReadinessService
     conversation_audit: ConversationAuditService
     workspace_turn: WorkspaceTurnApplication
+    conversation_review_owner: PostgresConversationReviewOwner
+    conversation_review_source: ConversationReviewSource
+    conversation_reviewer: ProviderConversationReviewer
+    conversation_review_reconciler: ConversationReviewReconciler
     admin_audit_events: AdminAuditEventReadService
     artifact_storage: PostgresArtifactStorageAdapter
     protected_originals: PostgresProtectedOriginalJourneyProvider
@@ -242,6 +277,11 @@ class ApiComposition:
     turn_resource_release_reconciler: TurnResourceReleaseReconciler
     turn_experience_reconciler: TurnExperienceReconciler
     turn_lease_failure_sweeper: TurnLeaseFailureSweeper
+    learner_owner: PostgresLearnerOwner | None = None
+    learner_experience_reader: LearnerExperienceReader | None = None
+    learner_reconciler: LearnerReconciler | None = None
+    skill_candidates: SkillCandidateAdmin | None = None
+    skill_candidate_pipeline_reconciler: SkillCandidatePipelineReconciler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +566,78 @@ def build_api_composition(
     )
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
     conversations = PostgresConversationV1Adapter(session_factory)
+    conversation_review_owner = PostgresConversationReviewOwner(session_factory)
+    conversation_review_source = ConversationReviewSource(
+        conversations=conversations,
+        retry_lineage=conversations,
+        input_reader=strict_contexts,
+        runtime=strict_runtime,
+        governance=strict_results,
+        reviews=conversation_review_owner,
+    )
+    conversation_reviewer = ProviderConversationReviewer(
+        reviews=conversation_review_owner,
+        routing=model_routing,
+    )
+    conversation_review_publication = ConversationReviewPublicationCoordinator(
+        session_factory,
+        conversation_review_owner,
+    )
+    conversation_review_reconciler = ConversationReviewReconciler(
+        conversations=conversations,
+        source=conversation_review_source,
+        reviews=conversation_review_owner,
+        reviewer=conversation_reviewer,
+        publication=conversation_review_publication,
+    )
+    conversation_review_reconciler.start()
+    learner_owner = PostgresLearnerOwner(session_factory)
+    learner_source = LearnerSource(
+        learners=learner_owner,
+        reviews=conversation_review_owner,
+        review_source=conversation_review_source,
+        input_reader=strict_contexts,
+        runtime=strict_runtime,
+        governance=strict_results,
+        turn_experiences=turn_experience_store,
+        skill_catalog=prompt_skill_owner,
+        skill_exact_reader=prompt_skill_owner,
+    )
+    learner_provider = ProviderLearner(
+        learners=learner_owner,
+        routing=model_routing,
+    )
+    learner_reconciler = LearnerReconciler(
+        reviews=conversation_review_owner,
+        learners=learner_owner,
+        source=learner_source,
+        provider=learner_provider,
+    )
+    learner_reconciler.start()
+    consolidation_owner = PostgresConsolidatorOwner(session_factory)
+    consolidator_provider = ProviderConsolidator(
+        consolidations=consolidation_owner,
+        routing=model_routing,
+    )
+    skill_design_owner = PostgresSkillDesignerOwner(
+        session_factory,
+        publisher=prompt_skill_owner,
+    )
+    skill_designer_provider = ProviderSkillDesigner(
+        designs=skill_design_owner,
+        routing=model_routing,
+    )
+    skill_candidates = SkillCandidateAdminService(skill_design_owner)
+    skill_candidate_pipeline_reconciler = SkillCandidatePipelineReconciler(
+        learner_experiences=learner_owner,
+        consolidations=consolidation_owner,
+        consolidator=consolidator_provider,
+        designs=skill_design_owner,
+        designer=skill_designer_provider,
+        skill_catalogs=prompt_skill_owner,
+        skill_exact_reader=prompt_skill_owner,
+    )
+    skill_candidate_pipeline_reconciler.start()
     workspace_turn = WorkspaceTurnApplication(
         conversations=conversations,
         retry_lineage=conversations,
@@ -634,6 +746,15 @@ def build_api_composition(
         notes=notes,
         ops_readiness=ops_readiness,
         conversation_audit=conversation_audit,
+        conversation_review_owner=conversation_review_owner,
+        conversation_review_source=conversation_review_source,
+        conversation_reviewer=conversation_reviewer,
+        conversation_review_reconciler=conversation_review_reconciler,
+        learner_owner=learner_owner,
+        learner_experience_reader=learner_owner,
+        learner_reconciler=learner_reconciler,
+        skill_candidates=skill_candidates,
+        skill_candidate_pipeline_reconciler=skill_candidate_pipeline_reconciler,
         workspace_turn=workspace_turn,
         admin_audit_events=AdminAuditEventReadService(audit_reader, audit_writer),
         artifact_storage=artifact_storage,

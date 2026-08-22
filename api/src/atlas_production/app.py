@@ -48,29 +48,54 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
             yield
         finally:
             try:
-                shutdown = getattr(selected.turn_execution_carrier, "shutdown", None)
-                if callable(shutdown):
-                    shutdown()
+                stop = getattr(
+                    selected.skill_candidate_pipeline_reconciler, "stop", None
+                )
+                if callable(stop):
+                    stop()
             finally:
                 try:
-                    stop = getattr(
-                        selected.turn_experience_reconciler, "stop", None
+                    shutdown = getattr(
+                        selected.turn_execution_carrier, "shutdown", None
                     )
-                    if callable(stop):
-                        stop()
+                    if callable(shutdown):
+                        shutdown()
                 finally:
                     try:
                         stop = getattr(
-                            selected.turn_resource_release_reconciler, "stop", None
+                            selected.conversation_review_reconciler, "stop", None
                         )
                         if callable(stop):
                             stop()
                     finally:
-                        stop = getattr(
-                            selected.turn_lease_failure_sweeper, "stop", None
-                        )
-                        if callable(stop):
-                            stop()
+                        try:
+                            stop = getattr(selected.learner_reconciler, "stop", None)
+                            if callable(stop):
+                                stop()
+                        finally:
+                            try:
+                                stop = getattr(
+                                    selected.turn_experience_reconciler, "stop", None
+                                )
+                                if callable(stop):
+                                    stop()
+                            finally:
+                                try:
+                                    stop = getattr(
+                                        selected.turn_resource_release_reconciler,
+                                        "stop",
+                                        None,
+                                    )
+                                    if callable(stop):
+                                        stop()
+                                finally:
+                                    stop = getattr(
+                                        selected.turn_lease_failure_sweeper,
+                                        "stop",
+                                        None,
+                                    )
+                                    if callable(stop):
+                                        stop()
 
     app = FastAPI(title="Atlas Production API", version="0.1.0", lifespan=lifespan)
 

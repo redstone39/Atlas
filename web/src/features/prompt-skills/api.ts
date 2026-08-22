@@ -5,10 +5,14 @@ import type {
   PromptSkillMutationOutcome,
   PromptSkillRevision,
   PromptSkillSummary,
+  SkillCandidateDetail,
+  SkillCandidateList,
+  SkillCandidateMutationOutcome,
 } from "./types";
 
 const skillPath = (category: PromptSkillCategory, name: string) =>
   `/api/v1/admin/prompt-skills/${category}/${encodeURIComponent(name)}`;
+
 
 export const promptSkillsApi = {
   list: (category: PromptSkillCategory) =>
@@ -70,4 +74,35 @@ export const promptSkillsApi = {
       },
     );
   },
+
+  listCandidates: (category: PromptSkillCategory) =>
+    requestJson<SkillCandidateList>(
+      `/api/v1/admin/prompt-skill-candidates?category=${encodeURIComponent(category)}`,
+    ),
+
+  getCandidate: (candidateRef: string) =>
+    requestJson<SkillCandidateDetail>(
+      `/api/v1/admin/prompt-skill-candidates/${encodeURIComponent(candidateRef)}`,
+    ),
+
+  mutateCandidate: (
+    candidateRef: string,
+    action: "approve" | "reject",
+    expectedDraftRevision: number,
+    idempotencyKey: string,
+  ) =>
+    requestJson<SkillCandidateMutationOutcome>(
+      `/api/v1/admin/prompt-skill-candidates/${encodeURIComponent(candidateRef)}/${action}`,
+      {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": idempotencyKey,
+          "If-Match": String(expectedDraftRevision),
+        },
+        body: JSON.stringify({
+          expected_draft_revision: expectedDraftRevision,
+          idempotency_key: idempotencyKey,
+        }),
+      },
+    ),
 };

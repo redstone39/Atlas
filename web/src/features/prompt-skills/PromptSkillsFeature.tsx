@@ -79,6 +79,7 @@ import {
 import { LoadingState, PageHeader, StatusBadge } from "../../shared/product-ui";
 import { ApiError, localizeMessage } from "../../shared/user-messages";
 import { promptSkillsApi } from "./api";
+import { SkillCandidatesPanel } from "./SkillCandidatesPanel";
 import type {
   PromptSkillCategory,
   PromptSkillRevision,
@@ -561,6 +562,7 @@ function PromptSkillsManager({
         <AlertTitle>{t("promptSkills.approvalTitle")}</AlertTitle>
         <AlertDescription>{t("promptSkills.approvalDescription")}</AlertDescription>
       </Alert>
+      <SkillCandidatesPanel category={category} onApproved={refresh} />
       {loadError && (
         <Alert variant="destructive">
           <AlertTitle>{t("promptSkills.loadFailedTitle")}</AlertTitle>

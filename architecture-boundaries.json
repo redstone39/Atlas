@@ -397,6 +397,46 @@
         "web/src/shared"
       ],
       "public_contracts": []
+    },
+    {
+      "id": "conversation_review",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/conversation_review"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/conversation_review/public.py"
+      ]
+    },
+    {
+      "id": "learner",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/learner"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/learner/public.py"
+      ]
+    },
+    {
+      "id": "consolidator",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/consolidator"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/consolidator/public.py"
+      ]
+    },
+    {
+      "id": "skill_designer",
+      "role": "module",
+      "path_prefixes": [
+        "api/src/atlas_production/modules/skill_designer"
+      ],
+      "public_contracts": [
+        "api/src/atlas_production/modules/skill_designer/public.py"
+      ]
     }
   ],
   "dependency_rules": [
@@ -543,6 +583,30 @@
       ],
       "forbidden_target_prefixes": [
         "components/pages"
+      ],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "consolidator-has-no-prompt-skill-dependency",
+      "language": "python",
+      "kind": "forbid_prefix",
+      "source_prefixes": [
+        "atlas_production.modules.consolidator"
+      ],
+      "forbidden_target_prefixes": [
+        "atlas_production.modules.prompt_skills"
+      ],
+      "allowed_target_ids": []
+    },
+    {
+      "id": "skill-designer-does-not-read-learner",
+      "language": "python",
+      "kind": "forbid_prefix",
+      "source_prefixes": [
+        "atlas_production.modules.skill_designer"
+      ],
+      "forbidden_target_prefixes": [
+        "atlas_production.modules.learner"
       ],
       "allowed_target_ids": []
     }

@@ -37,7 +37,12 @@ from atlas_production.modules.prompt_skills.public import (
     PromptSkillApprovedPublishV1,
     PromptSkillCatalogRefV1,
 )
-from atlas_production.modules.skill_designer.public import add_draft_key
+from atlas_production.modules.skill_designer.public import (
+    ApproveSkillCandidateV1,
+    SkillCandidateError,
+    add_draft_key,
+)
+from atlas_production.routes.prompt_skills import _candidate_command
 
 
 PUBLIC_NOW = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
@@ -279,3 +284,30 @@ def test_public_candidate_pipeline_tables_and_payloads_are_registered() -> None:
         "atlas_skill_candidates.approved_skill_ref",
         "atlas_skill_candidate_idempotency.response_payload",
     } <= set(JSONB_PAYLOAD_REGISTRY)
+
+
+def test_public_candidate_mutation_requires_matching_header_and_body_identity() -> None:
+    command = ApproveSkillCandidateV1(
+        expected_draft_revision=3,
+        idempotency_key="public-synthetic-candidate-approval",
+    )
+
+    assert (
+        _candidate_command(
+            command,
+            idempotency_header="public-synthetic-candidate-approval",
+            if_match="3",
+        )
+        is command
+    )
+    with pytest.raises(SkillCandidateError) as mismatch:
+        _candidate_command(
+            command,
+            idempotency_header="public-synthetic-different-request",
+            if_match="3",
+        )
+    assert mismatch.value.status_code == 422
+    assert (
+        mismatch.value.message_code
+        == "prompt_skills.candidate_headers_and_body_must_match"
+    )

@@ -627,7 +627,10 @@
     },
     "project.directory_members_imported": {
       "params": {
-        "count": { "type": "integer", "required": false }
+        "count": {
+          "type": "integer",
+          "required": false
+        }
       }
     },
     "project.member_role_is_updated": {
@@ -785,7 +788,10 @@
     },
     "team.directory_members_imported": {
       "params": {
-        "count": { "type": "integer", "required": false }
+        "count": {
+          "type": "integer",
+          "required": false
+        }
       }
     },
     "team.member_management_requires_team_admin_access": {
@@ -911,119 +917,357 @@
     "model.vision_default_requires_vision_capability": {
       "params": {}
     },
-    "result.knowledge_scope_access_required": { "params": {} },
-    "result.validated_evidence_is_not_available": { "params": {} },
-    "result.tested_model_route_is_required": { "params": {} },
-    "result.provider_refused": { "params": {} },
-    "result.answered_from_validated_evidence": { "params": {} },
-    "result.evidence_validation_failed": { "params": {} },
-    "provider.temporarily_unavailable": { "params": {} },
-    "conversation.submitted_by_user": { "params": {} },
-    "conversation.processing_request": { "params": {} },
-    "result.requested_knowledge_access_required": { "params": {} },
-    "result.safe_validation_failed": { "params": {} },
-    "result.protected_answer_format_invalid": { "params": {} },
-    "result.conversational_reply": { "params": {} },
-    "result.clarification_required": { "params": {} },
-    "result.answered_from_authorized_knowledge": { "params": {} },
-    "result.external_answer_is_unverified": { "params": {} },
-    "result.mixed_answer_has_separate_provenance": { "params": {} },
-    "result.supported_answer_not_established": { "params": {} },
-    "result.request_safely_refused": { "params": {} },
-    "conversation.turn_completed": { "params": {} },
-    "citation.access_audited_watermark_disclosure": { "params": {} },
-    "citation.showing_whole_evidence_page": { "params": {} },
-    "ops.configure_artifact_storage": { "params": {} },
-    "ops.create_project": { "params": {} },
-    "ops.grant_active_project_permission": { "params": {} },
-    "ops.prepare_searchable_evidence": { "params": {} },
-    "ops.processing_runner_is_unavailable": { "params": {} },
-    "ops.notes_collaboration_is_unavailable": { "params": {} },
-    "ops.configure_and_test_model_route": { "params": {} },
-    "document.searchable_content_update_is_queued": { "params": {} },
-    "document.restore_is_queued_for_evidence_rebuild": { "params": {} },
-    "document.processing_is_queued": { "params": {} },
-    "artifact.upload_is_pending": { "params": {} },
-    "artifact.storage_target_changed_before_commit": { "params": {} },
-    "artifact.bytes_do_not_match_committed_metadata": { "params": {} },
-    "provider.connection_fields_are_invalid": { "params": {} },
-    "provider.choose_another_default_before_disabling_connection": { "params": {} },
-    "model.choose_another_default_before_disabling_route": { "params": {} },
-    "model.choose_another_default_before_disabling_vision": { "params": {} },
-    "provider.connection_display_name_is_invalid": { "params": {} },
-    "processing.admin_action_was_rejected": { "params": {} },
-    "processing.package_is_accepted_for_validation": { "params": {} },
-    "processing.invalid_package_is_quarantined": { "params": {} },
-    "processing.profile_is_created": { "params": {} },
-    "processing.profile_revision_is_created": { "params": {} },
-    "processing.profile_revision_is_activated": { "params": {} },
-    "processing.retry_is_completed": { "params": {} },
-    "document.restore_verification_failed": { "params": {} },
-    "processing.plugin_mutation_is_recorded": { "params": {} },
-    "model.route_is_available": { "params": {} },
-    "answer_behavior.custom_guidance_was_updated": { "params": {} },
-    "answer_behavior.custom_guidance_was_cleared": { "params": {} },
-    "answer_behavior.idempotency_key_was_reused": { "params": {} },
-    "answer_behavior.revision_changed_before_update": { "params": {} },
-    "answer_behavior.stored_revision_is_invalid": { "params": {} },
-    "prompt_skills.filename_must_be_skill_md": { "params": {} },
-    "prompt_skills.skill_file_size_is_invalid": { "params": {} },
-    "prompt_skills.skill_file_must_be_utf8": { "params": {} },
-    "prompt_skills.frontmatter_is_required": { "params": {} },
-    "prompt_skills.frontmatter_is_invalid": { "params": {} },
-    "prompt_skills.frontmatter_has_unsupported_fields": { "params": {} },
-    "prompt_skills.name_is_invalid": { "params": {} },
-    "prompt_skills.description_is_invalid": { "params": {} },
-    "prompt_skills.license_is_invalid": { "params": {} },
-    "prompt_skills.compatibility_is_invalid": { "params": {} },
-    "prompt_skills.metadata_is_invalid": { "params": {} },
-    "prompt_skills.allowed_tools_are_not_supported": { "params": {} },
-    "prompt_skills.instructions_are_required": { "params": {} },
-    "prompt_skills.path_and_frontmatter_name_must_match": { "params": {} },
-    "prompt_skills.idempotency_key_is_invalid": { "params": {} },
-    "prompt_skills.idempotency_key_is_required": { "params": {} },
-    "prompt_skills.idempotency_key_was_reused": { "params": {} },
-    "prompt_skills.expected_revision_is_invalid": { "params": {} },
-    "prompt_skills.if_match_is_required": { "params": {} },
-    "prompt_skills.if_match_must_be_numeric": { "params": {} },
-    "prompt_skills.headers_and_body_must_match": { "params": {} },
-    "prompt_skills.revision_was_not_found": { "params": {} },
-    "prompt_skills.stored_content_is_invalid": { "params": {} },
-    "prompt_skills.head_revision_changed": { "params": {} },
-    "prompt_skills.control_revision_changed": { "params": {} },
-    "prompt_skills.revision_is_already_enabled": { "params": {} },
-    "prompt_skills.revision_is_not_enabled": { "params": {} },
-    "prompt_skills.revision_was_uploaded": { "params": {} },
-    "prompt_skills.revision_was_enabled": { "params": {} },
-    "prompt_skills.revision_was_disabled": { "params": {} },
-    "audit.metadata_was_redacted": { "params": {} },
-    "directory.bind_password_not_configured": { "params": {} },
-    "directory.concurrent_change": { "params": {} },
-    "directory.connection_conflict": { "params": {} },
-    "directory.connection_created": { "params": {} },
-    "directory.connection_disabled": { "params": {} },
-    "directory.connection_not_found": { "params": {} },
-    "directory.connection_test_failed": { "params": {} },
-    "directory.connection_test_passed": { "params": {} },
-    "directory.connection_updated": { "params": {} },
-    "directory.enabled_connection_requires_bind_password": { "params": {} },
-    "directory.entry_is_invalid": { "params": {} },
-    "directory.import_conflict": { "params": {} },
-    "directory.import_entry_unavailable": { "params": {} },
-    "directory.is_unavailable": { "params": {} },
-    "directory.login_succeeded": { "params": {} },
-    "directory.profile_not_found": { "params": {} },
-    "directory.profile_is_read_only": { "params": {} },
-    "directory.profile_refreshed": { "params": {} },
+    "result.knowledge_scope_access_required": {
+      "params": {}
+    },
+    "result.validated_evidence_is_not_available": {
+      "params": {}
+    },
+    "result.tested_model_route_is_required": {
+      "params": {}
+    },
+    "result.provider_refused": {
+      "params": {}
+    },
+    "result.answered_from_validated_evidence": {
+      "params": {}
+    },
+    "result.evidence_validation_failed": {
+      "params": {}
+    },
+    "provider.temporarily_unavailable": {
+      "params": {}
+    },
+    "conversation.submitted_by_user": {
+      "params": {}
+    },
+    "conversation.processing_request": {
+      "params": {}
+    },
+    "result.requested_knowledge_access_required": {
+      "params": {}
+    },
+    "result.safe_validation_failed": {
+      "params": {}
+    },
+    "result.protected_answer_format_invalid": {
+      "params": {}
+    },
+    "result.conversational_reply": {
+      "params": {}
+    },
+    "result.clarification_required": {
+      "params": {}
+    },
+    "result.answered_from_authorized_knowledge": {
+      "params": {}
+    },
+    "result.external_answer_is_unverified": {
+      "params": {}
+    },
+    "result.mixed_answer_has_separate_provenance": {
+      "params": {}
+    },
+    "result.supported_answer_not_established": {
+      "params": {}
+    },
+    "result.request_safely_refused": {
+      "params": {}
+    },
+    "conversation.turn_completed": {
+      "params": {}
+    },
+    "citation.access_audited_watermark_disclosure": {
+      "params": {}
+    },
+    "citation.showing_whole_evidence_page": {
+      "params": {}
+    },
+    "ops.configure_artifact_storage": {
+      "params": {}
+    },
+    "ops.create_project": {
+      "params": {}
+    },
+    "ops.grant_active_project_permission": {
+      "params": {}
+    },
+    "ops.prepare_searchable_evidence": {
+      "params": {}
+    },
+    "ops.processing_runner_is_unavailable": {
+      "params": {}
+    },
+    "ops.notes_collaboration_is_unavailable": {
+      "params": {}
+    },
+    "ops.configure_and_test_model_route": {
+      "params": {}
+    },
+    "document.searchable_content_update_is_queued": {
+      "params": {}
+    },
+    "document.restore_is_queued_for_evidence_rebuild": {
+      "params": {}
+    },
+    "document.processing_is_queued": {
+      "params": {}
+    },
+    "artifact.upload_is_pending": {
+      "params": {}
+    },
+    "artifact.storage_target_changed_before_commit": {
+      "params": {}
+    },
+    "artifact.bytes_do_not_match_committed_metadata": {
+      "params": {}
+    },
+    "provider.connection_fields_are_invalid": {
+      "params": {}
+    },
+    "provider.choose_another_default_before_disabling_connection": {
+      "params": {}
+    },
+    "model.choose_another_default_before_disabling_route": {
+      "params": {}
+    },
+    "model.choose_another_default_before_disabling_vision": {
+      "params": {}
+    },
+    "provider.connection_display_name_is_invalid": {
+      "params": {}
+    },
+    "processing.admin_action_was_rejected": {
+      "params": {}
+    },
+    "processing.package_is_accepted_for_validation": {
+      "params": {}
+    },
+    "processing.invalid_package_is_quarantined": {
+      "params": {}
+    },
+    "processing.profile_is_created": {
+      "params": {}
+    },
+    "processing.profile_revision_is_created": {
+      "params": {}
+    },
+    "processing.profile_revision_is_activated": {
+      "params": {}
+    },
+    "processing.retry_is_completed": {
+      "params": {}
+    },
+    "document.restore_verification_failed": {
+      "params": {}
+    },
+    "processing.plugin_mutation_is_recorded": {
+      "params": {}
+    },
+    "model.route_is_available": {
+      "params": {}
+    },
+    "answer_behavior.custom_guidance_was_updated": {
+      "params": {}
+    },
+    "answer_behavior.custom_guidance_was_cleared": {
+      "params": {}
+    },
+    "answer_behavior.idempotency_key_was_reused": {
+      "params": {}
+    },
+    "answer_behavior.revision_changed_before_update": {
+      "params": {}
+    },
+    "answer_behavior.stored_revision_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.filename_must_be_skill_md": {
+      "params": {}
+    },
+    "prompt_skills.skill_file_size_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.skill_file_must_be_utf8": {
+      "params": {}
+    },
+    "prompt_skills.frontmatter_is_required": {
+      "params": {}
+    },
+    "prompt_skills.frontmatter_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.frontmatter_has_unsupported_fields": {
+      "params": {}
+    },
+    "prompt_skills.name_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.description_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.license_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.compatibility_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.metadata_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.allowed_tools_are_not_supported": {
+      "params": {}
+    },
+    "prompt_skills.instructions_are_required": {
+      "params": {}
+    },
+    "prompt_skills.path_and_frontmatter_name_must_match": {
+      "params": {}
+    },
+    "prompt_skills.idempotency_key_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.idempotency_key_is_required": {
+      "params": {}
+    },
+    "prompt_skills.idempotency_key_was_reused": {
+      "params": {}
+    },
+    "prompt_skills.expected_revision_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.if_match_is_required": {
+      "params": {}
+    },
+    "prompt_skills.if_match_must_be_numeric": {
+      "params": {}
+    },
+    "prompt_skills.headers_and_body_must_match": {
+      "params": {}
+    },
+    "prompt_skills.revision_was_not_found": {
+      "params": {}
+    },
+    "prompt_skills.stored_content_is_invalid": {
+      "params": {}
+    },
+    "prompt_skills.head_revision_changed": {
+      "params": {}
+    },
+    "prompt_skills.control_revision_changed": {
+      "params": {}
+    },
+    "prompt_skills.revision_is_already_enabled": {
+      "params": {}
+    },
+    "prompt_skills.revision_is_not_enabled": {
+      "params": {}
+    },
+    "prompt_skills.revision_was_uploaded": {
+      "params": {}
+    },
+    "prompt_skills.revision_was_enabled": {
+      "params": {}
+    },
+    "prompt_skills.revision_was_disabled": {
+      "params": {}
+    },
+    "audit.metadata_was_redacted": {
+      "params": {}
+    },
+    "directory.bind_password_not_configured": {
+      "params": {}
+    },
+    "directory.concurrent_change": {
+      "params": {}
+    },
+    "directory.connection_conflict": {
+      "params": {}
+    },
+    "directory.connection_created": {
+      "params": {}
+    },
+    "directory.connection_disabled": {
+      "params": {}
+    },
+    "directory.connection_not_found": {
+      "params": {}
+    },
+    "directory.connection_test_failed": {
+      "params": {}
+    },
+    "directory.connection_test_passed": {
+      "params": {}
+    },
+    "directory.connection_updated": {
+      "params": {}
+    },
+    "directory.enabled_connection_requires_bind_password": {
+      "params": {}
+    },
+    "directory.entry_is_invalid": {
+      "params": {}
+    },
+    "directory.import_conflict": {
+      "params": {}
+    },
+    "directory.import_entry_unavailable": {
+      "params": {}
+    },
+    "directory.is_unavailable": {
+      "params": {}
+    },
+    "directory.login_succeeded": {
+      "params": {}
+    },
+    "directory.profile_not_found": {
+      "params": {}
+    },
+    "directory.profile_is_read_only": {
+      "params": {}
+    },
+    "directory.profile_refreshed": {
+      "params": {}
+    },
     "directory.users_scoped_imported": {
       "params": {
-        "count": { "type": "integer", "required": false }
+        "count": {
+          "type": "integer",
+          "required": false
+        }
       }
     },
     "directory.users_imported": {
       "params": {
-        "count": { "type": "integer", "required": false }
+        "count": {
+          "type": "integer",
+          "required": false
+        }
       }
+    },
+    "prompt_skills.candidate_was_approved": {
+      "params": {}
+    },
+    "prompt_skills.candidate_was_rejected": {
+      "params": {}
+    },
+    "prompt_skills.candidate_became_stale": {
+      "params": {}
+    },
+    "prompt_skills.candidate_was_not_found": {
+      "params": {}
+    },
+    "prompt_skills.candidate_precondition_changed": {
+      "params": {}
+    },
+    "prompt_skills.candidate_is_unavailable": {
+      "params": {}
+    },
+    "prompt_skills.candidate_headers_and_body_must_match": {
+      "params": {}
+    },
+    "prompt_skills.catalog_revision_changed": {
+      "params": {}
     }
   }
 }

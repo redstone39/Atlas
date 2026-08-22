@@ -1,6 +1,7 @@
 from __future__ import annotations
+from typing import Annotated
 
-from fastapi import APIRouter, File, Header, Query, Request, UploadFile
+from fastapi import APIRouter, File, Header, Path, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from atlas_production.modules.prompt_skills.public import (
@@ -13,6 +14,15 @@ from atlas_production.modules.prompt_skills.public import (
     PromptSkillMutationOutcomeV1,
     PromptSkillRevisionV1,
 )
+from atlas_production.modules.skill_designer.public import (
+    ApproveSkillCandidateV1,
+    SkillCandidateError,
+    RejectSkillCandidateV1,
+    SkillCandidateAdmin,
+    SkillCandidateDetailV1,
+    SkillCandidateListV1,
+    SkillCandidateMutationOutcomeV1,
+)
 from atlas_production.shared.http import error
 from atlas_production.transport.dependencies import api_composition, current_user
 
@@ -24,7 +34,22 @@ def _service(request: Request) -> PromptSkillAdmin:
     return api_composition(request).prompt_skills
 
 
+
+def _candidate_service(request: Request) -> SkillCandidateAdmin:
+    service = api_composition(request).skill_candidates
+    if service is None:
+        raise SkillCandidateError(
+            "skill_candidate_unavailable",
+            "prompt_skills.candidate_is_unavailable",
+            503,
+        )
+    return service
+
 def _failure(exc: PromptSkillError) -> JSONResponse:
+    return error(exc.error_code, exc.message_code, exc.status_code)
+
+
+def _candidate_failure(exc: SkillCandidateError) -> JSONResponse:
     return error(exc.error_code, exc.message_code, exc.status_code)
 
 
@@ -240,6 +265,129 @@ def disable_prompt_skill_revision(
         category=category,
         name=name,
         revision=revision,
+        payload=payload,
+        request=request,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+    )
+
+
+def _candidate_command(
+    body: ApproveSkillCandidateV1 | RejectSkillCandidateV1,
+    *,
+    idempotency_header: str | None,
+    if_match: str | None,
+) -> ApproveSkillCandidateV1 | RejectSkillCandidateV1:
+    key = _required_key(idempotency_header)
+    expected = _required_if_match(if_match)
+    if key != body.idempotency_key or expected != body.expected_draft_revision:
+        raise SkillCandidateError(
+            "invalid_skill_candidate_request",
+            "prompt_skills.candidate_headers_and_body_must_match",
+            422,
+        )
+    return body
+
+
+@router.get(
+    "/api/v1/admin/prompt-skill-candidates",
+    response_model=SkillCandidateListV1,
+)
+def list_prompt_skill_candidates(
+    request: Request,
+    category: PromptSkillCategory | None = Query(default=None),
+):
+    try:
+        actor = _require_admin_before_upload(request)
+        return _candidate_service(request).list_candidates(actor.actor_id, category)
+    except PromptSkillError as exc:
+        return _failure(exc)
+    except SkillCandidateError as exc:
+        return _candidate_failure(exc)
+
+
+@router.get(
+    "/api/v1/admin/prompt-skill-candidates/{candidate_ref}",
+    response_model=SkillCandidateDetailV1,
+)
+def get_prompt_skill_candidate(
+    candidate_ref: Annotated[str, Path(min_length=1, max_length=300)],
+    request: Request,
+):
+    try:
+        actor = _require_admin_before_upload(request)
+        return _candidate_service(request).get_candidate(
+            actor.actor_id, candidate_ref
+        )
+    except PromptSkillError as exc:
+        return _failure(exc)
+    except SkillCandidateError as exc:
+        return _candidate_failure(exc)
+
+
+def _mutate_candidate(
+    *,
+    approve: bool,
+    candidate_ref: str,
+    payload: ApproveSkillCandidateV1 | RejectSkillCandidateV1,
+    request: Request,
+    idempotency_key: str | None,
+    if_match: str | None,
+):
+    try:
+        actor = _require_admin_before_upload(request)
+        body = _candidate_command(
+            payload,
+            idempotency_header=idempotency_key,
+            if_match=if_match,
+        )
+        service = _candidate_service(request)
+        if approve:
+            assert isinstance(body, ApproveSkillCandidateV1)
+            return service.approve_candidate(actor.actor_id, candidate_ref, body)
+        assert isinstance(body, RejectSkillCandidateV1)
+        return service.reject_candidate(actor.actor_id, candidate_ref, body)
+    except PromptSkillError as exc:
+        return _failure(exc)
+    except SkillCandidateError as exc:
+        return _candidate_failure(exc)
+
+
+@router.post(
+    "/api/v1/admin/prompt-skill-candidates/{candidate_ref}/approve",
+    response_model=SkillCandidateMutationOutcomeV1,
+)
+def approve_prompt_skill_candidate(
+    candidate_ref: Annotated[str, Path(min_length=1, max_length=300)],
+    payload: ApproveSkillCandidateV1,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+):
+    return _mutate_candidate(
+        approve=True,
+        candidate_ref=candidate_ref,
+        payload=payload,
+        request=request,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+    )
+
+
+@router.post(
+    "/api/v1/admin/prompt-skill-candidates/{candidate_ref}/reject",
+    response_model=SkillCandidateMutationOutcomeV1,
+)
+def reject_prompt_skill_candidate(
+    candidate_ref: Annotated[str, Path(min_length=1, max_length=300)],
+    payload: RejectSkillCandidateV1,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+):
+    return _mutate_candidate(
+        approve=False,
+        candidate_ref=candidate_ref,
         payload=payload,
         request=request,
         idempotency_key=idempotency_key,

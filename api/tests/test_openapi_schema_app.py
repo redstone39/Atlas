@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "4a3b771c755a137218a054cb5b013c051f4c7b3f1fac5039f9ce9cb857bd7bea"
+    "aa5da93f8befa177cdefb22e2ff52b97ba44dda3ceb323f284f9c68617c4fd21"
 )
 
 
@@ -273,3 +273,19 @@ def test_schema_only_app_rejects_real_ops_routes_before_service_lookup() -> None
             "detail": "OpenAPI schema-only app cannot serve requests"
         }
     assert vars(app.state) == {"_state": {}}
+
+
+def test_schema_exposes_only_the_admin_candidate_consumer_routes() -> None:
+    paths = create_openapi_app().openapi()["paths"]
+    candidate_paths = {
+        path: sorted(operations)
+        for path, operations in paths.items()
+        if path.startswith("/api/v1/admin/prompt-skill-candidates")
+    }
+
+    assert candidate_paths == {
+        "/api/v1/admin/prompt-skill-candidates": ["get"],
+        "/api/v1/admin/prompt-skill-candidates/{candidate_ref}": ["get"],
+        "/api/v1/admin/prompt-skill-candidates/{candidate_ref}/approve": ["post"],
+        "/api/v1/admin/prompt-skill-candidates/{candidate_ref}/reject": ["post"],
+    }
