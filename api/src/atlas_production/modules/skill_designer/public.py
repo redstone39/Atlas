@@ -252,9 +252,12 @@ class SkillDesignRunV1(_StrictModel):
     pinned_route_id: Identity | None = None
     pinned_route_revision: int | None = Field(default=None, ge=1)
     pinned_runtime_policy_revision: int | None = Field(default=None, ge=1)
+    model_invocation_refs: list[OpaqueRef] = Field(default_factory=list, max_length=64)
+    result_digest: Digest | None = None
     failure_code: Annotated[str, Field(min_length=1, max_length=100)] | None = None
     next_attempt_at: AwareDatetime | None = None
     candidate_refs: list[OpaqueRef] = Field(default_factory=list, max_length=64)
+    candidate_material_digests: list[Digest] = Field(default_factory=list, max_length=64)
     completed_at: AwareDatetime | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
@@ -268,13 +271,38 @@ class SkillDesignRunV1(_StrictModel):
         )
         if any(value is None for value in route) != all(value is None for value in route):
             raise ValueError("Skill Designer route pin must be wholly present or absent")
+        if len(self.candidate_material_digests) != len(self.candidate_refs):
+            raise ValueError(
+                "Skill Designer candidate refs and material digests must align"
+            )
         if self.status == "completed":
-            if any(value is None for value in route) or self.completed_at is None:
-                raise ValueError("completed Skill Designer run requires route provenance")
+            if (
+                any(value is None for value in route)
+                or self.completed_at is None
+                or not self.model_invocation_refs
+                or self.result_digest is None
+            ):
+                raise ValueError(
+                    "completed Skill Designer run requires route, invocation, and result provenance"
+                )
+            expected_digest = skill_design_result_digest(
+                source=self.source,
+                candidate_refs=self.candidate_refs,
+                candidate_material_digests=self.candidate_material_digests,
+                model_invocation_refs=self.model_invocation_refs,
+            )
+            if self.result_digest != expected_digest:
+                raise ValueError("Skill Designer result digest does not bind provenance")
             if self.failure_code is not None or self.next_attempt_at is not None:
                 raise ValueError("completed Skill Designer run cannot carry failure state")
-        elif self.completed_at is not None or self.candidate_refs:
-            raise ValueError("non-completed Skill Designer run cannot expose candidate results")
+        elif (
+            self.completed_at is not None
+            or self.candidate_refs
+            or self.candidate_material_digests
+            or self.model_invocation_refs
+            or self.result_digest is not None
+        ):
+            raise ValueError("non-completed Skill Designer run cannot expose a result")
         if self.status in {"retryable_failed", "failed"}:
             if self.failure_code is None:
                 raise ValueError("failed Skill Designer run requires a safe failure code")
@@ -294,6 +322,22 @@ def skill_design_run_ref(*, consolidation_ref: str, consolidation_digest: str) -
     }
     return f"skill-design:{hashlib.sha256(_canonical(projection)).hexdigest()}:v1"
 
+
+
+def skill_design_result_digest(
+    *,
+    source: SkillDesignSourceV1,
+    candidate_refs: list[str],
+    candidate_material_digests: list[str],
+    model_invocation_refs: list[str],
+) -> str:
+    projection = {
+        "source": source.model_dump(mode="json"),
+        "candidate_refs": candidate_refs,
+        "candidate_material_digests": candidate_material_digests,
+        "model_invocation_refs": model_invocation_refs,
+    }
+    return hashlib.sha256(_canonical(projection)).hexdigest()
 
 class SkillDesignerOwner(Protocol):
     def register_consolidation(self, consolidation: ConsolidationV1) -> SkillDesignRunV1: ...
@@ -329,6 +373,7 @@ class SkillDesignerOwner(Protocol):
         self,
         claim: SkillDesignRunClaimV1,
         drafts: list[SkillCandidateDraftV1],
+        model_invocation_refs: list[OpaqueRef],
         observed_at: AwareDatetime,
     ) -> SkillDesignRunV1: ...
 

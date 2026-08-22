@@ -164,7 +164,7 @@ export function SkillCandidatesPanel({
         request.idempotencyKey,
       );
       setPendingMutation(null);
-      if (outcome.status === "stale") {
+      if (outcome.status === "stale" || outcome.outcome === "conflict") {
         toast.error(t("promptSkills.candidateStaleReloaded"));
       } else {
         toast.success(

@@ -65,7 +65,7 @@ class _ClaimHeartbeat:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._heartbeat_seconds + 1.0, 1.0))
+            self._thread.join()
 
     @property
     def lost(self) -> bool:
@@ -139,6 +139,10 @@ class LearnerReconciler:
     def review_cursor(self) -> ConversationReviewCursorV1 | None:
         return self._review_cursor
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         if self._stop.is_set():
             return
@@ -153,7 +157,7 @@ class LearnerReconciler:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._interval_seconds, 1.0))
+            self._thread.join()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):

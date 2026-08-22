@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass
 import base64
 import json
 import re
+import unicodedata
 from typing import Any, Iterable, Mapping
 
 
@@ -217,6 +218,45 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
 
 
 _BASE64_LIKE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)(?:api[_ -]?key|password|secret|token|credential)\s*[:=]\s*"
+    r"(?:\"([^\"\r\n]+)\"|'([^'\r\n]+)'|([^\s,;]+))"
+)
+
+
+def _strip_secret_boundary(value: str) -> str:
+    start = 0
+    end = len(value)
+    while start < end and (
+        value[start].isspace()
+        or unicodedata.category(value[start]).startswith("P")
+    ):
+        start += 1
+    while end > start and (
+        value[end - 1].isspace()
+        or unicodedata.category(value[end - 1]).startswith("P")
+    ):
+        end -= 1
+    return value[start:end]
+
+
+def protected_secret_values(source: str) -> set[str]:
+    values: set[str] = set()
+    for match in _SECRET_VALUE_RE.finditer(source):
+        captured = next(
+            (group for group in match.groups() if group is not None),
+            "",
+        )
+        normalized = captured.strip()
+        while normalized:
+            values.add(normalized)
+            narrowed = _strip_secret_boundary(normalized)
+            if narrowed == normalized:
+                break
+            normalized = narrowed
+    return values
+
+
 _CANONICAL_CONTENT_KEYS = frozenset(
     {
         "answer",

@@ -67,9 +67,16 @@ class AtlasSkillDesignRunRow(OrmBase):
     pinned_runtime_policy_revision: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
+    model_invocation_refs: Mapped[list[str]] = mapped_column(
+        ARRAY(String(300)), nullable=False, default=list
+    )
+    result_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     candidate_refs: Mapped[list[str]] = mapped_column(
         ARRAY(String(300)), nullable=False, default=list
+    )
+    candidate_material_digests: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), nullable=False, default=list
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
@@ -126,9 +133,20 @@ class AtlasSkillDesignRunRow(OrmBase):
             name="ck_atlas_skill_design_retry",
         ),
         CheckConstraint(
-            "((status = 'completed') AND completed_at IS NOT NULL) OR "
-            "((status <> 'completed') AND completed_at IS NULL AND cardinality(candidate_refs) = 0)",
+            "((status = 'completed') AND completed_at IS NOT NULL "
+            "AND cardinality(model_invocation_refs) >= 1 "
+            "AND cardinality(candidate_material_digests) = cardinality(candidate_refs) "
+            "AND result_digest IS NOT NULL) OR "
+            "((status <> 'completed') AND completed_at IS NULL "
+            "AND cardinality(candidate_refs) = 0 "
+            "AND cardinality(candidate_material_digests) = 0 "
+            "AND cardinality(model_invocation_refs) = 0 "
+            "AND result_digest IS NULL)",
             name="ck_atlas_skill_design_result",
+        ),
+        CheckConstraint(
+            "result_digest IS NULL OR result_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_atlas_skill_design_result_digest",
         ),
         Index(
             "ix_atlas_skill_design_due",

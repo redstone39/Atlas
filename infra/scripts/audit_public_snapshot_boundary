@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DENIED_PREFIXES = (
+    "plans/",
+    ".atlas-benchmark/",
+    "uploads/",
+    "artifacts/",
+    "dumps/",
+    "exports/",
+)
+DENIED_COMPONENTS = {
+    ".cache",
+    ".env",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".venv",
+    ".vite",
+    "__pycache__",
+    "build",
+    "caches",
+    "coverage",
+    "deployment-overrides",
+    "dist",
+    "journey-bank",
+    "logs",
+    "node_modules",
+    "out",
+    "private",
+    "snapshots",
+    "target",
+    "venv",
+}
+BASELINE_PUBLIC_FIXTURES = {
+    "api/tests/fixtures/__init__.py",
+    "api/tests/fixtures/local_pilot.py",
+    "plugin-sdk/examples/atlas-docling-pdf/fixtures/smoke-input.json",
+    "plugin-sdk/examples/atlas-pypdf/fixtures/smoke-input.json",
+}
+PRIVATE_PATH = re.compile(
+    rb"/(?:Users|home)/[^/\s]+/(?:Library/Mobile Documents|\.ssh|\.aws|\.config)/"
+)
+SECRET_LITERAL = re.compile(
+    rb"(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
+)
+DIRECT_PAYLOAD_PATH = re.compile(
+    r"(?:^|/)(?:conversation|turn|provider|model)[-_]?(?:exports?|payloads?|dumps?)(?:/|$)",
+    re.IGNORECASE,
+)
+DIRECT_PAYLOAD_LITERAL = re.compile(
+    rb"""(?ix)
+    \b(?:conversation|turn|provider|model)[_-]?(?:payload|content|text|response)
+    \s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    |
+    \btranscript\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    """
+)
+SAFE_DIRECT_PAYLOAD_MARKER = re.compile(
+    rb"(?i)(?:^|[^a-z0-9])(?:public-synthetic|SENSITIVE_[A-Z0-9_]*MARKER|example|fixture|dummy|fake|placeholder|redacted)(?:[^a-z0-9]|$)"
+)
+SECRET_ASSIGNMENT = re.compile(
+    rb"""(?ix)
+    \b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|credential)
+    \b\s*(?:=|:)\s*(?:[rubf]*["']([^"'\r\n]{8,})["']|((?=[A-Za-z0-9_+/=-]{8,}\s*(?:[,;}\]\r\n]|$))(?=[A-Za-z0-9_+/=-]*(?:[-+/=]|\d))[A-Za-z0-9_+/=-]{8,}))
+    """
+)
+SAFE_CREDENTIAL_MARKER = re.compile(
+    rb"""(?ix)
+    (?:^|[^a-z0-9])(?:public-synthetic|example|test|testloginpassword|fixture|
+    dummy|fake|placeholder|redacted|canary|rotated-secret|too-short|
+    short-secret|directory-password|bind-secret|session-|do-not-log|
+    not-a-real|changeme|localhost)(?:[^a-z0-9]|$)
+    """
+)
+
+
+def _git(*args: str) -> bytes:
+    return subprocess.check_output(["git", *args], cwd=REPO_ROOT)
+
+
+def _paths(committed: bool) -> list[str]:
+    if committed:
+        raw = _git("ls-tree", "-r", "--name-only", "HEAD")
+    else:
+        raw = _git("diff", "--cached", "--name-only", "--diff-filter=ACMR")
+    return [line for line in raw.decode("utf-8").splitlines() if line]
+
+
+def _blob(path: str, committed: bool) -> bytes:
+    revision = f"HEAD:{path}" if committed else f":{path}"
+    return _git("show", revision)
+
+
+def _denied_path(path: str) -> str | None:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith(DENIED_PREFIXES):
+        return "denied publication path"
+    components = set(normalized.split("/"))
+    if (
+        components.intersection(DENIED_COMPONENTS)
+        or ("fixtures" in components and normalized not in BASELINE_PUBLIC_FIXTURES)
+    ):
+        return "denied private, fixture, cache, or build path"
+    basename = normalized.rsplit("/", 1)[-1]
+    if basename.startswith(".env") and basename != ".env.example":
+        return "denied environment path"
+    if DIRECT_PAYLOAD_PATH.search(normalized):
+        return "denied direct runtime payload path"
+    return None
+
+
+def _is_public_evidence_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    components = set(normalized.split("/"))
+    basename = normalized.rsplit("/", 1)[-1]
+    evidence_suffix = normalized.endswith(
+        (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml")
+    )
+    return evidence_suffix and (
+        "tests" in components
+        or "test" in components
+        or "fixtures" in components
+        or "snapshots" in components
+        or basename.startswith(("test_", "smoke_"))
+        or ".test." in basename
+        or ".spec." in basename
+    )
+
+
+def _load_sensitive_hashes() -> set[str]:
+    source = os.environ.get("ATLAS_PRIVATE_SENSITIVE_HASH_FILE")
+    if not source:
+        return set()
+    values = {
+        line.strip().lower()
+        for line in Path(source).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+    invalid = [value for value in values if not re.fullmatch(r"[0-9a-f]{64}", value)]
+    if invalid:
+        raise RuntimeError("private sensitive hash input contains an invalid SHA-256")
+    return values
+
+
+def _scan(path: str, blob: bytes, sensitive_hashes: set[str]) -> list[str]:
+    findings: list[str] = []
+    denied = _denied_path(path)
+    if denied is not None:
+        findings.append(denied)
+    if PRIVATE_PATH.search(blob):
+        findings.append("absolute private workstation path")
+    if SECRET_LITERAL.search(blob):
+        findings.append("literal credential or private key")
+    if any(
+        SAFE_CREDENTIAL_MARKER.search(match.group(1) or match.group(2)) is None
+        for match in SECRET_ASSIGNMENT.finditer(blob)
+    ):
+        findings.append("hard-coded credential assignment")
+    if _is_public_evidence_path(path) and any(
+        SAFE_DIRECT_PAYLOAD_MARKER.search(match.group(0)) is None
+        for match in DIRECT_PAYLOAD_LITERAL.finditer(blob)
+    ):
+        findings.append("direct conversation or Provider payload literal")
+    if sensitive_hashes and hashlib.sha256(blob).hexdigest() in sensitive_hashes:
+        findings.append("private sensitive blob hash overlap")
+    return findings
+
+
+def _self_test() -> None:
+    digest = hashlib.sha256(b"private-sensitive-fixture").hexdigest()
+    cases = (
+        ("plans/private-plan.yaml", b"safe", set(), "denied publication path"),
+        (
+            "web/.next/server/app.js",
+            b"generated",
+            set(),
+            "denied private, fixture, cache, or build path",
+        ),
+        (
+            "api/tests/fixtures/customer.json",
+            b"{}",
+            set(),
+            "denied private, fixture, cache, or build path",
+        ),
+        (
+            "api/.pytest_cache/v/cache/nodeids",
+            b"generated",
+            set(),
+            "denied private, fixture, cache, or build path",
+        ),
+        (
+            "web/node_modules/package/index.js",
+            b"generated",
+            set(),
+            "denied private, fixture, cache, or build path",
+        ),
+        (
+            "src/example.txt",
+            b"/" + b"Users/example/" + b"Library/Mobile Documents/private/file",
+            set(),
+            "absolute private workstation path",
+        ),
+        (
+            "src/example.txt",
+            b"token=" + b"sk-" + b"abcdefghijklmnopqrstuvwxyz012345",
+            set(),
+            "literal credential or private key",
+        ),
+        (
+            "src/example.txt",
+            b"private-sensitive-fixture",
+            {digest},
+            "private sensitive blob hash overlap",
+        ),
+        (
+            "conversation-exports/turns.json",
+            b"{}",
+            set(),
+            "denied direct runtime payload path",
+        ),
+        (
+            "api/tests/test_other_public_behavior.py",
+            b'transcript = "customer private message"',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "plugin-runner/tests/test_other.py",
+            b'provider_response = "customer private message"',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "src/example.py",
+            b"to"
+            + b'ken = "public-synthetic-token"\ncre'
+            + b'dential = "customer-production-credential"',
+            set(),
+            "hard-coded credential assignment",
+        ),
+        (
+            "src/example.py",
+            b"cre" + b"dential = production-credential-value",
+            set(),
+            "hard-coded credential assignment",
+        ),
+        (
+            "src/example.py",
+            b"se" + b'cret = "latest-production-secret"',
+            set(),
+            "hard-coded credential assignment",
+        ),
+    )
+    for path, blob, hashes, expected in cases:
+        findings = _scan(path, blob, hashes)
+        if expected not in findings:
+            raise RuntimeError(f"boundary self-test did not reject {expected}")
+    if _scan("api/src/public.py", b"public-safe", set()):
+        raise RuntimeError("boundary self-test rejected safe public source")
+    print("public snapshot boundary self-test passed")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Audit the staged index or committed public snapshot boundary."
+    )
+    parser.add_argument("--committed", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        _self_test()
+        return 0
+
+    sensitive_hashes = _load_sensitive_hashes()
+    findings: list[tuple[str, str]] = []
+    paths = _paths(args.committed)
+    for path in paths:
+        for finding in _scan(path, _blob(path, args.committed), sensitive_hashes):
+            findings.append((path, finding))
+    if findings:
+        for path, finding in findings:
+            print(f"{path}: {finding}", file=sys.stderr)
+        return 1
+    mode = "committed" if args.committed else "staged"
+    hash_note = " with private hash input" if sensitive_hashes else ""
+    print(
+        f"public snapshot boundary passed: {mode} {len(paths)} paths{hash_note}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

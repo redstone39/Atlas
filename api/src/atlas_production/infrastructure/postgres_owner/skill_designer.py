@@ -52,6 +52,7 @@ from atlas_production.modules.skill_designer.public import (
     SkillDesignSourceV1,
     SkillDesignerOwner,
     skill_design_run_ref,
+    skill_design_result_digest,
 )
 
 SessionFactory = Callable[[], Session]
@@ -120,9 +121,12 @@ def _run_from_row(row: AtlasSkillDesignRunRow) -> SkillDesignRunV1:
             pinned_route_id=row.pinned_route_id,
             pinned_route_revision=row.pinned_route_revision,
             pinned_runtime_policy_revision=row.pinned_runtime_policy_revision,
+            model_invocation_refs=list(row.model_invocation_refs),
+            result_digest=row.result_digest,
             failure_code=row.failure_code,
             next_attempt_at=row.next_attempt_at,
             candidate_refs=list(row.candidate_refs),
+            candidate_material_digests=list(row.candidate_material_digests),
             completed_at=row.completed_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -297,7 +301,17 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
             or row.operation != operation
             or row.request_digest != request_digest
         ):
-            raise SkillCandidateStoreError("skill_candidate_idempotency_conflict")
+            candidate = session.get(AtlasSkillCandidateRow, candidate_ref)
+            if candidate is None:
+                raise SkillCandidateStoreError("skill_candidate_idempotency_conflict")
+            detail = _detail(candidate)
+            return SkillCandidateMutationOutcomeV1(
+                candidate_ref=detail.candidate_ref,
+                draft_revision=detail.draft_revision,
+                status=detail.status,
+                outcome="conflict",
+                approved_skill_ref=detail.approved_skill_ref,
+            )
         stored = SkillCandidateMutationOutcomeV1.model_validate(row.response_payload)
         return stored.model_copy(update={"outcome": "replayed"})
 
@@ -342,6 +356,7 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
                     consolidation_digest=source.consolidation_digest,
                     consolidation_scan_sequence=source.consolidation_scan_sequence,
                     status="pending",
+                    result_digest=None,
                     attempt=0,
                     fence=0,
                     worker_id=None,
@@ -351,8 +366,10 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
                     pinned_route_id=None,
                     pinned_route_revision=None,
                     pinned_runtime_policy_revision=None,
+                    model_invocation_refs=[],
                     failure_code=None,
                     candidate_refs=[],
+                    candidate_material_digests=[],
                     created_at=consolidation.completed_at,
                     updated_at=consolidation.completed_at,
                     completed_at=None,
@@ -424,6 +441,7 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
                         consolidation_digest=source.consolidation_digest,
                         consolidation_scan_sequence=source.consolidation_scan_sequence,
                         status="pending",
+                        result_digest=None,
                         attempt=0,
                         fence=0,
                         worker_id=None,
@@ -433,8 +451,10 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
                         pinned_route_id=None,
                         pinned_route_revision=None,
                         pinned_runtime_policy_revision=None,
+                        model_invocation_refs=[],
                         failure_code=None,
                         candidate_refs=[],
+                        candidate_material_digests=[],
                         created_at=consolidation.completed_at,
                         updated_at=consolidation.completed_at,
                         completed_at=None,
@@ -551,11 +571,16 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
         self,
         claim: SkillDesignRunClaimV1,
         drafts: list[SkillCandidateDraftV1],
+        model_invocation_refs: list[str],
         observed_at: datetime,
     ) -> SkillDesignRunV1:
         keys = [draft.draft_key for draft in drafts]
         if len(set(keys)) != len(keys):
             raise SkillDesignerConflict("skill_candidate_duplicate_draft_key")
+        if not model_invocation_refs or len(set(model_invocation_refs)) != len(
+            model_invocation_refs
+        ):
+            raise SkillDesignerConflict("skill_design_invocation_provenance_invalid")
         if any(
             evidence.consolidation_ref != claim.source.consolidation_ref
             or evidence.consolidation_digest != claim.source.consolidation_digest
@@ -566,6 +591,7 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
         with self._session_factory() as session, session.begin():
             run = _lock_claim(session, claim, observed_at)
             refs: list[str] = []
+            material_digests: list[str] = []
             for draft in drafts:
                 row = None
                 if draft.candidate_ref is not None:
@@ -629,13 +655,22 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
                         observed_at=observed_at,
                     )
                 refs.append(ref)
+                material_digests.append(material_digest)
+            run.result_digest = skill_design_result_digest(
+                source=claim.source,
+                candidate_refs=refs,
+                candidate_material_digests=material_digests,
+                model_invocation_refs=model_invocation_refs,
+            )
             run.status = "completed"
             run.worker_id = None
             run.claim_token = None
             run.lease_expires_at = None
             run.next_attempt_at = None
             run.failure_code = None
+            run.model_invocation_refs = list(model_invocation_refs)
             run.candidate_refs = refs
+            run.candidate_material_digests = material_digests
             run.updated_at = observed_at
             run.completed_at = observed_at
             session.flush()
@@ -658,6 +693,8 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
             row.next_attempt_at = observed_at + _RETRY_DELAY if retryable else None
             row.pinned_route_id = None if retryable else row.pinned_route_id
             row.pinned_route_revision = None if retryable else row.pinned_route_revision
+            row.model_invocation_refs = []
+            row.result_digest = None
             row.pinned_runtime_policy_revision = (
                 None if retryable else row.pinned_runtime_policy_revision
             )
@@ -829,6 +866,9 @@ class PostgresSkillDesignerOwner(SkillDesignerOwner):
             expected_target = (
                 target_matches[0] if draft.disposition == "revise" else None
             )
+            row.status = "applying"
+            row.updated_at = observed_at
+            session.flush()
             request = PromptSkillApprovedPublishV1(
                 disposition=draft.disposition,
                 category=draft.category,

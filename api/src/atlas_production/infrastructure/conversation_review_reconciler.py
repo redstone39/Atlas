@@ -65,7 +65,7 @@ class _ClaimHeartbeat:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._heartbeat_seconds + 1.0, 1.0))
+            self._thread.join()
 
     @property
     def lost(self) -> bool:
@@ -141,6 +141,10 @@ class ConversationReviewReconciler:
     def candidate_cursor(self) -> ConversationScanCursorV1 | None:
         return self._candidate_cursor
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         self.run_once()
         self._thread = Thread(
@@ -153,7 +157,7 @@ class ConversationReviewReconciler:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._interval_seconds, 1.0))
+            self._thread.join()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):

@@ -185,8 +185,7 @@ class ConversationReviewSource:
             or current.status != "active"
             or current.updated_at != conversation.updated_at
             or len(current_members) != len(members)
-            or [item.model_dump() for item in current_members]
-            != [item.model_dump() for item in members]
+            or current_members != members
         ):
             return None
         if observed_at < semantic_activity + SEMANTIC_QUIET_PERIOD:

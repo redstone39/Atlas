@@ -273,4 +273,67 @@ describe("Atlas public Admin: Skill candidates", () => {
       screen.queryByText("The exact candidate draft was published and enabled."),
     ).not.toBeInTheDocument();
   });
+
+  it("fails closed on a conflicting idempotency result", async () => {
+    mockApi(adminSession, incompleteReadiness);
+    const fallbackFetch = global.fetch;
+    let detailLoads = 0;
+
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/api/v1/admin/prompt-skills" && method === "GET") {
+        return jsonResponse({ items: [] });
+      }
+      if (
+        url.pathname === "/api/v1/admin/prompt-skill-candidates" &&
+        method === "GET"
+      ) {
+        return jsonResponse({ items: [candidate] });
+      }
+      if (
+        url.pathname ===
+          `/api/v1/admin/prompt-skill-candidates/${candidate.candidate_ref}` &&
+        method === "GET"
+      ) {
+        detailLoads += 1;
+        return jsonResponse(candidateDetail);
+      }
+      if (
+        url.pathname ===
+          `/api/v1/admin/prompt-skill-candidates/${candidate.candidate_ref}/approve` &&
+        method === "POST"
+      ) {
+        return jsonResponse({
+          candidate_ref: candidate.candidate_ref,
+          draft_revision: candidate.draft_revision,
+          status: "draft",
+          outcome: "conflict",
+          approved_skill_ref: null,
+        });
+      }
+      return fallbackFetch(input, init);
+    });
+
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { name: "Skill slots" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage Planning" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "The candidate or Skill catalog changed. The latest candidate state was reloaded; review it before deciding again.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(detailLoads).toBe(2));
+    expect(
+      screen.queryByText("The exact candidate draft was published and enabled."),
+    ).not.toBeInTheDocument();
+  });
 });

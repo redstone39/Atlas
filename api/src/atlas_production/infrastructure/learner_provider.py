@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +9,9 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from atlas_production.infrastructure.persistence.payload_policy import (
+    protected_secret_values as _secret_values,
+)
 from atlas_production.infrastructure.learner_source import (
     LearnerCapabilityManifestV1,
     LearnerCasePacketV1,
@@ -424,10 +425,6 @@ def _constrain_schema(value, *, node: LearnerNode, issue_types: list[str]) -> No
             _constrain_schema(item, node=node, issue_types=issue_types)
 
 
-_SECRET_VALUE_RE = re.compile(
-    r"(?i)(?:api[_ -]?key|password|secret|token|credential)\s*[:=]\s*"
-    r"(?:\"([^\"\r\n]+)\"|'([^'\r\n]+)'|([^\s,;]+))"
-)
 _MIN_EMBEDDED_PROTECTED_TEXT_CHARS = 32
 
 
@@ -495,37 +492,6 @@ def _provider_authored_texts(
     yield from _iter_strings(values)
 
 
-def _strip_secret_boundary(value: str) -> str:
-    start = 0
-    end = len(value)
-    while start < end and (
-        value[start].isspace()
-        or unicodedata.category(value[start]).startswith("P")
-    ):
-        start += 1
-    while end > start and (
-        value[end - 1].isspace()
-        or unicodedata.category(value[end - 1]).startswith("P")
-    ):
-        end -= 1
-    return value[start:end]
-
-
-def _secret_values(source: str) -> set[str]:
-    values: set[str] = set()
-    for match in _SECRET_VALUE_RE.finditer(source):
-        captured = next(
-            (group for group in match.groups() if group is not None),
-            "",
-        )
-        normalized = captured.strip()
-        while normalized:
-            values.add(normalized)
-            narrowed = _strip_secret_boundary(normalized)
-            if narrowed == normalized:
-                break
-            normalized = narrowed
-    return values
 
 
 def _protected_source_texts(packet: LearnerCasePacketV1) -> tuple[set[str], set[str]]:

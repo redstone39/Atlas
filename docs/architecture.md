@@ -58,6 +58,19 @@ initializer.
 - Turn Experience owns immutable, derived-only completed-execution projections.
   Its recorder and process-local reconciler consume durable Turn Runtime state;
   they are not a second execution, answer, or audit authority.
+- Conversation Review owns quiet-period snapshot identity, fenced review claims,
+  and zero-to-three completed learning cases. Before publication it rejects
+  verbatim protected transcript text and normalized labeled-secret echoes; it
+  persists only digests, bounded source lineage, and non-echoing derived case
+  text.
+- Layered Learner owns case diagnosis across Understanding, Planner, and Answer
+  plus the immutable derived Experience. Consolidator owns each exact ordered
+  batch of ten completed Experiences. Skill Designer owns versioned candidate
+  drafts, their lifecycle, and digest-bound Provider invocation provenance.
+- Prompt Skills remains the only revision and catalog publisher. Skill Designer
+  may request one atomic candidate publication through that owner; Consolidator
+  cannot depend on Prompt Skills, and Skill Designer cannot read Learner
+  directly.
 - Local or SMB storage owns artifact bytes, but it does not grant access or
   define business state.
 - Qdrant supplies semantic candidates. It is not an authorization or lineage
@@ -173,6 +186,22 @@ unless the persisted explicit default is currently eligible.
   strict `(scan_sequence, execution_id)` cursor that advances only after the
   derived Store commit. Store identity and digest rules make exact replay
   stable; recorder failure never rolls back the completed turn.
+- Conversation Review becomes eligible after two hours without semantic
+  activity. Its process-local reconciler claims one immutable thin snapshot and
+  publishes at most three grounded cases. Layered Learner consumes completed
+  cases; every layer result and synthesis remains bounded and excludes raw
+  Provider responses.
+- Consolidation reserves only the next exact ten Experience sequence entries.
+  Its checkpoint advances with the reserved batch, while fenced retry state
+  prevents duplicate terminal results. Skill Designer consumes completed
+  consolidations, preserves candidate semantic identity across retries and
+  newer draft revisions, and binds ordered Provider invocation references into
+  the completed run digest.
+- The three background carriers start in dependency order: Conversation Review,
+  Layered Learner, then the candidate pipeline. API shutdown signals and joins
+  every carrier before lifespan exit while nested cleanup still attempts every
+  later owner. Durable PostgreSQL claims, not process threads, remain the
+  lifecycle authority.
 - Workspace receives only allowlisted phase, status, cycle, and message fields.
   Plans, drafts, prompts, Provider payloads, and Provider reasoning are not
   projected to members.
@@ -215,12 +244,14 @@ unless the persisted explicit default is currently eligible.
   helpful/not-helpful feedback, and bounded safe Skill lineage on eligible
   turns.
 - System Admin: users and global Directory import, reversible Team and Project
-  lifecycle, three-slot Prompt Skills, Provider/model routes with independent
-  text/vision defaults, explicit LDAP/Active Directory transport and scoped
-  imports, Notes settings, plugins, agents/tokens, safe audit events, ordered
-  completed-turn safe actions, and latest-only read-only feedback in
-  conversation inspection. Turn Experience recovery has no Admin or Web
-  surface.
+  lifecycle, three-slot Prompt Skills and candidate list/detail/approve/reject,
+  Provider/model routes with independent text/vision defaults, explicit
+  LDAP/Active Directory transport and scoped imports, Notes settings, plugins,
+  agents/tokens, safe audit events, ordered completed-turn safe actions, and
+  latest-only read-only feedback in conversation inspection. Candidate
+  mutations require matching request identity and draft revision; stale
+  preconditions fail closed. Turn Experience and pre-candidate pipeline recovery
+  have no Admin or Web surface.
 - Agent query management exists, but `POST /api/v1/agent/queries` currently
   returns `501 feature_deferred`.
 

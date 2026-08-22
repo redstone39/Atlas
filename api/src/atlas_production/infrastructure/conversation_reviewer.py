@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 import json
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
@@ -12,6 +13,9 @@ from pydantic import ValidationError
 from atlas_production.infrastructure.conversation_review_source import (
     ConversationReviewTranscriptTurnV1,
     ConversationReviewTranscriptV1,
+)
+from atlas_production.infrastructure.persistence.payload_policy import (
+    protected_secret_values,
 )
 from atlas_production.modules.conversation_review.public import (
     ConversationReviewClaimV1,
@@ -733,12 +737,66 @@ def _fits(policy, request: ProviderConversationRequest, schema: NativeJsonSchema
         raise
 
 
+_MIN_EMBEDDED_TRANSCRIPT_TEXT_CHARS = 32
+
+
+def _has_protected_overlap(authored: str, source: str) -> bool:
+    if authored == source:
+        return True
+    if (
+        len(authored) < _MIN_EMBEDDED_TRANSCRIPT_TEXT_CHARS
+        or len(source) < _MIN_EMBEDDED_TRANSCRIPT_TEXT_CHARS
+    ):
+        return False
+    return (
+        SequenceMatcher(None, authored, source, autojunk=False)
+        .find_longest_match()
+        .size
+        >= _MIN_EMBEDDED_TRANSCRIPT_TEXT_CHARS
+    )
+
+
+def _validate_no_transcript_echo(
+    proposal: ConversationReviewProposalV1,
+    transcript: ConversationReviewTranscriptV1,
+) -> None:
+    protected: set[str] = set()
+    for turn in transcript.turns:
+        protected.add(turn.original_user_text.strip())
+        if turn.final_governed_assistant_segments is not None:
+            protected.update(
+                segment.text.strip()
+                for segment in turn.final_governed_assistant_segments
+            )
+    protected.discard("")
+    secrets = {
+        secret
+        for source in protected
+        for secret in protected_secret_values(source)
+    }
+    for case in proposal.cases:
+        authored = (
+            case.title,
+            case.learning_evidence,
+            case.generalization_hypothesis,
+            case.investigation_question,
+            case.selection_rationale,
+        )
+        for value in authored:
+            normalized = value.strip()
+            if any(
+                _has_protected_overlap(normalized, source) for source in protected
+            ) or any(secret and secret in normalized for secret in secrets):
+                raise ValueError("review output repeats protected transcript content")
+
+
 def _validate_domain(
     proposal: ConversationReviewProposalV1,
     transcript: ConversationReviewTranscriptV1,
     *,
     allowed_turn_ids: frozenset[str],
 ) -> None:
+    _validate_no_transcript_echo(proposal, transcript)
     turns = {turn.turn_id: turn for turn in transcript.turns}
     positions = {turn.turn_id: turn.position for turn in transcript.turns}
     seen_groups: set[tuple[str, ...]] = set()

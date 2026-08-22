@@ -106,6 +106,21 @@ derived Turn Experience record. A process-local startup and periodic reconciler
 scans durable completed executions so a transient recorder failure or process
 restart can converge without adding another operator-facing service or API.
 
+Completed conversations also enter a bounded, derived learning pipeline after a
+two-hour period without semantic activity. Conversation Review records a thin
+snapshot and up to three learning cases without retaining transcript text or
+raw Provider payloads. The Layered Learner evaluates Understanding, Planner,
+and Answer behavior. Every exact batch of ten completed Experiences can produce
+one consolidation and a traceable Prompt Skill candidate.
+
+System Admin reviews candidates in the existing `/admin/prompt-skills` surface.
+Approval publishes and enables the exact displayed draft through the sole
+Prompt Skills owner; rejection leaves the catalog unchanged. Approval and
+rejection require matching idempotency and draft-revision preconditions, so a
+stale candidate fails closed and must be reviewed again. These reconcilers are
+process-local carriers over durable PostgreSQL claims; they do not add a
+separate service or public early-pipeline API.
+
 Workspace shows only durable, allowlisted progress phases. System Admin can
 inspect the bounded Atlas-owned plan/evaluation trace and the authoritative,
 ordered model/tool actions recorded for a completed turn. Action projection is
@@ -298,6 +313,26 @@ infra/scripts/audit_development_baseline
 infra/scripts/audit_provider_key_cutover
 infra/scripts/audit_third_party_notices
 ```
+
+The publication-boundary audit checks either the staged index or the committed
+public tree:
+
+```sh
+infra/scripts/audit_public_snapshot_boundary
+infra/scripts/audit_public_snapshot_boundary --committed
+```
+
+The conversation-evolution smoke requires `ATLAS_TEST_POSTGRES_URL` to name a
+dedicated disposable PostgreSQL database whose name starts with
+`atlas_baseline_test_`:
+
+```sh
+ATLAS_TEST_POSTGRES_URL='postgresql+psycopg://atlas:atlas@127.0.0.1:5432/atlas_baseline_test_public_upgrade' \
+  PYTHONPATH=api/src uv run --project api \
+  python api/scripts/smoke_public_conversation_evolution.py
+```
+
+Success prints `PUBLIC_CONVERSATION_EVOLUTION_ACCEPTED`.
 
 PostgreSQL integration tests require a dedicated disposable test database and
 refuse non-test database names. See `api/scripts/check-postgres`.

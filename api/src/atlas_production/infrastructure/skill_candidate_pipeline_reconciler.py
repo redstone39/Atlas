@@ -70,7 +70,7 @@ class _ConsolidationHeartbeat:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._heartbeat_seconds + 1.0, 1.0))
+            self._thread.join()
 
     @property
     def lost(self) -> bool:
@@ -135,7 +135,7 @@ class _SkillDesignHeartbeat:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._heartbeat_seconds + 1.0, 1.0))
+            self._thread.join()
 
     @property
     def lost(self) -> bool:
@@ -216,6 +216,10 @@ class SkillCandidatePipelineReconciler:
         self._stop = Event()
         self._thread: Thread | None = None
 
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self) -> None:
         if self._stop.is_set():
             return
@@ -230,7 +234,7 @@ class SkillCandidatePipelineReconciler:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(self._interval_seconds, 1.0))
+            self._thread.join()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
@@ -432,7 +436,12 @@ class SkillCandidatePipelineReconciler:
             return 0
         current = heartbeat.latest_claim or result.claim
         try:
-            self._designs.complete(current, result.drafts, self._clock())
+            self._designs.complete(
+                current,
+                result.drafts,
+                result.model_invocation_refs,
+                self._clock(),
+            )
             return 1
         except SkillDesignerClaimLost:
             return 0
@@ -449,6 +458,7 @@ class SkillCandidatePipelineReconciler:
                     "model_route_revision_conflict",
                     "skill_candidate_apply_in_progress",
                     "skill_candidate_duplicate_draft_key",
+                    "skill_design_invocation_provenance_invalid",
                     "skill_candidate_identity_conflict",
                     "skill_candidate_payload_invalid",
                 }
