@@ -15,6 +15,7 @@ from . import conversation_review as _conversation_review
 from . import context_engineering as _context_engineering
 from . import document_intake as _document_intake
 from . import identity_access as _identity_access
+from . import learner as _learner
 from . import model_routing as _model_routing
 from . import notes as _notes
 from . import processing_pipeline as _processing_pipeline

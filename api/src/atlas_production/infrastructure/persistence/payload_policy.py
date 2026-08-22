@@ -100,6 +100,7 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
     "atlas_index_generations.embedding_profile": ("processing_metadata", 8192, "embedding_profile"),
     "atlas_extraction_candidates.payload": ("processing_metadata", GENERAL_METADATA_MAX_BYTES, "processing_extraction_candidate"),
     "atlas_kpel_normalization_handoffs.payload": ("processing_metadata", GENERAL_METADATA_MAX_BYTES, "processing_kpel_handoff"),
+    "atlas_learner_runs.experience_payload": ("learning_metadata", GENERAL_METADATA_MAX_BYTES, "learner_experience_v1"),
     "atlas_model_invocations.token_usage": ("routing_metadata", RUNTIME_POLICY_MAX_BYTES, "model_token_usage"),
     "atlas_model_invocations.repair_origin_error_codes": ("routing_metadata", 1024, "model_repair_error_codes"),
     "atlas_model_invocations.runtime_policy_snapshot": ("routing_policy", RUNTIME_POLICY_MAX_BYTES, "model_runtime_policy"),

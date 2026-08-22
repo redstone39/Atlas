@@ -52,6 +52,7 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_conversation_learning_cases',
         'atlas_conversation_review_snapshot_turns',
         'atlas_conversation_reviews',
+        'atlas_learner_runs',
         'atlas_turn_feedback_revisions',
         'atlas_turn_document_candidate_ledger',
         'atlas_turn_evidence_identities',

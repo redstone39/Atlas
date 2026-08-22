@@ -5,8 +5,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+from atlas_production.infrastructure import learner_provider
 from atlas_production.infrastructure.persistence.base import OrmBase
 from atlas_production.infrastructure.persistence import schema as _schema  # noqa: F401
+from atlas_production.infrastructure.persistence.payload_policy import (
+    JSONB_PAYLOAD_REGISTRY,
+)
 from atlas_production.modules.conversation_review.public import (
     MAX_CASES,
     REVIEW_PROMPT_REVISION,
@@ -17,6 +21,12 @@ from atlas_production.modules.conversation_review.public import (
     ConversationReviewSnapshotV1,
     conversation_review_ref,
     conversation_review_snapshot_digest,
+)
+from atlas_production.modules.learner.public import (
+    LearnerSourceIdentityV1,
+    learner_case_digest,
+    learner_experience_ref,
+    learner_run_ref,
 )
 
 
@@ -107,3 +117,55 @@ def test_public_review_tables_are_part_of_the_resettable_baseline_schema() -> No
         "atlas_conversation_learning_case_turns",
     }
     assert expected <= set(OrmBase.metadata.tables)
+
+
+def test_public_learner_identity_binds_review_case_and_experience() -> None:
+    case = _case(1)
+    case_digest = learner_case_digest(
+        review_ref=_snapshot().review_ref,
+        review_digest=PUBLIC_DIGEST_A,
+        case_ordinal=1,
+        case=case,
+    )
+    run_ref = learner_run_ref(
+        review_ref=_snapshot().review_ref,
+        review_digest=PUBLIC_DIGEST_A,
+        case_ordinal=1,
+        case_digest=case_digest,
+    )
+
+    source = LearnerSourceIdentityV1(
+        run_ref=run_ref,
+        experience_ref=learner_experience_ref(run_ref=run_ref),
+        review_ref=_snapshot().review_ref,
+        review_digest=PUBLIC_DIGEST_A,
+        snapshot_digest=_snapshot().snapshot_digest,
+        case_ordinal=1,
+        case_digest=case_digest,
+        case_title=case.title,
+        involved_turn_ids=case.involved_turn_ids,
+        primary_assistant_turn_id=case.primary_assistant_turn_id,
+    )
+
+    assert source.run_ref == learner_run_ref(
+        review_ref=source.review_ref,
+        review_digest=source.review_digest,
+        case_ordinal=source.case_ordinal,
+        case_digest=source.case_digest,
+    )
+    assert source.experience_ref == learner_experience_ref(run_ref=source.run_ref)
+
+
+def test_public_learner_table_and_payload_policy_are_registered() -> None:
+    assert "atlas_learner_runs" in OrmBase.metadata.tables
+    assert "atlas_learner_runs.experience_payload" in JSONB_PAYLOAD_REGISTRY
+
+
+def test_public_learner_normalizes_labeled_unicode_secret_boundaries() -> None:
+    value = "public-synthetic-sensitive-value"
+    candidates = learner_provider._secret_values(
+        f"token=「{value}」; credential:『{value}-alternate』"
+    )
+
+    assert value in candidates
+    assert f"{value}-alternate" in candidates
