@@ -6,6 +6,20 @@ carrier, workers, PostgreSQL, Redis, Qdrant, processing plugins, an Office
 renderer, governed artifact storage, and a one-shot embedding-model cache
 initializer.
 
+## Source map
+
+- `web/`: React, TypeScript, and Next.js App Router user interface.
+- `api/`: FastAPI application, owner use cases, PostgreSQL repositories, and
+  migrations.
+- `collaboration-server/`: request/event-only WebSocket carrier for scoped
+  Notes; PostgreSQL and the API remain authoritative for access and durable
+  content.
+- `plugin-sdk/` and `plugin-runner/`: controlled processing plugin contracts
+  and execution.
+- `office-renderer/`: isolated Office document page rendering.
+- `infra/`: Docker Compose, operator smoke tests, packaging, and architecture
+  audits.
+
 ## User journey
 
 1. A local or imported directory user authenticates; Atlas remains authoritative
@@ -168,6 +182,10 @@ fallback, or automatic route fallback. A route-less execution fails closed
 unless the persisted explicit default is currently eligible.
 
 ## Reasoning execution
+
+The UI labels runtime mode `standard` as **General** and `deep` as
+**In-depth**. System Admin exposes Prompt Skill administration as **Skill
+slots**; the runtime and ownership terms below remain the precise contract.
 
 - A conversation records its default `standard|deep` mode. Each accepted
   execution keeps an immutable mode; retry uses the source execution's mode.

@@ -22,6 +22,7 @@ authenticated Notes readiness remain gated when it fails.
 
 ```sh
 docker compose -f docker-compose.p1.yml ps
+docker compose -f docker-compose.p1.yml logs embedding-model-init
 docker compose -f docker-compose.p1.yml logs artifact-storage-init
 curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
@@ -31,6 +32,26 @@ Use <http://127.0.0.1:5184/login>. The Notes carrier is published only on
 `127.0.0.1:8015` by default, and API readiness includes its authenticated
 settings probe. A running container alone is not proof that Atlas is ready; use
 the initializer result, health, readiness, and a real login.
+
+## Recover a failed first initialization
+
+If the first initialization fails because the bootstrap values or Notes
+secrets are missing or invalid, correct `infra/.env` and rerun the idempotent
+startup command:
+
+```sh
+cd infra
+docker compose -f docker-compose.p1.yml up -d
+```
+
+Recheck both initializer logs, service state, health, and readiness using the
+commands in **Observe**. Do not repair Identity records with manual SQL.
+
+If the environment is still disposable and you need a completely fresh first
+initialization, use the destructive **Reset** procedure below, correct the
+configuration, and start again. Do not use reset when application data must be
+preserved: `down -v` permanently deletes the Compose project's local
+application data.
 
 ## Restart
 

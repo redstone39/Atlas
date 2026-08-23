@@ -106,6 +106,9 @@ another eligible route automatically.
 
 ## Reasoning route policy
 
+The UI labels `standard` as **General** and `deep` as **In-depth**. Stored route
+policy and runtime values remain `standard|deep`.
+
 Model routes carry the bounded runtime policy used by both standard and deep
 turns. `max_reasoning_revision_cycles` accepts `0..3` and defaults to `2`.
 `max_schema_retries_per_turn` accepts `1..3`; its selected value is fixed in
