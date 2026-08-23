@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas, and self-hosting discussion
+    url: https://github.com/redstone39/atlas-public/discussions
+    about: Ask a question, share an evaluation experience, or discuss an open-ended idea.
+  - name: Private security reporting
+    url: https://github.com/redstone39/atlas-public/security/policy
+    about: Read the private-reporting requirements before disclosing a vulnerability.

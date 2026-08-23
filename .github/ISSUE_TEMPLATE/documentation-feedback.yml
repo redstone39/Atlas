@@ -1,0 +1,37 @@
+name: Documentation feedback
+description: Report missing, incorrect, or unclear public documentation.
+title: "[Docs]: "
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Document location
+      description: Link to the file and section, or provide the repository path.
+      placeholder: README.md#local-quick-start
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is incorrect or unclear?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant evidence
+      description: Include the observed command, UI label, or supported behavior that conflicts with the documentation.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired reader outcome
+      description: Explain what a reader should be able to understand or do after the documentation is clarified.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Contribution boundary
+      options:
+        - label: I understand that Atlas currently accepts documentation feedback but not external pull requests or unsolicited patches.
+          required: true

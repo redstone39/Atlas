@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem on a supported evaluation path.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Atlas. Do not include credentials, private documents, Provider payloads, access tokens, database dumps, internal endpoints, or unredacted logs.
+  - type: input
+    id: commit
+    attributes:
+      label: Affected commit
+      description: Provide the exact commit SHA you evaluated.
+      placeholder: 0123456789abcdef...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Evaluation environment
+      description: Include the operating system, CPU architecture, Docker and Compose versions, and relevant Compose file.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimum reproduction
+      description: List the smallest safe sequence that reproduces the problem on a documented path.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Add only redacted logs, screenshots, or health output that materially help reproduce the problem.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Public-report safety
+      options:
+        - label: I removed credentials, private data, Provider payloads, tokens, internal endpoints, and unredacted logs.
+          required: true
+        - label: This report does not contain vulnerability or exploit details that require private disclosure.
+          required: true

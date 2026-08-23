@@ -1,0 +1,41 @@
+name: Focused feature request
+description: Describe a concrete user or operator outcome; use Discussions for broad ideas.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use GitHub Discussions for open-ended ideas or architecture exploration. This form is for a bounded user or operator outcome. A report does not create an implementation commitment.
+  - type: textarea
+    id: user
+    attributes:
+      label: Intended user or operator
+      description: Who needs the result, and in what evaluation context?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Current problem
+      description: Describe the observed limitation without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observable outcome
+      description: What should the user be able to do or observe?
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Relevant boundaries
+      description: Note any security, privacy, compatibility, lifecycle, or deployment constraints that matter.
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Project boundary
+      options:
+        - label: I understand that feature discussion does not create an implementation timeline and that external pull requests are not accepted.
+          required: true

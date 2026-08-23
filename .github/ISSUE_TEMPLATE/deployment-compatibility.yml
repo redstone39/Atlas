@@ -1,0 +1,56 @@
+name: Deployment or compatibility report
+description: Share a reproducible self-hosting result or compatibility problem.
+title: "[Deployment]: "
+body:
+  - type: input
+    id: commit
+    attributes:
+      label: Evaluated commit
+      placeholder: 0123456789abcdef...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include host OS, CPU architecture, Docker and Compose versions, storage topology, and the applicable Atlas guide or Compose file.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result type
+      options:
+        - Successful evaluation experience
+        - Compatibility problem
+        - Documentation gap
+        - Operational limitation
+    validations:
+      required: true
+  - type: textarea
+    id: procedure
+    attributes:
+      label: Procedure
+      description: Provide the minimum safe steps and configuration shape without secrets or private infrastructure details.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Observed outcome
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized diagnostics
+      description: Add only the redacted service state, health output, or error needed to understand the result.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope acknowledgment
+      options:
+        - label: I understand that Atlas is not Release Ready or Internet Ready and offers no production support or compatibility SLA.
+          required: true
+        - label: I removed credentials, private data, internal endpoints, and unredacted logs.
+          required: true
