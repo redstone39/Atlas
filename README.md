@@ -3,22 +3,36 @@
 Atlas is a self-hosted knowledge workspace for governed document access,
 evidence-grounded AI conversations, and collaborative notes.
 
-**Status:** technical-evaluation snapshot · `resettable_development` data
-lifecycle · local Docker Compose · **not Release Ready or Internet Ready**
+**Atlas focuses on authorization-aware knowledge and inspectable evidence—not
+just document chat.**
 
-Atlas combines document intake and processing, Project- and Team-scoped
-knowledge, General and In-depth conversations, evidence review, collaborative
-Notes, local or LDAP/Active Directory identity, administration, and auditable
-access controls in one deployment.
+## Why Atlas
 
-This repository contains a runnable standalone public snapshot of the Atlas
-runtime. It is published for source transparency, technical evaluation, and
-self-hosted demonstration under the Apache License, Version 2.0. The public tree
-is maintained independently from private development and does not represent a
-hosted service, security certification, production release, or support
-commitment.
+- **Governed access:** Documents and Notes use current Project- and Team-scoped
+  access. Protected reads recheck that access.
+- **Inspectable AI:** Answers expose protected evidence and auditable execution
+  state instead of acting like an opaque chat result.
+- **One self-hosted workspace:** Document processing, conversations,
+  collaborative Notes, identity, administration, and model routing run in one
+  deployment.
 
-## What Atlas is for
+[Try Atlas locally](#local-quick-start) ·
+[Read the documentation](docs/README.md) ·
+[Join the discussion](https://github.com/redstone39/atlas-public/discussions)
+
+## Product preview
+
+![A fresh Atlas workspace after the first local sign-in](docs/assets/atlas-fresh-workspace.png)
+
+*A fresh local evaluation workspace before knowledge or conversations have been
+added. Provider credentials and sample documents are not included in this public
+snapshot.*
+
+> **Current public snapshot:** local technical preview ·
+> `resettable_development` data lifecycle · **not Release Ready or Internet
+> Ready**
+
+## Current scope
 
 Atlas is designed for people who want to:
 
@@ -49,18 +63,6 @@ environment details through
 [Issues](https://github.com/redstone39/atlas-public/issues) or
 [Discussions](https://github.com/redstone39/atlas-public/discussions).
 
-## Why Atlas
-
-- **Governed knowledge:** assign documents and Notes to Projects or Teams, then
-  recheck current access before protected content is read or changed.
-- **Traceable conversations:** ask within all accessible knowledge or a frozen
-  scope selection, and inspect the protected evidence made available with an
-  answer.
-- **Collaborative work:** create scope-bound Notes with block editing, revisions,
-  savepoints, restore, activity, and protected attachments.
-- **Operator control:** configure identity, model routes, processing plugins,
-  Skill slots, audit inspection, and system status from System Admin.
-
 ## How it works
 
 ```text
@@ -75,19 +77,13 @@ General (standard) or In-depth (deep) conversation
 Answer, protected evidence, and auditable execution state
 ```
 
-## Product preview
-
-![A fresh Atlas workspace after the first local sign-in](docs/assets/atlas-fresh-workspace.png)
-
-*A fresh local evaluation workspace before knowledge or conversations have been
-added. Provider credentials and sample documents are not included in this public
-snapshot.*
-
 ## Local quick start
 
 You need Git, Docker Engine with Docker Compose v2, enough memory and disk for
 the complete stack and pinned embedding-model cache, and a fresh disposable
 evaluation environment.
+
+### Milestone 1 — Confirm Atlas is ready
 
 Clone Atlas and create the local configuration:
 
@@ -125,23 +121,28 @@ Compose project's local application data and is only for the documented
 `resettable_development` lifecycle. [Configuration](docs/configuration.md) owns
 the exact bootstrap, secret, Provider, and runtime input rules.
 
-## Your first Atlas workflow
+### Milestone 2 — Ask your first governed question
 
-The first sign-in proves that the local application is running. To exercise the
-AI knowledge journey:
+Signing in confirms that the local application is running. The first product
+journey continues through one authorized document and its evidence:
 
 1. Configure the credential master key, then add and test a Provider connection
    and model route under **Models**. Provider credentials are required for model
    answers and are not bundled.
-2. Create a Project or Team and add a non-sensitive document that you are
-   authorized to use for evaluation.
-3. Wait for the document's processing job to reach a terminal state.
+2. Create a Project or Team and add a non-sensitive document with a clear fact
+   that you are authorized to use for evaluation.
+3. Wait until the Document Library shows the document as **Searchable**. A
+   failed or cancelled processing result is not ready for this journey.
 4. Start a conversation and keep **All accessible knowledge** or select an
    allowed Project or Team scope.
 5. Choose **General** (`standard`) or **In-depth** (`deep`) and ask a question
-   about the document.
+   whose answer is stated in the document.
 6. Inspect the answer and its available protected evidence. Evidence review is
    not a truth or formal citation guarantee.
+
+You have completed the first governed-answer journey when the document is
+Searchable, the conversation returns an answer, and protected evidence from
+that document can be inspected under your current access.
 
 No sample knowledge, private test documents, Provider keys, or expected model
 answers are included in the public snapshot.
@@ -210,20 +211,31 @@ this README:
 
 ## Community
 
-Atlas welcomes reproducible bug reports, documentation feedback, self-hosting
-and deployment experiences, compatibility reports, questions, use cases, and
-feature discussions.
+**Atlas is feedback-open and discussion-open. External pull requests are not
+currently accepted.**
+
+Welcome:
+
+- reproducible bug reports;
+- documentation feedback;
+- self-hosting, deployment, and compatibility experiences;
+- questions, use cases, architecture discussion, and feature suggestions.
+
+Not currently accepted:
+
+- external pull requests;
+- unsolicited patches.
 
 Use [GitHub Issues](https://github.com/redstone39/atlas-public/issues) for
 specific defects and reports. Use
 [GitHub Discussions](https://github.com/redstone39/atlas-public/discussions) for
 questions, experiences, architecture discussion, and broader ideas.
 
-External pull requests and unsolicited patches are not accepted at this time,
-and there is no announced timeline for changing that boundary. Do not publish
-vulnerabilities, credentials, private documents, exploit details, or unredacted
-logs; follow the private-reporting direction in [SECURITY.md](SECURITY.md). No
-support SLA or implementation timeline is offered.
+There is no announced timeline for changing the pull-request boundary. Do not
+publish vulnerabilities, credentials, private documents, exploit details, or
+unredacted logs; follow the private-reporting direction in
+[SECURITY.md](SECURITY.md). No support SLA or implementation timeline is
+offered.
 
 ## License
 
