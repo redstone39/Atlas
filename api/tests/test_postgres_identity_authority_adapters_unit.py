@@ -26,6 +26,7 @@ from atlas_production.infrastructure.postgres_owner.identity import (
     IdentitySessionChangeSet,
     RevokeBrowserSessionCommand,
 )
+from atlas_production.modules.identity_access.api_models import AgentUserCreateRequest
 from atlas_production.infrastructure.postgres_owner.project import (
     ActionAwareAclAuthority,
     ProjectAclChangeSet,
@@ -476,6 +477,42 @@ class _AgentIdentityCapture:
 
     def identity_session(self, change_set) -> None:
         self.change_sets.append(change_set)
+
+
+class _AgentCreateOwner:
+    def __init__(self) -> None:
+        self.prepared = None
+
+    def create_once(self, **kwargs):
+        self.prepared = kwargs["prepare"]("agent-owner-allocated")
+        return SimpleNamespace(
+            response_json=self.prepared.response_json,
+            replayed=False,
+        )
+
+
+def test_agent_create_serializes_owner_allocated_identity() -> None:
+    repository = PostgresAgentAccessRepository(lambda: None)
+    owner = _AgentCreateOwner()
+    repository.identity_owner = owner
+    actor = UserRecord(
+        "user-admin", "Admin", "admin@example.test", "admin", None,
+        True, "user", NOW,
+    )
+
+    outcome = repository.create_agent_once(
+        actor,
+        AgentUserCreateRequest(
+            display_name="Owner Allocated Agent",
+            idempotency_key="agent-create-owner-allocation",
+        ),
+    )
+
+    assert outcome.success_status_code == 201
+    assert outcome.result.agent.actor_id == "agent-owner-allocated"
+    assert outcome.result.agent.tokens == []
+    assert outcome.result.agent.project_grants == []
+    assert owner.prepared.change_set.users[0].actor_id == "agent-owner-allocated"
 
 
 def test_agent_adapter_commits_service_account_and_audit_together() -> None:

@@ -16,14 +16,10 @@ fixture_file="$(mktemp)"
 original_head_body="$(mktemp)"
 original_get_body="$(mktemp)"
 suffix="$(date +%s)"
-project_id="proj-p2-rbac-${suffix}"
-document_id="doc-p2-rbac-${suffix}"
+admin_email="smoke-admin-${suffix}@example.test"
+admin_password="SmokeBootstrap-${suffix}!"
 user_email="rbac-smoke-${suffix}@example.test"
 project_name_label="P2 RBAC Smoke ${suffix}"
-parent_team_id="team-p2-parent-${suffix}"
-child_team_id="team-p2-child-${suffix}"
-export ATLAS_BOOTSTRAP_ADMIN_EMAIL="${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-smoke-admin-${suffix}@example.test}"
-export ATLAS_BOOTSTRAP_ADMIN_PASSWORD="${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-SmokeBootstrap-${suffix}!}"
 
 compose() {
   docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
@@ -67,10 +63,18 @@ print(value)' "$1"
 }
 
 admin_login_json() {
-  python3 -c 'import json,os; print(json.dumps({
-"identifier": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
-"password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
-}))'
+  python3 -c 'import json,sys; print(json.dumps({
+"identifier": sys.argv[1],
+"password": sys.argv[2],
+}))' "$admin_email" "$admin_password"
+}
+
+first_admin_claim_json() {
+  python3 -c 'import json,sys; print(json.dumps({
+"display_name": "P2 RBAC Smoke Admin",
+"email": sys.argv[1],
+"password": sys.argv[2],
+}))' "$admin_email" "$admin_password"
 }
 
 api_get() {
@@ -114,6 +118,24 @@ compose up --build -d
 
 wait_for_url "production API" "${api_url}/api/v1/ops/health"
 wait_for_url "production Web" "${web_url}/login"
+
+first_admin="$(api_get "/api/v1/auth/first-admin")"
+if [[ "$(printf '%s' "$first_admin" | json_field claim_available)" != "True" ]]; then
+  echo "Fresh P2 stack did not offer the first-administrator claim" >&2
+  exit 1
+fi
+claim_response="$(
+  curl -sS --fail-with-body -b "$cookie_file" -c "$cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$(first_admin_claim_json)" \
+    "${api_url}/api/v1/auth/first-admin" \
+    -w $'\n%{http_code}'
+)"
+if [[ "${claim_response##*$'\n'}" != "201" ]]; then
+  echo "P2 first-administrator claim failed with HTTP ${claim_response##*$'\n'}" >&2
+  exit 1
+fi
 
 web_login_status="$(
   curl -sS \
@@ -203,20 +225,28 @@ invite_token="$(printf '%s' "$invite" | json_field local_pilot_acceptance.accept
 api_post "/api/v1/auth/invitations/accept" \
   "{\"invite_token\":\"${invite_token}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"accept-${suffix}\"}" >/dev/null
 
-api_post "/api/v1/admin/projects" \
-  "{\"project_id\":\"${project_id}\",\"name\":\"${project_name_label}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}" >/dev/null
+project="$(
+  api_post "/api/v1/admin/projects" \
+    "{\"name\":\"${project_name_label}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}"
+)"
+project_ref="$(printf '%s' "$project" | json_field target_ref)"
+if [[ "$project_ref" != project:* ]]; then
+  echo "P2 project owner returned an invalid target_ref" >&2
+  exit 1
+fi
+project_id="${project_ref#project:}"
 
 printf 'Atlas contextual RBAC smoke fixture.\n' >"$fixture_file"
 upload="$(
   curl -fsS -b "$cookie_file" -c "$cookie_file" \
-    -F "document_id=${document_id}" \
     -F "scope_type=project" \
     -F "scope_id=${project_id}" \
     -F "allow_member_download=true" \
-    -F "idempotency_key=upload-${document_id}" \
+    -F "idempotency_key=upload-${suffix}" \
     -F "file=@${fixture_file};filename=rbac-smoke.txt;type=text/plain" \
     "${api_url}/api/v1/admin/document-library"
 )"
+document_id="$(printf '%s' "$upload" | json_field document.document_id)"
 status_url="$(printf '%s' "$upload" | json_field status_url)"
 document_status=""
 for _ in {1..90}; do
@@ -278,10 +308,26 @@ PY
 user_api_post "/api/v1/auth/sessions" \
   "{\"identifier\":\"${user_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
 
-api_post "/api/v1/admin/teams" \
-  "{\"team_id\":\"${parent_team_id}\",\"name\":\"Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}" >/dev/null
-api_post "/api/v1/admin/teams" \
-  "{\"team_id\":\"${child_team_id}\",\"name\":\"Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}" >/dev/null
+parent_team="$(
+  api_post "/api/v1/admin/teams" \
+    "{\"name\":\"Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}"
+)"
+parent_team_ref="$(printf '%s' "$parent_team" | json_field target_ref)"
+if [[ "$parent_team_ref" != team:* ]]; then
+  echo "P2 parent team owner returned an invalid target_ref" >&2
+  exit 1
+fi
+parent_team_id="${parent_team_ref#team:}"
+child_team="$(
+  api_post "/api/v1/admin/teams" \
+    "{\"name\":\"Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}"
+)"
+child_team_ref="$(printf '%s' "$child_team" | json_field target_ref)"
+if [[ "$child_team_ref" != team:* ]]; then
+  echo "P2 child team owner returned an invalid target_ref" >&2
+  exit 1
+fi
+child_team_id="${child_team_ref#team:}"
 api_post "/api/v1/admin/teams/${child_team_id}/members" \
   "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${actor_id}\",\"role\":\"admin\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
 

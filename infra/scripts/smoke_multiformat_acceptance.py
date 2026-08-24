@@ -90,12 +90,12 @@ def runtime_policy() -> dict[str, object]:
 
 
 def login(client: httpx.Client) -> None:
-    email = os.environ.get("ATLAS_BOOTSTRAP_ADMIN_EMAIL")
-    password = os.environ.get("ATLAS_BOOTSTRAP_ADMIN_PASSWORD")
+    email = os.environ.get("ATLAS_MULTIFORMAT_ADMIN_EMAIL")
+    password = os.environ.get("ATLAS_MULTIFORMAT_ADMIN_PASSWORD")
     if not email or not password:
         raise RuntimeError(
-            "ATLAS_BOOTSTRAP_ADMIN_EMAIL and "
-            "ATLAS_BOOTSTRAP_ADMIN_PASSWORD are required"
+            "ATLAS_MULTIFORMAT_ADMIN_EMAIL and "
+            "ATLAS_MULTIFORMAT_ADMIN_PASSWORD are required"
         )
     session = checked(
         client.post(

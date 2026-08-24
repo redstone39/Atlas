@@ -108,6 +108,21 @@ def test_deployment_initializers_do_not_seed_fixed_identity_credentials() -> Non
     assert "ATLAS_BOOTSTRAP_ADMIN_EMAIL" not in sources
 
 
+def test_verification_consumers_do_not_use_seeded_admin_credentials() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    for path in (
+        "infra/scripts/smoke_p1_agent_access",
+        "infra/scripts/smoke_p2_rbac_access",
+        "infra/scripts/smoke_collaborative_notes",
+        "infra/scripts/smoke_multiformat_acceptance.py",
+        "infra/scripts/smoke_human_operable",
+        "infra/scripts/browser_smoke_human_operable.mjs",
+    ):
+        source = (repository / path).read_text(encoding="utf-8")
+        assert "ATLAS_BOOTSTRAP_ADMIN_EMAIL" not in source, path
+        assert "ATLAS_BOOTSTRAP_ADMIN_PASSWORD" not in source, path
+
+
 def test_api_runtime_keeps_office_renderer_reachable_for_visual_inspection() -> None:
     compose = (
         Path(__file__).resolve().parents[2] / "infra/docker-compose.p1.yml"

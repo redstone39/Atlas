@@ -31,16 +31,9 @@ image_headers="$(mktemp)"
 provider_dir="$(mktemp -d collaboration-server/.notes-smoke.XXXXXX)"
 provider_script="${provider_dir}/run.mjs"
 suffix="$(date +%s)"
-export ATLAS_BOOTSTRAP_ADMIN_EMAIL="${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-notes-smoke-admin-${suffix}@example.test}"
-export ATLAS_BOOTSTRAP_ADMIN_PASSWORD="${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-NotesSmokeBootstrap-${suffix}!}"
-parent_team_id="team-notes-parent-${suffix}"
-child_team_id="team-notes-child-${suffix}"
+admin_email="notes-smoke-admin-${suffix}@example.test"
+admin_password="NotesSmokeBootstrap-${suffix}!"
 member_email="notes-smoke-${suffix}@example.test"
-project_id="project-notes-${suffix}"
-project_note_id="note-project-smoke-${suffix}"
-project_category_id="note-category-project-${suffix}"
-note_id="note-smoke-${suffix}"
-category_id="note-category-smoke-${suffix}"
 
 compose() {
   docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
@@ -116,23 +109,61 @@ wait_for_url "production API" "${api_url}/api/v1/ops/health"
 wait_for_url "Notes collaboration readiness" "http://127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}/ready" -H "X-Atlas-Notes-Internal-Secret: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET}"
 wait_for_url "production Web" "${web_url}/login"
 
-admin_session="$(admin_post "/api/v1/auth/sessions" "$(python3 -c 'import json,os; print(json.dumps({"identifier": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"], "password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"]}))')")"
+first_admin="$(admin_get "/api/v1/auth/first-admin")"
+if [[ "$(printf '%s' "$first_admin" | json_field claim_available)" != "True" ]]; then
+  echo "Fresh Notes stack did not offer the first-administrator claim" >&2
+  exit 1
+fi
+claim_response="$(
+  curl -sS --fail-with-body -b "$admin_cookie" -c "$admin_cookie" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"display_name":"Notes Smoke Admin","email":sys.argv[1],"password":sys.argv[2]}))' "$admin_email" "$admin_password")" \
+    "${api_url}/api/v1/auth/first-admin" \
+    -w $'\n%{http_code}'
+)"
+if [[ "${claim_response##*$'\n'}" != "201" ]]; then
+  echo "Notes first-administrator claim failed with HTTP ${claim_response##*$'\n'}" >&2
+  exit 1
+fi
+admin_session="${claim_response%$'\n'*}"
 admin_actor_id="$(printf '%s' "$admin_session" | json_field actor.actor_id)"
 invite="$(admin_post "/api/v1/admin/user-invites" "{\"display_name\":\"Notes Smoke Member\",\"email\":\"${member_email}\",\"system_role\":\"user\",\"idempotency_key\":\"invite-${suffix}\"}")"
 member_actor_id="$(printf '%s' "$invite" | json_field invite.actor_id)"
 invite_token="$(printf '%s' "$invite" | json_field local_pilot_acceptance.acceptance_token)"
 request "$accept_cookie" POST "/api/v1/auth/invitations/accept" "{\"invite_token\":\"${invite_token}\",\"password\":\"AtlasLocalEngineer!01\",\"idempotency_key\":\"accept-${suffix}\"}" >/dev/null
 member_post "/api/v1/auth/sessions" "{\"identifier\":\"${member_email}\",\"password\":\"AtlasLocalEngineer!01\"}" >/dev/null
-admin_post "/api/v1/admin/projects" "{\"project_id\":\"${project_id}\",\"name\":\"Notes Project ${suffix}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}" >/dev/null
+
+project="$(admin_post "/api/v1/admin/projects" "{\"name\":\"Notes Project ${suffix}\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"project-${suffix}\"}")"
+project_ref="$(printf '%s' "$project" | json_field target_ref)"
+if [[ "$project_ref" != project:* ]]; then
+  echo "Notes project owner returned an invalid target_ref" >&2
+  exit 1
+fi
+project_id="${project_ref#project:}"
 admin_post "/api/v1/admin/projects/${project_id}/members" "{\"subject_type\":\"user\",\"subject_id\":\"${member_actor_id}\",\"role\":\"viewer\",\"effect\":\"allow\",\"idempotency_key\":\"project-member-${suffix}\"}" >/dev/null
 member_get "/api/v1/notes/scopes" | assert_json "any(item['scope_type']=='project' and item['scope_id']=='${project_id}' for item in data['items'])"
-member_post "/api/v1/note-categories" "{\"category_id\":\"${project_category_id}\",\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"name\":\"Project Smoke Category\",\"idempotency_key\":\"project-category-${suffix}\"}" >/dev/null
-member_post "/api/v1/notes" "{\"note_id\":\"${project_note_id}\",\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"category_id\":\"${project_category_id}\",\"title\":\"Project two-user smoke\",\"idempotency_key\":\"project-note-${suffix}\"}" >/dev/null
+
+project_category="$(member_post "/api/v1/note-categories" "{\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"name\":\"Project Smoke Category\",\"idempotency_key\":\"project-category-${suffix}\"}")"
+project_category_id="$(printf '%s' "$project_category" | json_field category_id)"
+project_note="$(member_post "/api/v1/notes" "{\"scope_type\":\"project\",\"scope_id\":\"${project_id}\",\"category_id\":\"${project_category_id}\",\"title\":\"Project two-user smoke\",\"idempotency_key\":\"project-note-${suffix}\"}")"
+project_note_id="$(printf '%s' "$project_note" | json_field note_id)"
 admin_get "/api/v1/notes/${project_note_id}" | assert_json "data['scope']['scope_type']=='project' and data['scope']['scope_id']=='${project_id}' and data['title']=='Project two-user smoke'"
 
-
-admin_post "/api/v1/admin/teams" "{\"team_id\":\"${parent_team_id}\",\"name\":\"Notes Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}" >/dev/null
-admin_post "/api/v1/admin/teams" "{\"team_id\":\"${child_team_id}\",\"name\":\"Notes Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}" >/dev/null
+parent_team="$(admin_post "/api/v1/admin/teams" "{\"name\":\"Notes Parent ${suffix}\",\"parent_team_id\":null,\"idempotency_key\":\"team-parent-${suffix}\"}")"
+parent_team_ref="$(printf '%s' "$parent_team" | json_field target_ref)"
+if [[ "$parent_team_ref" != team:* ]]; then
+  echo "Notes parent team owner returned an invalid target_ref" >&2
+  exit 1
+fi
+parent_team_id="${parent_team_ref#team:}"
+child_team="$(admin_post "/api/v1/admin/teams" "{\"name\":\"Notes Child ${suffix}\",\"parent_team_id\":\"${parent_team_id}\",\"idempotency_key\":\"team-child-${suffix}\"}")"
+child_team_ref="$(printf '%s' "$child_team" | json_field target_ref)"
+if [[ "$child_team_ref" != team:* ]]; then
+  echo "Notes child team owner returned an invalid target_ref" >&2
+  exit 1
+fi
+child_team_id="${child_team_ref#team:}"
 admin_post "/api/v1/admin/teams/${child_team_id}/members" "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${admin_actor_id}\",\"role\":\"admin\",\"idempotency_key\":\"team-admin-${suffix}\"}" >/dev/null
 admin_post "/api/v1/admin/teams/${child_team_id}/members" "{\"member_actor_type\":\"user\",\"member_actor_id\":\"${member_actor_id}\",\"idempotency_key\":\"team-member-${suffix}\"}" >/dev/null
 member_membership_id="$(admin_get "/api/v1/admin/teams/${child_team_id}/members" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(item["membership_id"] for item in data["members"] if item["subject_id"]==sys.argv[1]))' "$member_actor_id")"
@@ -144,13 +175,15 @@ printf '%s' "$settings" | assert_json "data['checkpoint_interval_seconds']==30"
 member_settings_status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$member_cookie" "${api_url}/api/v1/admin/notes/settings")"
 [[ "$member_settings_status" == "403" ]]
 
-category="$(admin_post "/api/v1/note-categories" "{\"category_id\":\"${category_id}\",\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"name\":\"Smoke Category\",\"idempotency_key\":\"category-${suffix}\"}")"
+category="$(admin_post "/api/v1/note-categories" "{\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"name\":\"Smoke Category\",\"idempotency_key\":\"category-${suffix}\"}")"
+category_id="$(printf '%s' "$category" | json_field category_id)"
 category_revision="$(printf '%s' "$category" | json_field metadata_revision)"
 category="$(admin_post "/api/v1/note-categories/${category_id}/trash" "{\"expected_metadata_revision\":${category_revision},\"idempotency_key\":\"category-trash-${suffix}\"}")"
 category_revision="$(printf '%s' "$category" | json_field metadata_revision)"
 admin_post "/api/v1/note-categories/${category_id}/restore" "{\"expected_metadata_revision\":${category_revision},\"idempotency_key\":\"category-restore-${suffix}\"}" >/dev/null
 
-admin_post "/api/v1/notes" "{\"note_id\":\"${note_id}\",\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"category_id\":\"${category_id}\",\"title\":\"Collaborative smoke\",\"idempotency_key\":\"note-${suffix}\"}" >/dev/null
+note="$(admin_post "/api/v1/notes" "{\"scope_type\":\"team\",\"scope_id\":\"${parent_team_id}\",\"category_id\":\"${category_id}\",\"title\":\"Collaborative smoke\",\"idempotency_key\":\"note-${suffix}\"}")"
+note_id="$(printf '%s' "$note" | json_field note_id)"
 collaboration_epoch="$(admin_get "/api/v1/notes/${note_id}" | json_field collaboration_epoch)"
 python3 -c 'import base64,sys; open(sys.argv[1],"wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))' "$image_file"
 attachment_key="note-image-smoke-${suffix}"

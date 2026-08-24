@@ -9,8 +9,8 @@ const webUrl = process.env.ATLAS_PRODUCTION_WEB_URL ?? "http://127.0.0.1:5174";
 const providerEndpoint = process.env.ATLAS_PRODUCTION_PROVIDER_ENDPOINT ?? "https://api.openai.com/v1";
 const providerApiKey = process.env.ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY;
 const providerModel = process.env.ATLAS_PRODUCTION_PROVIDER_MODEL ?? "gpt-4.1-mini";
-const bootstrapAdminEmail = process.env.ATLAS_BOOTSTRAP_ADMIN_EMAIL;
-const bootstrapAdminPassword = process.env.ATLAS_BOOTSTRAP_ADMIN_PASSWORD;
+const bootstrapAdminEmail = process.env.ATLAS_HUMAN_SMOKE_ADMIN_EMAIL;
+const bootstrapAdminPassword = process.env.ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD;
 if (!providerApiKey) {
   throw new Error(
     "ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY is required and is entered through the admin UI.",
@@ -18,7 +18,7 @@ if (!providerApiKey) {
 }
 if (!bootstrapAdminEmail || !bootstrapAdminPassword) {
   throw new Error(
-    "ATLAS_BOOTSTRAP_ADMIN_EMAIL and ATLAS_BOOTSTRAP_ADMIN_PASSWORD are required.",
+    "ATLAS_HUMAN_SMOKE_ADMIN_EMAIL and ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD are required.",
   );
 }
 const screenshotPath =

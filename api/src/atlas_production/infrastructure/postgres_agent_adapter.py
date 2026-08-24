@@ -48,6 +48,7 @@ from atlas_production.modules.identity_access.agent_service import AgentAccessSe
 from atlas_production.modules.identity_access.api_models import (
     AgentUserCreateRequest,
     AgentUserCreateResult,
+    AgentUserStatus,
 )
 from atlas_production.modules.identity_access.records import (
     AgentTokenRecord,
@@ -144,7 +145,14 @@ class PostgresAgentAccessRepository(AgentAccessRepository):
             result = AgentUserCreateResult(
                 request_id=payload.idempotency_key,
                 status="applied",
-                agent=AgentAccessService._agent_status(agent),
+                agent=AgentUserStatus(
+                    actor_id=agent.actor_id,
+                    actor_type="service_account",
+                    display_name=agent.display_name,
+                    status="active",
+                    tokens=[],
+                    project_grants=[],
+                ),
                 message_code="agent.user_is_ready_for_token_issue",
                 audit_event_ref=audit.event_id,
             )

@@ -8,9 +8,8 @@ api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}"
 web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}"
 cookie_file="$(mktemp)"
 suffix="$(date +%s)"
-project_id="proj-p1-smoke-${suffix}"
-agent_id="agent-p1-smoke-${suffix}"
-grant_id="grant-project-access-${project_id}-service_account-${agent_id}"
+admin_email="smoke-admin-${suffix}@example.test"
+admin_password="SmokeBootstrap-${suffix}!"
 agent_name="P1 Smoke Agent ${suffix}"
 legacy_snapshot_table="atlas_""production_snapshots"
 legacy_membership_table="atlas_""memberships"
@@ -18,8 +17,6 @@ legacy_query_table="atlas_""queries"
 legacy_citation_table="atlas_""citation_projects"
 export ATLAS_CREDENTIAL_MASTER_KEY="${ATLAS_CREDENTIAL_MASTER_KEY:-$(openssl rand -base64 32)}"
 export ATLAS_CREDENTIAL_MASTER_KEY_ID="${ATLAS_CREDENTIAL_MASTER_KEY_ID:-p1-smoke-${suffix}}"
-export ATLAS_BOOTSTRAP_ADMIN_EMAIL="${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-smoke-admin-${suffix}@example.test}"
-export ATLAS_BOOTSTRAP_ADMIN_PASSWORD="${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-SmokeBootstrap-${suffix}!}"
 
 compose() {
   docker compose -p "$project_name" -f infra/docker-compose.p1.yml "$@"
@@ -54,10 +51,18 @@ print(value)' "$1"
 }
 
 admin_login_json() {
-  python3 -c 'import json,os; print(json.dumps({
-"identifier": os.environ["ATLAS_BOOTSTRAP_ADMIN_EMAIL"],
-"password": os.environ["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
-}))'
+  python3 -c 'import json,sys; print(json.dumps({
+"identifier": sys.argv[1],
+"password": sys.argv[2],
+}))' "$admin_email" "$admin_password"
+}
+
+first_admin_claim_json() {
+  python3 -c 'import json,sys; print(json.dumps({
+"display_name": "P1 Smoke Admin",
+"email": sys.argv[1],
+"password": sys.argv[2],
+}))' "$admin_email" "$admin_password"
 }
 
 api_post() {
@@ -84,14 +89,41 @@ compose up --build -d
 wait_for_url "production API" "${api_url}/api/v1/ops/health"
 wait_for_url "production Web" "${web_url}/login"
 
-api_post "/api/v1/auth/sessions" \
-  "$(admin_login_json)" >/dev/null
+first_admin="$(curl -fsS "${api_url}/api/v1/auth/first-admin")"
+if [[ "$(printf '%s' "$first_admin" | json_field claim_available)" != "True" ]]; then
+  echo "Fresh P1 stack did not offer the first-administrator claim" >&2
+  exit 1
+fi
+claim_response="$(
+  curl -sS --fail-with-body -b "$cookie_file" -c "$cookie_file" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$(first_admin_claim_json)" \
+    "${api_url}/api/v1/auth/first-admin" \
+    -w $'\n%{http_code}'
+)"
+if [[ "${claim_response##*$'\n'}" != "201" ]]; then
+  echo "P1 first-administrator claim failed with HTTP ${claim_response##*$'\n'}" >&2
+  exit 1
+fi
 
-api_post "/api/v1/admin/projects" \
-  "{\"project_id\":\"${project_id}\",\"name\":\"P1 Smoke Project\",\"policy_profile_id\":\"policy-default-governed\",\"idempotency_key\":\"smoke-project\"}" >/dev/null
+project="$(
+  api_post "/api/v1/admin/projects" \
+    '{"name":"P1 Smoke Project","policy_profile_id":"policy-default-governed","idempotency_key":"smoke-project"}'
+)"
+project_ref="$(printf '%s' "$project" | json_field target_ref)"
+if [[ "$project_ref" != project:* ]]; then
+  echo "P1 project owner returned an invalid target_ref" >&2
+  exit 1
+fi
+project_id="${project_ref#project:}"
 
-api_post "/api/v1/admin/agent-users" \
-  "{\"actor_id\":\"${agent_id}\",\"display_name\":\"${agent_name}\",\"idempotency_key\":\"smoke-agent\"}" >/dev/null
+agent="$(
+  api_post "/api/v1/admin/agent-users" \
+    "{\"display_name\":\"${agent_name}\",\"idempotency_key\":\"smoke-agent\"}"
+)"
+agent_id="$(printf '%s' "$agent" | json_field agent.actor_id)"
+grant_id="grant-project-access-${project_id}-service_account-${agent_id}"
 
 issued="$(
   api_post "/api/v1/admin/agent-users/${agent_id}/tokens" \
