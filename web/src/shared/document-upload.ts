@@ -1,3 +1,6 @@
+export const DOCUMENT_UPLOAD_ACCEPT =
+  ".pdf,.docx,.pptx,.xlsx,.txt,.csv,.doc,.ppt,.xls";
+
 export function titleFromFilename(filename: string) {
   const name = filename.replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
   if (!name) return "";

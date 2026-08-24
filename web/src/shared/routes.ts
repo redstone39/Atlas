@@ -2,6 +2,7 @@
 export type StaticAppRoute =
   | "/login"
   | "/accept-invite"
+  | "/setup"
   | "/workspace"
   | "/workspace/projects"
   | "/workspace/teams"
@@ -100,6 +101,7 @@ export type AppRouteMatch =
 
 const STATIC_ROUTES = new Set<StaticAppRoute>([
   "/login",
+  "/setup",
   "/accept-invite",
   "/workspace",
   "/projects",

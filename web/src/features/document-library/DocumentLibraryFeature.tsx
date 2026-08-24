@@ -55,7 +55,10 @@ import type { AuditEvent } from "../conversation-audit/index";
 import type { DocumentTagRef } from "../../shared/document-contracts";
 import { clientRequestId } from "../../shared/ids";
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
-import { titleFromFilename } from "../../shared/document-upload";
+import {
+  DOCUMENT_UPLOAD_ACCEPT,
+  titleFromFilename,
+} from "../../shared/document-upload";
 import {
   documentLibraryProductStatus,
   documentLibraryProductStatusLabel,
@@ -680,7 +683,7 @@ export function DocumentLibraryFeature({
                   id="document-library-file"
                   type="file"
                   multiple
-                  accept=".pdf,.docx,.pptx,.xlsx,.txt,.csv,.doc,.ppt,.xls"
+                  accept={DOCUMENT_UPLOAD_ACCEPT}
                   onChange={(event) =>
                     setUploadItems(
                       Array.from(event.currentTarget.files ?? []).map((file) => ({

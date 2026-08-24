@@ -28,10 +28,18 @@ import type { SessionState } from "./types";
 export function LoginFeature({
   session,
   authUnavailable = false,
+  firstAdminStatusUnavailable = false,
+  firstAdminClaimed = false,
+  loginAllowed = true,
+  onRetryFirstAdminStatus,
   onLogin,
 }: {
   session: SessionState;
   authUnavailable?: boolean;
+  firstAdminStatusUnavailable?: boolean;
+  firstAdminClaimed?: boolean;
+  loginAllowed?: boolean;
+  onRetryFirstAdminStatus?: () => void;
   onLogin: (session: SessionState) => void;
 }) {
   const { t } = useTranslation();
@@ -93,54 +101,76 @@ export function LoginFeature({
               <AlertDescription>{t("login.sessionUnavailableDescription")}</AlertDescription>
             </Alert>
           )}
-        </section>
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("login.cardTitle")}</CardTitle>
-            <CardDescription>{t("login.cardDescription")}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form className="flex flex-col gap-5" onSubmit={submit}>
-              <FieldGroup>
-                <Field data-invalid={Boolean(error)}>
-                  <FieldLabel htmlFor="identifier">{t("login.identifier")}</FieldLabel>
-                  <Input
-                    id="identifier"
-                    name="identifier"
-                    type="text"
-                    value={identifier}
-                    onChange={(event) => setIdentifier(event.target.value)}
-                    required
-                    autoComplete="username"
-                    aria-invalid={Boolean(error)}
-                  />
-                </Field>
-                <Field data-invalid={Boolean(error)}>
-                  <FieldLabel htmlFor="password">{t("login.password")}</FieldLabel>
-                  <Input
-                    id="password"
-                    name="password"
-                    type="password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    required
-                    autoComplete="current-password"
-                    aria-invalid={Boolean(error)}
-                  />
-                  {error && <FieldError>{serverMessage(error, t)}</FieldError>}
-                </Field>
-              </FieldGroup>
-              <Button type="submit" className="w-full" disabled={submitting || !canSubmit}>
-                {submitting ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <LogIn data-icon="inline-start" />
+          {firstAdminStatusUnavailable && (
+            <Alert variant="destructive">
+              <AlertTitle>{t("login.setupStatusUnavailableTitle")}</AlertTitle>
+              <AlertDescription className="flex flex-col items-start gap-3">
+                <span>{t("login.setupStatusUnavailableDescription")}</span>
+                {onRetryFirstAdminStatus && (
+                  <Button type="button" variant="outline" onClick={onRetryFirstAdminStatus}>
+                    {t("common.retry")}
+                  </Button>
                 )}
-                {t("login.submit")}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+              </AlertDescription>
+            </Alert>
+          )}
+          {firstAdminClaimed && (
+            <Alert>
+              <CheckCircle2 />
+              <AlertTitle>{t("login.setupClaimedTitle")}</AlertTitle>
+              <AlertDescription>{t("login.setupClaimedDescription")}</AlertDescription>
+            </Alert>
+          )}
+        </section>
+        {loginAllowed && (
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("login.cardTitle")}</CardTitle>
+              <CardDescription>{t("login.cardDescription")}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form className="flex flex-col gap-5" onSubmit={submit}>
+                <FieldGroup>
+                  <Field data-invalid={Boolean(error)}>
+                    <FieldLabel htmlFor="identifier">{t("login.identifier")}</FieldLabel>
+                    <Input
+                      id="identifier"
+                      name="identifier"
+                      type="text"
+                      value={identifier}
+                      onChange={(event) => setIdentifier(event.target.value)}
+                      required
+                      autoComplete="username"
+                      aria-invalid={Boolean(error)}
+                    />
+                  </Field>
+                  <Field data-invalid={Boolean(error)}>
+                    <FieldLabel htmlFor="password">{t("login.password")}</FieldLabel>
+                    <Input
+                      id="password"
+                      name="password"
+                      type="password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      required
+                      autoComplete="current-password"
+                      aria-invalid={Boolean(error)}
+                    />
+                    {error && <FieldError>{serverMessage(error, t)}</FieldError>}
+                  </Field>
+                </FieldGroup>
+                <Button type="submit" className="w-full" disabled={submitting || !canSubmit}>
+                  {submitting ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <LogIn data-icon="inline-start" />
+                  )}
+                  {t("login.submit")}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
       </div>
     </main>
   );

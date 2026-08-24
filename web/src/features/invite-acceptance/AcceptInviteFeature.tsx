@@ -17,6 +17,7 @@ import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
 import { serverMessage } from "../../shared/product-ui";
 import { inviteAcceptanceApi } from "./api";
+import { passwordConfirmationState } from "../identity-session";
 
 export function AcceptInviteFeature({
   token,
@@ -31,13 +32,10 @@ export function AcceptInviteFeature({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [accepted, setAccepted] = useState(false);
-  const passwordTooShort = password.length > 0 && password.length < 12;
-  const passwordMismatch =
-    password.length >= 12 && confirmPassword.length > 0 && password !== confirmPassword;
-  const passwordsMatch = password.length >= 12 && password === confirmPassword;
+  const passwordState = passwordConfirmationState(password, confirmPassword);
 
   async function acceptInvite() {
-    if (!token || !passwordsMatch) return;
+    if (!token || !passwordState.valid) return;
     setPending(true);
     setError("");
     try {
@@ -75,37 +73,37 @@ export function AcceptInviteFeature({
             </Alert>
           ) : (
             <FieldGroup>
-              <Field data-invalid={passwordTooShort}>
+              <Field data-invalid={passwordState.tooShort}>
                 <FieldLabel htmlFor="new-password">{t("invite.password")}</FieldLabel>
                 <Input
                   id="new-password"
                   type="password"
                   autoComplete="new-password"
                   value={password}
-                  aria-invalid={passwordTooShort}
+                  aria-invalid={passwordState.tooShort}
                   onChange={(event) => {
                     setPassword(event.target.value);
                     setError("");
                   }}
                 />
                 <FieldDescription>
-                  {passwordTooShort ? t("invite.passwordTooShort") : t("invite.passwordHelp")}
+                  {passwordState.tooShort ? t("invite.passwordTooShort") : t("invite.passwordHelp")}
                 </FieldDescription>
               </Field>
-              <Field data-invalid={passwordMismatch}>
+              <Field data-invalid={passwordState.mismatch}>
                 <FieldLabel htmlFor="confirm-password">{t("invite.confirm")}</FieldLabel>
                 <Input
                   id="confirm-password"
                   type="password"
                   autoComplete="new-password"
                   value={confirmPassword}
-                  aria-invalid={passwordMismatch}
+                  aria-invalid={passwordState.mismatch}
                   onChange={(event) => {
                     setConfirmPassword(event.target.value);
                     setError("");
                   }}
                 />
-                {passwordMismatch && (
+                {passwordState.mismatch && (
                   <FieldDescription>{t("invite.passwordMismatch")}</FieldDescription>
                 )}
               </Field>
@@ -115,7 +113,7 @@ export function AcceptInviteFeature({
                   <AlertDescription>{error}</AlertDescription>
                 </Alert>
               )}
-              <Button onClick={acceptInvite} disabled={!token || !passwordsMatch || pending}>
+              <Button onClick={acceptInvite} disabled={!token || !passwordState.valid || pending}>
                 {pending ? <Spinner data-icon="inline-start" /> : <KeyRound data-icon="inline-start" />}
                 {t("invite.accept")}
               </Button>

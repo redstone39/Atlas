@@ -1,4 +1,4 @@
-import { Globe2, UserRound } from "lucide-react";
+import { Globe2, Settings2, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -7,6 +7,7 @@ import {
   CardHeader,
   CardTitle,
 } from "../ui/card";
+import { Button } from "../ui/button";
 import { LanguageSwitch } from "../../shared/product-ui";
 import { ThemeSwitch } from "../../shared/theme";
 import type { SessionState } from "../../features/identity-session/index";
@@ -18,6 +19,7 @@ import type { AppRoute } from "../../shared/routes";
 export function SettingsPage({
   session,
   managementGroups,
+  onNavigate,
 }: {
   session: SessionState;
   managementGroups: ManagementNavGroup[];
@@ -79,6 +81,24 @@ export function SettingsPage({
           </CardContent>
         </Card>
       </div>
+      {session.system_role === "admin" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Settings2 data-icon="inline-start" />
+              {t("settings.firstRun.title")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col items-start gap-3">
+            <p className="text-sm text-muted-foreground">
+              {t("settings.firstRun.description")}
+            </p>
+            <Button type="button" variant="outline" onClick={() => onNavigate("/setup")}>
+              {t("settings.firstRun.open")}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
       {session.system_role === "admin" && (
         <>
           <ConversationLearningSettingsFeature />

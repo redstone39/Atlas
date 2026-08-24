@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import http.cookiejar
+import json
+import os
+import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+API = os.environ.get("ATLAS_PUBLIC_SMOKE_API_URL", "http://127.0.0.1:8012")
+WEB = os.environ.get("ATLAS_PUBLIC_SMOKE_WEB_URL", "http://127.0.0.1:5184")
+PROJECT = os.environ.get("ATLAS_PUBLIC_SMOKE_PROJECT", "atlas_public_upgrade_20260824")
+STATE = Path(f"/tmp/{PROJECT}-first-run-smoke.json")
+
+
+def request(path: str, *, method: str = "GET", body: bytes | None = None, headers: dict[str, str] | None = None, opener=None):
+    target = API + path
+    caller = opener or urllib.request.build_opener()
+    try:
+        response = caller.open(
+            urllib.request.Request(target, data=body, method=method, headers=headers or {}),
+            timeout=30,
+        )
+        return response.status, response.read(), response.headers
+    except urllib.error.HTTPError as error:
+        return error.code, error.read(), error.headers
+
+
+def json_request(path: str, *, method: str = "GET", value: object | None = None, opener=None):
+    body = None if value is None else json.dumps(value).encode()
+    status, payload, headers = request(
+        path,
+        method=method,
+        body=body,
+        headers={"Content-Type": "application/json"} if body is not None else {},
+        opener=opener,
+    )
+    decoded = json.loads(payload) if payload else None
+    return status, decoded, headers
+
+
+def authenticated_opener(cookie_header: str):
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("Cookie", cookie_header)]
+    return opener
+
+
+def claim(label: str, barrier: threading.Barrier, results: list[tuple[str, int, object, str]]) -> None:
+    barrier.wait()
+    status, payload, headers = json_request(
+        "/api/v1/auth/first-admin",
+        method="POST",
+        value={
+            "display_name": f"Public Synthetic {label.title()} Admin",
+            "email": f"public-synthetic-{label}@example.test",
+            "password": f"public-synthetic-{label}-password",
+        },
+    )
+    results.append((label, status, payload, headers.get("Set-Cookie", "")))
+
+
+def multipart(fields: dict[str, str], filename: str, content: bytes) -> tuple[bytes, str]:
+    boundary = f"atlas-public-synthetic-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode(),
+                b"\r\n",
+            ]
+        )
+    chunks.extend(
+        [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+            b"Content-Type: text/plain\r\n\r\n",
+            content,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def web_route(path: str) -> None:
+    with urllib.request.urlopen(WEB + path, timeout=30) as response:
+        if response.status != 200:
+            raise AssertionError((path, response.status))
+
+
+def secret_initializer_log() -> str:
+    result = subprocess.run(
+        ["docker", "compose", "-p", PROJECT, "logs", "--no-color", "deployment-secret-init"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    log = result.stdout + result.stderr
+    forbidden = ("public-synthetic-alpha-password", "public-synthetic-beta-password")
+    if any(value in log for value in forbidden):
+        raise AssertionError("secret initializer logs exposed a smoke credential")
+    return log
+
+
+def fresh_smoke() -> None:
+    status, first_admin, _ = json_request("/api/v1/auth/first-admin")
+    assert status == 200 and first_admin == {"claim_available": True}, (status, first_admin)
+
+    results: list[tuple[str, int, object, str]] = []
+    barrier = threading.Barrier(2)
+    threads = [threading.Thread(target=claim, args=(label, barrier, results)) for label in ("alpha", "beta")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(item[1] for item in results) == [201, 409], results
+    winner = next(item for item in results if item[1] == 201)
+    loser = next(item for item in results if item[1] == 409)
+    assert loser[2]["error_code"] == "first_admin_claim_unavailable", loser
+    session = winner[2]
+    actor_id = session["actor"]["actor_id"]
+    assert actor_id.startswith("user-")
+    cookie = winner[3].split(";", 1)[0]
+    owner = authenticated_opener(cookie)
+
+    provider_status, provider, _ = json_request(
+        "/api/v1/admin/config/provider-connections",
+        method="POST",
+        value={
+            "display_name": "Public Synthetic Provider",
+            "provider_type": "openai_compatible",
+            "endpoint_url": "https://provider.example.test/v1",
+            "api_key": "public-synthetic-provider-key",
+            "idempotency_key": "public-synthetic-provider-create",
+        },
+        opener=owner,
+    )
+    assert provider_status == 201 and provider["connection_id"].startswith("connection-"), provider
+
+    project_status, project, _ = json_request(
+        "/api/v1/admin/projects",
+        method="POST",
+        value={
+            "name": "Public Synthetic Project",
+            "policy_profile_id": "policy-default-governed",
+            "idempotency_key": "public-synthetic-project-create",
+        },
+        opener=owner,
+    )
+    assert project_status == 200 and project["target_ref"].startswith("project:"), project
+    project_id = project["target_ref"].split(":", 1)[1]
+
+    upload, content_type = multipart(
+        {
+            "scope_type": "project",
+            "scope_id": project_id,
+            "tag_refs": "[]",
+            "allow_member_download": "false",
+            "idempotency_key": "public-synthetic-document-upload",
+        },
+        "public-synthetic-guide.txt",
+        b"Public synthetic setup smoke document.\n",
+    )
+    document_status, document_body, _ = request(
+        "/api/v1/admin/document-library",
+        method="POST",
+        body=upload,
+        headers={"Content-Type": content_type},
+        opener=owner,
+    )
+    document = json.loads(document_body)
+    assert document_status == 202 and document["document_id"].startswith("doc-"), document
+
+    readiness_status, readiness, _ = json_request("/api/v1/ops/readiness", opener=owner)
+    assert readiness_status == 200 and "ready" in readiness, readiness
+    for route in ("/setup?step=provider", "/setup?step=project", "/setup?step=document", "/setup?step=review", "/workspace"):
+        web_route(route)
+
+    initializer_log = secret_initializer_log()
+    assert "deployment secrets" in initializer_log.lower(), initializer_log
+    STATE.write_text(
+        json.dumps(
+            {
+                "email": f"public-synthetic-{winner[0]}@example.test",
+                "password": f"public-synthetic-{winner[0]}-password",
+                "actor_id": actor_id,
+                "connection_id": provider["connection_id"],
+                "project_id": project_id,
+                "document_id": document["document_id"],
+            }
+        )
+    )
+    print("public first-run smoke passed")
+
+
+def restart_smoke() -> None:
+    expected = json.loads(STATE.read_text())
+    status, first_admin, _ = json_request("/api/v1/auth/first-admin")
+    assert status == 200 and first_admin == {"claim_available": False}, (status, first_admin)
+    login_status, session, headers = json_request(
+        "/api/v1/auth/login",
+        method="POST",
+        value={"identifier": expected["email"], "password": expected["password"]},
+    )
+    assert login_status == 200 and session["actor"]["actor_id"] == expected["actor_id"], session
+    owner = authenticated_opener(headers.get("Set-Cookie", "").split(";", 1)[0])
+    _, providers, _ = json_request("/api/v1/admin/config/provider-connections", opener=owner)
+    _, projects, _ = json_request("/api/v1/admin/projects", opener=owner)
+    _, documents, _ = json_request(
+        f'/api/v1/admin/document-library?scope_type=project&scope_id={expected["project_id"]}',
+        opener=owner,
+    )
+    assert any(item["connection_id"] == expected["connection_id"] for item in providers["connections"])
+    assert any(item["project_id"] == expected["project_id"] for item in projects["projects"])
+    assert any(item["document_id"] == expected["document_id"] for item in documents["documents"])
+    secret_initializer_log()
+    web_route("/workspace")
+    print("public first-run restart smoke passed")
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--verify-restart", action="store_true")
+arguments = parser.parse_args()
+try:
+    restart_smoke() if arguments.verify_restart else fresh_smoke()
+except Exception as error:
+    print(f"public first-run smoke failed: {error}", file=sys.stderr)
+    raise SystemExit(1)

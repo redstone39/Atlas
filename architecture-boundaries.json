@@ -101,8 +101,7 @@
       "public_contracts": [
         "api/src/atlas_production/modules/identity_access/public.py",
         "api/src/atlas_production/modules/identity_access/records.py",
-        "api/src/atlas_production/modules/identity_access/security.py",
-        "api/src/atlas_production/modules/identity_access/local_pilot.py"
+        "api/src/atlas_production/modules/identity_access/security.py"
       ]
     },
     {
