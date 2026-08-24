@@ -268,7 +268,12 @@ def test_direct_resource_ids_are_unique_per_exchange() -> None:
 def test_model_user_input_remains_user_only() -> None:
     with pytest.raises(ValidationError):
         ModelUserInputV3.model_validate(
-            {"role": "assistant", "content_segments": [{"kind": "text", "text": "x"}]}
+            {
+                "role": "assistant",
+                "content_segments": [
+                    {"kind": "text", "text": "public-synthetic-x"}
+                ],
+            }
         )
 
 

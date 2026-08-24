@@ -438,6 +438,14 @@ def _self_test() -> None:
             "api/tests/test_public_messages.py",
             b'{"mes' + b'sages":[{"ro' + b'le":"user","con' + b'tent":"public-synthetic example"}]}',
         ),
+        (
+            "api/tests/test_provider_messages.py",
+            b'{"messages":[{"role":"system","content":"Return public-synthetic structured output."},{"role":"user","content":"Answer the public-synthetic example."}]}',
+        ),
+        (
+            "api/tests/test_assistant_context.py",
+            b'{"role":"assistant","content_segments":[{"kind":"text","text":"public-synthetic-x"}]}',
+        ),
     )
     for path, blob in safe_cases:
         if _scan(path, blob, set()):

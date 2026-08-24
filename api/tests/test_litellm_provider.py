@@ -106,8 +106,8 @@ def _route(provider_type: str) -> ModelRouteRecord:
 def _request(*, tools: bool = False, timeout_seconds: float | None = None):
     return ProviderConversationRequest(
         messages=[
-            ProviderSystemMessage(content="Return structured output."),
-            ProviderUserMessage(content="Answer."),
+            ProviderSystemMessage(content="Return public-synthetic structured output."),
+            ProviderUserMessage(content="Answer the public-synthetic example."),
         ],
         tools=[TOOL] if tools else [],
         tool_choice="auto" if tools else "none",
@@ -125,7 +125,7 @@ def _completed_payload(**overrides):
             {
                 "finish_reason": "stop",
                 "message": {
-                    "content": '{"answer":"ok"}',
+                    "content": '{"answer":"public-synthetic-ok"}',
                     "refusal": None,
                     "tool_calls": None,
                 },
@@ -181,8 +181,14 @@ def test_three_profiles_send_exact_per_call_kwargs(
     expected = {
         "model": expected_model,
         "messages": [
-            {"role": "system", "content": "Return structured output."},
-            {"role": "user", "content": "Answer."},
+            {
+                "role": "system",
+                "content": "Return public-synthetic structured output.",
+            },
+            {
+                "role": "user",
+                "content": "Answer the public-synthetic example.",
+            },
         ],
         "tools": [],
         "tool_choice": "none",
@@ -250,10 +256,10 @@ def test_completed_usage_and_request_metadata_are_normalized() -> None:
             "total_tokens": 13,
             "cached_input_tokens": 4,
         },
-        output={"answer": "ok"},
+        output={"answer": "public-synthetic-ok"},
         assistant_message=outcome.assistant_message,
     )
-    assert outcome.assistant_message.content == '{"answer":"ok"}'
+    assert outcome.assistant_message.content == '{"answer":"public-synthetic-ok"}'
 
 
 def test_anthropic_usage_projects_cache_read_and_drops_unknown_token_fields(
