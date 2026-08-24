@@ -89,6 +89,20 @@ def test_check_postgres_rejects_missing_or_unsafe_database_before_connection(
             "postgresql://localhost/not_a_test_database",
             "PostgreSQL checks require a dedicated atlas_baseline_test_* database",
         ),
+        (
+            (
+                "postgresql://localhost/atlas_baseline_test_safe"
+                "?database=atlas_production"
+            ),
+            "PostgreSQL checks require a dedicated atlas_baseline_test_* database",
+        ),
+        (
+            (
+                "postgresql://localhost/atlas_baseline_test_safe"
+                "?dbname=atlas_production"
+            ),
+            "PostgreSQL checks require a dedicated atlas_baseline_test_* database",
+        ),
     ],
 )
 def test_conversation_evolution_smoke_rejects_unsafe_database_before_connection(

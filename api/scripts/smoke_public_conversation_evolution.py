@@ -81,6 +81,10 @@ def _validated_url() -> str:
         ) from exc
     if not parsed.drivername.startswith("postgresql"):
         raise RuntimeError("ATLAS_TEST_POSTGRES_URL must use PostgreSQL")
+    if "database" in parsed.query or "dbname" in parsed.query:
+        raise RuntimeError(
+            "PostgreSQL checks require a dedicated atlas_baseline_test_* database"
+        )
     database_name = parsed.database or ""
     if database_name == "atlas_production" or not database_name.startswith(
         "atlas_baseline_test_"
