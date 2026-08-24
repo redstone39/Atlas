@@ -253,6 +253,21 @@
     "conversation.workspace_conversation_was_created": {
       "params": {}
     },
+    "conversation_learning.idempotency_key_was_reused": {
+      "params": {}
+    },
+    "conversation_learning.settings_are_unavailable": {
+      "params": {}
+    },
+    "conversation_learning.settings_revision_changed_before_update": {
+      "params": {}
+    },
+    "conversation_learning.settings_were_disabled": {
+      "params": {}
+    },
+    "conversation_learning.settings_were_enabled": {
+      "params": {}
+    },
     "document.original_content_access_was_authorized": {
       "params": {}
     },

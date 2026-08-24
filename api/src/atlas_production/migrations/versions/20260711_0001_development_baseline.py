@@ -48,6 +48,7 @@ ATR020_OWNER_TABLES = frozenset(
         'atlas_turn_conversation_members',
         'atlas_turn_conversation_scope_tags',
         'atlas_turn_conversations',
+        'atlas_conversation_learning_settings',
         'atlas_conversation_learning_case_turns',
         'atlas_conversation_learning_cases',
         'atlas_conversation_review_snapshot_turns',
@@ -1680,6 +1681,11 @@ def upgrade() -> None:
     bind = op.get_bind()
     for table in _atr020_tables():
         table.create(bind=bind, checkfirst=False)
+    op.execute(
+        "INSERT INTO atlas_conversation_learning_settings "
+        "(settings_key, enabled, settings_revision, updated_actor_id, updated_at) "
+        "VALUES ('global', true, 1, 'system:development-baseline', CURRENT_TIMESTAMP)"
+    )
     op.execute(
         """
         INSERT INTO atlas_prompt_skill_catalog_revisions (

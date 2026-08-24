@@ -10,6 +10,7 @@ import {
 import { LanguageSwitch } from "../../shared/product-ui";
 import { ThemeSwitch } from "../../shared/theme";
 import type { SessionState } from "../../features/identity-session/index";
+import { ConversationLearningSettingsFeature } from "../../features/conversation-review";
 import { NotesSettingsFeature } from "../../features/notes";
 import type { ManagementNavGroup } from "../../shared/navigation";
 import type { AppRoute } from "../../shared/routes";
@@ -78,7 +79,12 @@ export function SettingsPage({
           </CardContent>
         </Card>
       </div>
-      {session.system_role === "admin" && <NotesSettingsFeature />}
+      {session.system_role === "admin" && (
+        <>
+          <ConversationLearningSettingsFeature />
+          <NotesSettingsFeature />
+        </>
+      )}
     </section>
   );
 }

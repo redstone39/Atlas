@@ -165,6 +165,16 @@ class ConversationReviewReconciler:
 
     def run_once(self) -> int:
         observed_at = self._clock()
+        try:
+            settings = self._reviews.get_learning_settings()
+        except Exception:
+            logger.warning(
+                "conversation_learning_admission_failed "
+                "failure_code=conversation_learning_settings_unavailable"
+            )
+            return 0
+        if not settings.enabled:
+            return 0
         self._discover(observed_at)
         claim = self._reviews.claim_next(
             self._worker_id,

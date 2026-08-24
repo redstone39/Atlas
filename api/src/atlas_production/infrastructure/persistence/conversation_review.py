@@ -27,6 +27,29 @@ CONVERSATION_REVIEW_SCAN_SEQUENCE = Sequence(
 )
 
 
+class AtlasConversationLearningSettingsRow(OrmBase):
+    __tablename__ = "atlas_conversation_learning_settings"
+
+    settings_key: Mapped[str] = mapped_column(String(20), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    settings_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "settings_key = 'global'",
+            name="ck_atlas_conversation_learning_settings_singleton",
+        ),
+        CheckConstraint(
+            "settings_revision >= 1",
+            name="ck_atlas_conversation_learning_settings_revision",
+        ),
+    )
+
+
 class AtlasConversationReviewRow(OrmBase):
     """Conversation Review-owned immutable snapshot and fenced lifecycle."""
 
@@ -289,6 +312,7 @@ class AtlasConversationLearningCaseTurnRow(OrmBase):
 
 CONVERSATION_REVIEW_OWNER_TABLES = frozenset(
     {
+        AtlasConversationLearningSettingsRow.__tablename__,
         AtlasConversationReviewRow.__tablename__,
         AtlasConversationReviewSnapshotTurnRow.__tablename__,
         AtlasConversationLearningCaseRow.__tablename__,
@@ -298,6 +322,7 @@ CONVERSATION_REVIEW_OWNER_TABLES = frozenset(
 
 
 __all__ = [
+    "AtlasConversationLearningSettingsRow",
     "AtlasConversationLearningCaseRow",
     "AtlasConversationLearningCaseTurnRow",
     "AtlasConversationReviewRow",

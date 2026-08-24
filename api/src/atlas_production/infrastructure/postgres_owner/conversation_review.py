@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import uuid
-from datetime import datetime, timedelta
 from typing import Callable
 
 from pydantic import ValidationError
@@ -11,16 +12,25 @@ from sqlalchemy import or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from atlas_production.infrastructure.persistence.audit_events import (
+    AtlasAuditEventRow,
+    add_event_rows,
+)
 from atlas_production.infrastructure.persistence.conversation_review import (
+    AtlasConversationLearningSettingsRow,
     CONVERSATION_REVIEW_SCAN_SEQUENCE,
     AtlasConversationLearningCaseRow,
     AtlasConversationLearningCaseTurnRow,
     AtlasConversationReviewRow,
     AtlasConversationReviewSnapshotTurnRow,
 )
+from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
 from atlas_production.modules.conversation_review.public import (
     MAX_CANONICAL_CASE_BYTES,
     ConversationLearningCaseProposalV1,
+    ConversationLearningSettingsError,
+    ConversationLearningSettingsUpdateRequestV1,
+    ConversationLearningSettingsV1,
     ConversationReviewClaimV1,
     ConversationReviewCursorV1,
     ConversationReviewProposalV1,
@@ -293,9 +303,156 @@ def _validate_proposal_against_snapshot(
     return positions
 
 
+def _learning_settings_error(
+    error_code: str,
+    message_code: str,
+    status_code: int,
+) -> ConversationLearningSettingsError:
+    return ConversationLearningSettingsError(error_code, message_code, status_code)
+
+
+def _learning_settings_unavailable() -> ConversationLearningSettingsError:
+    return _learning_settings_error(
+        "conversation_learning_settings_unavailable",
+        "conversation_learning.settings_are_unavailable",
+        503,
+    )
+
+
+def _learning_settings_from_row(
+    row: AtlasConversationLearningSettingsRow,
+) -> ConversationLearningSettingsV1:
+    try:
+        return ConversationLearningSettingsV1(
+            enabled=row.enabled,
+            settings_revision=row.settings_revision,
+            updated_actor_id=row.updated_actor_id,
+            updated_at=row.updated_at,
+        )
+    except ValidationError as exc:
+        raise _learning_settings_unavailable() from exc
+
+
+def _learning_settings_fingerprint(
+    payload: ConversationLearningSettingsUpdateRequestV1,
+) -> str:
+    projection = payload.model_dump(mode="json", exclude={"idempotency_key"})
+    return hashlib.sha256(_canonical(projection)).hexdigest()
+
+
+def _learning_settings_receipt(
+    actor_id: str,
+    idempotency_key: str,
+) -> str:
+    raw = (
+        f"conversation-learning-v1\0{actor_id}\0settings_update\0global\0"
+        f"{idempotency_key}"
+    ).encode()
+    return f"audit-conversation-learning-{hashlib.sha256(raw).hexdigest()}"
+
+
+def _append_learning_settings_audit(
+    session: Session,
+    *,
+    actor_id: str,
+    settings: ConversationLearningSettingsV1,
+    request_fingerprint: str,
+    event_id: str,
+) -> None:
+    enabled_state = "enabled" if settings.enabled else "disabled"
+    event = build_audit_event(
+        event_type="conversation_learning_settings_updated",
+        actor_id=actor_id,
+        target_ref="conversation-learning-settings:global",
+        project_id=None,
+        scope_type=None,
+        scope_id=None,
+        message_code=(
+            "conversation_learning.settings_were_enabled"
+            if settings.enabled
+            else "conversation_learning.settings_were_disabled"
+        ),
+        metadata={
+            "operation": "settings_update",
+            "request_fingerprint": request_fingerprint,
+            "settings_revision": settings.settings_revision,
+            "revision": settings.settings_revision,
+            "status": enabled_state,
+        },
+    )
+    try:
+        add_event_rows(session, [replace(event, event_id=event_id)])
+        session.flush()
+    except Exception as exc:
+        raise _learning_settings_unavailable() from exc
+
+
 class PostgresConversationReviewOwner:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
+
+    def get_learning_settings(self) -> ConversationLearningSettingsV1:
+        try:
+            with self._session_factory() as session, session.begin():
+                row = session.get(AtlasConversationLearningSettingsRow, "global")
+                if row is None:
+                    raise _learning_settings_unavailable()
+                return _learning_settings_from_row(row)
+        except ConversationLearningSettingsError:
+            raise
+        except Exception as exc:
+            raise _learning_settings_unavailable() from exc
+
+    def update_learning_settings(
+        self,
+        actor_id: str,
+        payload: ConversationLearningSettingsUpdateRequestV1,
+    ) -> ConversationLearningSettingsV1:
+        _require_safe_identity(actor_id, "actor_id", 200)
+        fingerprint = _learning_settings_fingerprint(payload)
+        event_id = _learning_settings_receipt(actor_id, payload.idempotency_key)
+        try:
+            with self._session_factory() as session, session.begin():
+                row = session.scalar(
+                    select(AtlasConversationLearningSettingsRow)
+                    .where(AtlasConversationLearningSettingsRow.settings_key == "global")
+                    .with_for_update()
+                )
+                if row is None:
+                    raise _learning_settings_unavailable()
+                replay = session.get(AtlasAuditEventRow, event_id)
+                if replay is not None:
+                    if replay.event_metadata.get("request_fingerprint") != fingerprint:
+                        raise _learning_settings_error(
+                            "conversation_learning_settings_idempotency_conflict",
+                            "conversation_learning.idempotency_key_was_reused",
+                            409,
+                        )
+                    return _learning_settings_from_row(row)
+                if row.settings_revision != payload.expected_settings_revision:
+                    raise _learning_settings_error(
+                        "conversation_learning_settings_revision_conflict",
+                        "conversation_learning.settings_revision_changed_before_update",
+                        409,
+                    )
+                row.enabled = payload.enabled
+                row.settings_revision += 1
+                row.updated_actor_id = actor_id
+                row.updated_at = datetime.now(timezone.utc)
+                session.flush()
+                settings = _learning_settings_from_row(row)
+                _append_learning_settings_audit(
+                    session,
+                    actor_id=actor_id,
+                    settings=settings,
+                    request_fingerprint=fingerprint,
+                    event_id=event_id,
+                )
+                return settings
+        except ConversationLearningSettingsError:
+            raise
+        except Exception as exc:
+            raise _learning_settings_unavailable() from exc
 
     def register_snapshot(
         self, snapshot: ConversationReviewSnapshotV1

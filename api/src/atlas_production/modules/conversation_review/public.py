@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from atlas_production.modules.identity_access.records import UserRecord
 
 
 Identity = Annotated[str, Field(min_length=1, max_length=200)]
@@ -287,6 +288,27 @@ class ConversationReviewV1(_StrictModel):
         return self
 
 
+class ConversationLearningSettingsV1(_StrictModel):
+    enabled: bool = Field(strict=True)
+    settings_revision: int = Field(ge=1, strict=True)
+    updated_actor_id: Identity
+    updated_at: AwareDatetime
+
+
+class ConversationLearningSettingsUpdateRequestV1(_StrictModel):
+    enabled: bool = Field(strict=True)
+    expected_settings_revision: int = Field(ge=1, strict=True)
+    idempotency_key: Identity
+
+
+class ConversationLearningSettingsError(RuntimeError):
+    def __init__(self, error_code: str, message_code: str, status_code: int) -> None:
+        super().__init__(message_code)
+        self.error_code = error_code
+        self.message_code = message_code
+        self.status_code = status_code
+
+
 class ConversationReviewOwner(Protocol):
     def register_snapshot(
         self, snapshot: ConversationReviewSnapshotV1
@@ -342,8 +364,47 @@ class ConversationReviewOwner(Protocol):
         self, cursor: ConversationReviewCursorV1 | None, limit: int
     ) -> list[ConversationReviewV1]: ...
 
+    def get_learning_settings(self) -> ConversationLearningSettingsV1: ...
+
+    def update_learning_settings(
+        self,
+        actor_id: Identity,
+        payload: ConversationLearningSettingsUpdateRequestV1,
+    ) -> ConversationLearningSettingsV1: ...
+
+
+class ConversationLearningSettingsService:
+    def __init__(self, owner: ConversationReviewOwner) -> None:
+        self._owner = owner
+
+    @staticmethod
+    def _admin(actor: UserRecord | None) -> UserRecord:
+        if actor is None or not actor.active or actor.system_role != "admin":
+            raise ConversationLearningSettingsError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+            )
+        return actor
+
+    def get(self, actor: UserRecord | None) -> ConversationLearningSettingsV1:
+        self._admin(actor)
+        return self._owner.get_learning_settings()
+
+    def update(
+        self,
+        actor: UserRecord | None,
+        payload: ConversationLearningSettingsUpdateRequestV1,
+    ) -> ConversationLearningSettingsV1:
+        admin = self._admin(actor)
+        return self._owner.update_learning_settings(admin.actor_id, payload)
+
 
 __all__ = [
+    "ConversationLearningSettingsError",
+    "ConversationLearningSettingsService",
+    "ConversationLearningSettingsUpdateRequestV1",
+    "ConversationLearningSettingsV1",
     "ConversationLearningCaseProposalV1",
     "ConversationReviewClaimV1",
     "ConversationReviewCursorV1",

@@ -171,6 +171,16 @@ class LearnerReconciler:
     def run_once(self) -> int:
         if self._stop.is_set():
             return 0
+        try:
+            settings = self._reviews.get_learning_settings()
+        except Exception:
+            logger.warning(
+                "conversation_learning_admission_failed "
+                "failure_code=conversation_learning_settings_unavailable"
+            )
+            return 0
+        if not settings.enabled:
+            return 0
         self._discover()
         observed_at = self._clock()
         claim = self._learners.claim_next(

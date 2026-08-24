@@ -225,6 +225,9 @@ from atlas_production.modules.project_governance.service import ProjectGovernanc
 from atlas_production.modules.notes.service import NotesApplicationService
 from atlas_production.modules.workspace_turn.public import WorkspaceTurnApplication
 from atlas_production.modules.answer_behavior.public import AnswerBehaviorService
+from atlas_production.modules.conversation_review.public import (
+    ConversationLearningSettingsService,
+)
 from atlas_production.modules.prompt_skills.public import PromptSkillService
 from atlas_production.providers import default_provider_adapter_factory
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
@@ -259,6 +262,7 @@ class ApiComposition:
     processing_jobs: ProcessingJobsApplication
     model_routing: ModelRoutingService
     answer_behavior: AnswerBehaviorService
+    conversation_learning_settings: ConversationLearningSettingsService
     prompt_skills: PromptSkillService
     notes: NotesApplicationService
     ops_readiness: OpsReadinessService
@@ -567,6 +571,9 @@ def build_api_composition(
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
     conversations = PostgresConversationV1Adapter(session_factory)
     conversation_review_owner = PostgresConversationReviewOwner(session_factory)
+    conversation_learning_settings = ConversationLearningSettingsService(
+        conversation_review_owner
+    )
     conversation_review_source = ConversationReviewSource(
         conversations=conversations,
         retry_lineage=conversations,
@@ -742,6 +749,7 @@ def build_api_composition(
         processing_jobs=processing_jobs,
         model_routing=model_routing,
         answer_behavior=answer_behavior,
+        conversation_learning_settings=conversation_learning_settings,
         prompt_skills=prompt_skills,
         notes=notes,
         ops_readiness=ops_readiness,
