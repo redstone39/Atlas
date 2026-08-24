@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
 from typing import Callable
 from uuid import uuid4
@@ -13,6 +13,7 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasAgentTokenRow,
     AtlasDirectoryConnectionRow,
     AtlasDirectoryConnectionSecretRow,
+    AtlasIdentityCreateReceiptRow,
     AtlasExternalIdentityRow,
     AtlasPermissionGrantRow,
     AtlasSessionRow,
@@ -86,6 +87,36 @@ _PROJECT_SCOPE_ROLES = {
     "uploader": "contributor",
     "admin": "admin",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityCreateSecret:
+    ciphertext: str
+    nonce: str
+    key_id: str
+    version: int
+    algorithm: str
+    storage_backend: str
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityCreatePrepared:
+    target_ref: str
+    response_json: str
+    change_set: "IdentitySessionChangeSet"
+    secret: IdentityCreateSecret | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityCreateReceipt:
+    target_ref: str
+    response_json: str
+    secret: IdentityCreateSecret | None
+    replayed: bool
+
+
+class IdentityCreateReplayConflict(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +446,184 @@ class ExpireInviteCommand:
 @dataclass(frozen=True, slots=True)
 class IdentityRepository:
     session_factory: SessionFactory
+    id_allocator: Callable[[], str] = field(
+        default_factory=lambda: lambda: uuid4().hex
+    )
+
+    def create_once(
+        self,
+        *,
+        scope_actor_id: str,
+        operation: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        target_prefix: str | None,
+        existing_target_id: str | None = None,
+        identity_lock_keys: tuple[str, ...] = (),
+        prepare: Callable[[str], IdentityCreatePrepared],
+    ) -> IdentityCreateReceipt:
+        receipt_lock = (
+            f"identity:create:{scope_actor_id}:{operation}:{idempotency_key}"
+        )
+        session = self.session_factory()
+        with session:
+            try:
+                acquire_owner_locks(
+                    session,
+                    domain_keys=(),
+                    identity_keys=(receipt_lock, *identity_lock_keys),
+                )
+                row = session.scalar(
+                    select(AtlasIdentityCreateReceiptRow)
+                    .where(
+                        AtlasIdentityCreateReceiptRow.scope_actor_id
+                        == scope_actor_id,
+                        AtlasIdentityCreateReceiptRow.operation == operation,
+                        AtlasIdentityCreateReceiptRow.idempotency_key
+                        == idempotency_key,
+                    )
+                    .with_for_update()
+                )
+                if row is not None:
+                    if row.request_fingerprint != request_fingerprint:
+                        raise IdentityCreateReplayConflict(
+                            "identity create idempotency key was reused"
+                        )
+                    receipt = self._create_receipt(row, replayed=True)
+                    session.rollback()
+                    return receipt
+                if existing_target_id is not None:
+                    target_id = existing_target_id
+                else:
+                    if target_prefix is None:
+                        raise ValueError("new identity resource requires a prefix")
+                    target_id = f"{target_prefix}{self.id_allocator()}"
+                prepared = prepare(target_id)
+                change_set = prepared.change_set
+                lock_plan = identity_session_lock_plan(
+                    protect_admin_count=change_set.protect_admin_count,
+                    users=change_set.users,
+                    authorization_scope_type=change_set.authorization_scope_type,
+                    authorization_scope_id=change_set.authorization_scope_id,
+                    identity_lock_keys=(
+                        receipt_lock,
+                        *identity_lock_keys,
+                        *change_set.identity_lock_keys,
+                    ),
+                    external_identities=change_set.external_identities,
+                    expected_agent_actor_ids=tuple(
+                        actor_id
+                        for actor_id, _expected in change_set.expected_agent_users
+                    ),
+                    session_tokens=tuple(
+                        token for token, _actor_id in change_set.sessions
+                    ),
+                    deleted_session_tokens=change_set.deleted_session_tokens,
+                    invite_ids=tuple(
+                        transition.record.invite_id
+                        for transition in change_set.invite_transitions
+                    ),
+                    agent_tokens=change_set.agent_tokens,
+                    protected_admin_team_ids=change_set.protected_admin_team_ids,
+                )
+                acquire_owner_locks(
+                    session,
+                    domain_keys=lock_plan.domain_keys,
+                    identity_keys=lock_plan.identity_keys,
+                )
+                self._lock_invite_transitions(session, change_set.invite_transitions)
+                self._validate_authorization(session, change_set)
+                self._lock_user_currentness(session, change_set.expected_users)
+                self._lock_agent_user_currentness(
+                    session, change_set.expected_agent_users
+                )
+                self._lock_directory_currentness(session, change_set)
+                self._lock_pending_invite_absence(
+                    session, change_set.expected_pending_invite_absent_emails
+                )
+                if change_set.reject_directory_alias_conflicts:
+                    self._validate_directory_alias_conflicts(
+                        session, change_set.external_identities
+                    )
+                    self._validate_directory_subject_conflicts(
+                        session, change_set.external_identities
+                    )
+                self._validate_local_email_conflicts(
+                    session, change_set.users, change_set.external_identities
+                )
+                if change_set.protect_admin_count:
+                    self._validate_active_admin_invariant(session, change_set.users)
+                protected_team_ids, protected_team_memberships = (
+                    self._lock_complete_protected_team_memberships(
+                        session,
+                        changed_users=change_set.users,
+                        requested_team_ids=change_set.protected_admin_team_ids,
+                    )
+                )
+                self._validate_active_team_admin_invariant(
+                    session,
+                    changed_users=change_set.users,
+                    team_ids=protected_team_ids,
+                    membership_rows=protected_team_memberships,
+                )
+                self._write_identity_rows(session, change_set)
+                AuditEventWriter(session).append_many(change_set.audit_events)
+                secret = prepared.secret
+                row = AtlasIdentityCreateReceiptRow(
+                    receipt_id=f"identity-create-{uuid4().hex}",
+                    scope_actor_id=scope_actor_id,
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    target_ref=prepared.target_ref,
+                    response_json=prepared.response_json,
+                    secret_ciphertext=secret.ciphertext if secret else None,
+                    secret_nonce=secret.nonce if secret else None,
+                    secret_key_id=secret.key_id if secret else None,
+                    secret_version=secret.version if secret else None,
+                    secret_algorithm=secret.algorithm if secret else None,
+                    secret_storage_backend=(
+                        secret.storage_backend if secret else None
+                    ),
+                    created_at=utc_now_iso(),
+                )
+                session.add(row)
+                session.commit()
+                return self._create_receipt(row, replayed=False)
+            except Exception:
+                session.rollback()
+                raise
+
+    @staticmethod
+    def _create_receipt(
+        row: AtlasIdentityCreateReceiptRow,
+        *,
+        replayed: bool,
+    ) -> IdentityCreateReceipt:
+        secret = None
+        if row.secret_ciphertext is not None:
+            if None in (
+                row.secret_nonce,
+                row.secret_key_id,
+                row.secret_version,
+                row.secret_algorithm,
+                row.secret_storage_backend,
+            ):
+                raise ValueError("identity create receipt secret is incomplete")
+            secret = IdentityCreateSecret(
+                ciphertext=row.secret_ciphertext,
+                nonce=row.secret_nonce,
+                key_id=row.secret_key_id,
+                version=row.secret_version,
+                algorithm=row.secret_algorithm,
+                storage_backend=row.secret_storage_backend,
+            )
+        return IdentityCreateReceipt(
+            target_ref=row.target_ref,
+            response_json=row.response_json,
+            secret=secret,
+            replayed=replayed,
+        )
 
     def identity_session(self, change_set: IdentitySessionChangeSet) -> None:
         session = self.session_factory()
@@ -1413,6 +1622,10 @@ __all__ = [
     "IdentityCurrentnessConflict",
     "IdentityAuthorizationConflict",
     "IdentityInvariantViolation",
+    "IdentityCreatePrepared",
+    "IdentityCreateReceipt",
+    "IdentityCreateReplayConflict",
+    "IdentityCreateSecret",
     "IdentityRepository",
     "IdentityScopeAcceptanceChangeSet",
     "IdentitySessionChangeSet",

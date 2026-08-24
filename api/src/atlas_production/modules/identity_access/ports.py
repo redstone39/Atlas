@@ -4,6 +4,8 @@ from typing import ContextManager, Protocol
 
 from .api_models import (
     SessionState,
+    UserInviteCreateRequest,
+    UserInviteCreateResult,
 )
 from atlas_production.shared.public import (
     AuditEventRecord,
@@ -16,6 +18,14 @@ from .contracts import IdentityAccessError, IdentityAuditCommand
 
 
 class IdentityAccessRepository(Protocol):
+    def create_invite_once(
+        self,
+        actor: UserRecord,
+        payload: UserInviteCreateRequest,
+        normalized_email: str,
+        cipher=None,
+    ) -> UserInviteCreateResult: ...
+
     def identity_mutation(
         self,
         owner_key: str,
@@ -39,6 +49,14 @@ class IdentityAccessRepository(Protocol):
     def get_user(self, actor_id: str) -> UserRecord | None: ...
 
     def list_users(self) -> list[UserRecord]: ...
+    def claim_first_admin(
+        self,
+        *,
+        display_name: str,
+        email: str,
+        password_digest: str,
+    ) -> tuple[UserRecord, str]: ...
+
 
     def put_user(self, user: UserRecord) -> None: ...
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import os
 from dataclasses import dataclass
@@ -50,7 +52,7 @@ class AesGcmEnvelopeCipher:
             raise ValueError("credential master key is unavailable")
         try:
             key = base64.b64decode(encoded, validate=True)
-            raw_keyring = os.getenv("ATLAS_CREDENTIAL_MASTER_KEYRING") or "{}"
+            raw_keyring = os.getenv("ATLAS_CREDENTIAL_MASTER_KEYRING", "{}")
             keyring_payload = json.loads(raw_keyring)
             if not isinstance(keyring_payload, dict) or any(
                 not isinstance(identity, str) or not isinstance(value, str)
@@ -82,6 +84,18 @@ class AesGcmEnvelopeCipher:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+
+    def keyed_fingerprint(self, *, domain: str, payload: bytes) -> str:
+        """Bind a deterministic replay digest to the active credential key."""
+
+        if not domain or not payload:
+            raise ValueError("credential fingerprint input is invalid")
+        fingerprint_key = hmac.new(
+            self._key,
+            f"atlas-envelope-fingerprint:{domain}:v1".encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return hmac.new(fingerprint_key, payload, hashlib.sha256).hexdigest()
 
     def encrypt(
         self,

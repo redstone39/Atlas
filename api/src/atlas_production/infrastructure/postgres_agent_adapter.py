@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
 from typing import Callable
 
+from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
 from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
 from atlas_production.infrastructure.postgres_owner.audit import AccessDecisionWriter
-from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
-project_acl_subject_owner_key,
-project_owner_key,
-team_subject_owner_key,)
+from atlas_production.infrastructure.postgres_lock_keys import (
+    identity_actor_owner_key,
+    project_acl_subject_owner_key,
+    project_owner_key,
+    team_subject_owner_key,
+)
 from atlas_production.infrastructure.postgres_owner.identity import (
+    IdentityAuthorizationConflict,
+    IdentityCreatePrepared,
+    IdentityCreateReplayConflict,
+    IdentityCurrentnessConflict,
     IdentityRepository,
     IdentitySessionChangeSet,
 )
@@ -29,11 +38,17 @@ from atlas_production.infrastructure.persistence.identity_access import (
 )
 from atlas_production.modules.agent_runtime.public import AgentQueryAuthorizationV1
 from atlas_production.modules.identity_access.agent_contracts import (
+    AgentAccessError,
     AgentAuditCommand,
+    AgentCreateOutcome,
     AgentProjectGrantView,
 )
 from atlas_production.modules.identity_access.agent_ports import AgentAccessRepository
 from atlas_production.modules.identity_access.agent_service import AgentAccessService
+from atlas_production.modules.identity_access.api_models import (
+    AgentUserCreateRequest,
+    AgentUserCreateResult,
+)
 from atlas_production.modules.identity_access.records import (
     AgentTokenRecord,
     UserRecord,
@@ -80,12 +95,104 @@ class _AgentMutationBuffer:
 
 
 class PostgresAgentAccessRepository(AgentAccessRepository):
-    def __init__(self, session_factory: SessionFactory) -> None:
-        self.identity_owner = IdentityRepository(session_factory)
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        id_allocator: Callable[[], str] | None = None,
+    ) -> None:
+        self.identity_owner = IdentityRepository(
+            session_factory,
+            id_allocator=id_allocator or (lambda: uuid4().hex),
+        )
         self.project_owner = ProjectAclRepository(session_factory)
         self._buffer: ContextVar[_AgentMutationBuffer | None] = ContextVar(
             f"atlas_postgres_agent_buffer_{id(self)}",
             default=None,
+        )
+
+    def create_agent_once(
+        self,
+        actor: UserRecord,
+        payload: AgentUserCreateRequest,
+    ) -> AgentCreateOutcome:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {"display_name": payload.display_name},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+        def prepare(actor_id: str) -> IdentityCreatePrepared:
+            agent = UserRecord(
+                actor_id=actor_id,
+                display_name=payload.display_name,
+                email=None,
+                system_role="agent",
+                password_digest=None,
+                actor_type="service_account",
+                created_at=utc_now_iso(),
+            )
+            audit = build_audit_event(
+                event_type="agent_user_created",
+                actor_id=actor.actor_id,
+                target_ref=f"agent:{actor_id}",
+                project_id=None,
+                message_code="agent.user_is_ready_for_token_issue",
+                metadata={"agent_actor_id": actor_id},
+            )
+            result = AgentUserCreateResult(
+                request_id=payload.idempotency_key,
+                status="applied",
+                agent=AgentAccessService._agent_status(agent),
+                message_code="agent.user_is_ready_for_token_issue",
+                audit_event_ref=audit.event_id,
+            )
+            return IdentityCreatePrepared(
+                target_ref=f"agent:{actor_id}",
+                response_json=result.model_dump_json(),
+                change_set=IdentitySessionChangeSet(
+                    users=(agent,),
+                    expected_users=((actor_id, None),),
+                    audit_events=(audit,),
+                    authorization_actor_id=actor.actor_id,
+                    authorization_requires_system_admin=True,
+                ),
+            )
+
+        try:
+            receipt = self.identity_owner.create_once(
+                scope_actor_id=actor.actor_id,
+                operation="create_agent",
+                idempotency_key=payload.idempotency_key,
+                request_fingerprint=fingerprint,
+                target_prefix="agent-",
+                prepare=prepare,
+            )
+        except IdentityCreateReplayConflict as exc:
+            raise AgentAccessError(
+                "idempotency_conflict",
+                "agent.already_exists",
+                409,
+                request_id=payload.idempotency_key,
+            ) from exc
+        except IdentityAuthorizationConflict as exc:
+            raise AgentAccessError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+                request_id=payload.idempotency_key,
+            ) from exc
+        except IdentityCurrentnessConflict as exc:
+            raise AgentAccessError(
+                "admin_action_rejected",
+                "agent.already_exists",
+                409,
+                request_id=payload.idempotency_key,
+            ) from exc
+        return AgentCreateOutcome(
+            AgentUserCreateResult.model_validate_json(receipt.response_json),
+            200 if receipt.replayed else 201,
         )
 
     def get_user(self, actor_id: str) -> UserRecord | None:

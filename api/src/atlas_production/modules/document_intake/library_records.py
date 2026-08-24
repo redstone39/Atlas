@@ -83,6 +83,7 @@ class PublishedDocumentUpload:
 class DocumentUploadResult:
     artifact: ArtifactRecord
     publication: PublishedDocumentUpload
+    replayed: bool = False
 
 
 class DocumentUploadAccessDenied(PermissionError):

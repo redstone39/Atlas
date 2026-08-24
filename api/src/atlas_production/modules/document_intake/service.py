@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Callable
 from uuid import uuid4
 
 from .api_models import (
@@ -24,8 +26,13 @@ from .ports import DocumentIntakeRepository
 
 
 class DocumentIntakeService:
-    def __init__(self, repository: DocumentIntakeRepository) -> None:
+    def __init__(
+        self,
+        repository: DocumentIntakeRepository,
+        new_id: Callable[[], str] = lambda: uuid4().hex,
+    ) -> None:
         self.repository = repository
+        self.new_id = new_id
 
     def normalize_tag_refs(
         self,
@@ -57,7 +64,7 @@ class DocumentIntakeService:
 
     def generated_document_id(self) -> str:
         while True:
-            document_id = f"doc-{uuid4().hex[:12]}"
+            document_id = f"doc-{self.new_id()}"
             if not self.repository.document_exists(document_id):
                 return document_id
 
@@ -66,6 +73,8 @@ class DocumentIntakeService:
         document: DocumentRecord,
         tag_refs: list[DocumentTagRef],
     ) -> DocumentVersionRecord:
+        if not document.document_id:
+            document = replace(document, document_id=self.generated_document_id())
         self.repository.replace_tags(document.document_id, tag_refs)
         self.repository.put_document(document)
         return self.repository.create_document_version(document)

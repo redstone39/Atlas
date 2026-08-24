@@ -28,6 +28,7 @@ from atlas_production.infrastructure.postgres_artifact_journeys import (
     ArtifactUploadJourneyBuilder,
 )
 from atlas_production.infrastructure.postgres_document_upload import (
+    NewDocumentUploadIntentCommand,
     NewDocumentUploadJourneyCommand,
     NewDocumentUploadJourneyInput,
     NewDocumentUploadRequestFacts,
@@ -99,6 +100,8 @@ class PostgresDocumentUploadJourneyProvider:
     max_bytes: int = MAX_ARTIFACT_BYTES
     worker_id: str = "api-document-upload"
     now: Callable[[], str] = utc_now_iso
+    new_document_id: Callable[[], str] = lambda: uuid4().hex
+    intent_command: NewDocumentUploadIntentCommand | None = None
 
     def _active_fence(self) -> StorageFence:
         with self.session_factory() as session:
@@ -193,7 +196,6 @@ class PostgresDocumentUploadJourneyProvider:
         chunks: Iterable[bytes],
         request_fingerprint: str,
         artifact_class: str,
-        logical_identity: str,
         content_type: str,
         document: DocumentRecord,
         tag_refs: list[DocumentTagRef],
@@ -214,7 +216,6 @@ class PostgresDocumentUploadJourneyProvider:
             or created_by is None
             or document.scope_type not in {"team", "project"}
             or not document.scope_id
-            or document.document_id == ""
             or document.source_kind != "file_upload"
             or document.lifecycle_status != "active"
             or document.resource_lifecycle_epoch != 0
@@ -228,6 +229,31 @@ class PostgresDocumentUploadJourneyProvider:
         tag_scopes = tuple(sorted((item.tag_type, item.tag_id) for item in tag_refs))
         if scopes != tag_scopes or len(tag_scopes) != len(tag_refs):
             raise ValueError("new-document upload scope graph is incomplete")
+        intent = (
+            self.intent_command
+            or NewDocumentUploadIntentCommand(
+                self.session_factory, self.new_document_id
+            )
+        ).execute(
+            actor_id=created_by,
+            scope_type=document.scope_type,
+            scope_id=document.scope_id,
+            operation=idempotency_scope,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if intent.replayed:
+            canonical = self.journey_command.canonical_intent_result(intent)
+            return DocumentUploadResult(
+                artifact=self._canonical_artifact(canonical.artifact_id),
+                publication=self._canonical_publication(
+                    document_version_id=canonical.document_version_id,
+                    audit_event_id=canonical.audit_event_id,
+                    job=canonical.job,
+                ),
+                replayed=True,
+            )
+        document = replace(document, document_id=intent.document_id)
 
         observed_at = document.uploaded_at or self.now()
         artifact_id = _identity("artifact", document.document_id, idempotency_scope, idempotency_key)
@@ -313,7 +339,9 @@ class PostgresDocumentUploadJourneyProvider:
             opaque_ref=opaque_blob_ref(
                 hashlib.sha256(blob_id.encode("utf-8")).hexdigest()[:32]
             ),
-            logical_identity=logical_identity,
+            logical_identity=(
+                f"document:{document.document_id}:original_document:{idempotency_key}"
+            ),
             document_version_id=version_id,
             content_type=content_type,
             owner_scope_type=document.scope_type,
@@ -353,6 +381,7 @@ class PostgresDocumentUploadJourneyProvider:
                     job_kind=job_kind,
                     idempotency_scope=idempotency_scope,
                     idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
                     created_by=created_by,
                     audit_events=(audit,),
                     progress_total=progress_total,

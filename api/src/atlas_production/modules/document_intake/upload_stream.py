@@ -42,6 +42,18 @@ def inspect_document_upload(
     finally:
         stream.seek(0)
 
+def document_upload_checksum(stream: BinaryIO) -> str:
+    """Hash a seekable multipart spool without consuming it for the byte journey."""
+
+    digest = hashlib.sha256()
+    stream.seek(0)
+    try:
+        while chunk := stream.read(CHUNK_SIZE):
+            digest.update(chunk)
+    finally:
+        stream.seek(0)
+    return digest.hexdigest()
+
 
 def uploaded_chunks(stream: BinaryIO) -> Iterator[bytes]:
     stream.seek(0)

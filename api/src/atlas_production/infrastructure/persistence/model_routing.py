@@ -277,7 +277,7 @@ class AtlasModelRoutingReplayRow(OrmBase):
     __tablename__ = "atlas_model_routing_idempotency"
 
     idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
-    operation: Mapped[str] = mapped_column(String, nullable=False)
+    operation: Mapped[str] = mapped_column(String, primary_key=True)
     target_ref: Mapped[str] = mapped_column(String, nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     response_model: Mapped[str] = mapped_column(String, nullable=False)

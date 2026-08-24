@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from typing import Callable, cast
+from uuid import uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -1030,16 +1031,39 @@ class ProcessingProfileIntent:
     replay: ProcessingIdempotencyRecord | None
     profile: ProcessingProfile | None
     revisions: tuple[ProcessingProfileRevision, ...]
+    allocated_profile_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class BeginProcessingProfileIntentCommand:
     session_factory: SessionFactory
+    id_allocator: Callable[[], str] = field(
+        default_factory=lambda: lambda: uuid4().hex
+    )
 
-    def execute(self, idempotency_key: str, profile_id: str) -> ProcessingProfileIntent:
+    def execute(
+        self,
+        idempotency_key: str,
+        operation: str,
+        profile_id: str | None = None,
+    ) -> ProcessingProfileIntent:
         reader = ProcessingRegistryReadModel(self.session_factory)
+        replay = reader.get_replay(idempotency_key)
+        if replay is not None:
+            return ProcessingProfileIntent(replay, None, ())
+        if operation == "profile.create":
+            if profile_id is not None:
+                raise ValueError("profile create intent cannot accept a profile ID")
+            return ProcessingProfileIntent(
+                None,
+                None,
+                (),
+                f"profile-{self.id_allocator()}",
+            )
+        if profile_id is None:
+            raise ValueError("targeted profile intent requires a profile ID")
         return ProcessingProfileIntent(
-            reader.get_replay(idempotency_key),
+            None,
             reader.get_processing_profile(profile_id),
             reader.profile_revisions(profile_id),
         )

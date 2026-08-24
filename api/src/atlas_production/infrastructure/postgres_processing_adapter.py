@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import asdict, replace
 import base64
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from typing import Callable
 from uuid import uuid4
 from zipfile import ZipFile
 
+from atlas_production.infrastructure.postgres_locks import hold_owner_operation_lock
 from atlas_production.infrastructure.postgres_owner.model_routing import ModelRoutingReadModel
 from atlas_production.infrastructure.postgres_owner.processing_registry import (
     BeginPluginLifecycleIntentCommand,
@@ -61,8 +63,23 @@ class PostgresProcessingAdapter:
     a detached registry snapshot or a generic unit of work.
     """
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        profile_id_allocator: Callable[[], str] = lambda: uuid4().hex,
+        operation_lock_factory: (
+            Callable[[str], AbstractContextManager[None]] | None
+        ) = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.profile_id_allocator = profile_id_allocator
+        self.operation_lock_factory = operation_lock_factory or (
+            lambda owner_key: hold_owner_operation_lock(
+                self.session_factory,
+                owner_key=owner_key,
+            )
+        )
 
     @property
     def _reads(self) -> ProcessingRegistryReadModel:
@@ -285,16 +302,48 @@ class PostgresProcessingAdapter:
 
     def create_profile(self, actor, request):
         self._admin(actor)
-        operation, digest = "profile.create", self._digest("profile.create", request.model_dump())
-        intent = BeginProcessingProfileIntentCommand(self.session_factory).execute(request.idempotency_key, request.profile_id)
-        if (replay := self._replay(intent, operation, digest)) is not None: return replay
-        if intent.profile is not None:
-            raise ProcessingRegistryError("profile_exists", "processing.profile_already_exists", 409)
-        record = ProcessingProfile(request.profile_id, request.display_name, actor.actor_id, utc_now_iso())
-        result, status = asdict(record), 201
-        audit = self._audit("processing_profile.created", actor.actor_id, f"processing-profile:{record.profile_id}", "processing.profile_is_created", {"profile_id": record.profile_id})
-        FinalizeProcessingProfileCommand(self.session_factory).execute(FinalizeProcessingProfileInput((record,), (), self._idempotency(request.idempotency_key, operation, digest, result, status), (audit,)))
-        return result, status
+        operation = "profile.create"
+        digest = self._digest(operation, request.model_dump())
+        with self.operation_lock_factory(
+            f"processing-profile-operation:{request.idempotency_key}"
+        ):
+            intent = BeginProcessingProfileIntentCommand(
+                self.session_factory,
+                self.profile_id_allocator,
+            ).execute(request.idempotency_key, operation)
+            if (replay := self._replay(intent, operation, digest)) is not None:
+                return replay
+            if intent.allocated_profile_id is None:
+                raise RuntimeError("processing profile intent did not allocate an ID")
+            record = ProcessingProfile(
+                intent.allocated_profile_id,
+                request.display_name,
+                actor.actor_id,
+                utc_now_iso(),
+            )
+            result, status = asdict(record), 201
+            audit = self._audit(
+                "processing_profile.created",
+                actor.actor_id,
+                f"processing-profile:{record.profile_id}",
+                "processing.profile_is_created",
+                {"profile_id": record.profile_id},
+            )
+            FinalizeProcessingProfileCommand(self.session_factory).execute(
+                FinalizeProcessingProfileInput(
+                    (record,),
+                    (),
+                    self._idempotency(
+                        request.idempotency_key,
+                        operation,
+                        digest,
+                        result,
+                        status,
+                    ),
+                    (audit,),
+                )
+            )
+            return result, status
 
     def list_profiles(self, actor):
         self._admin(actor)
@@ -320,7 +369,7 @@ class PostgresProcessingAdapter:
     def create_revision(self, actor, profile_id: str, request, expected_revision: int):
         self._admin(actor)
         operation, digest = "profile.revise", self._digest("profile.revise", [profile_id, expected_revision, request.model_dump()])
-        intent = BeginProcessingProfileIntentCommand(self.session_factory).execute(request.idempotency_key, profile_id)
+        intent = BeginProcessingProfileIntentCommand(self.session_factory).execute(request.idempotency_key, operation, profile_id)
         if (replay := self._replay(intent, operation, digest)) is not None: return replay
         if intent.profile is None: raise ProcessingRegistryError("profile_not_found", "processing.profile_was_not_found", 404)
         current = max((item.revision for item in intent.revisions), default=0)
@@ -347,7 +396,7 @@ class PostgresProcessingAdapter:
     def activate_revision(self, actor, profile_id: str, revision: int, request):
         self._admin(actor)
         operation, digest = "profile.activate", self._digest("profile.activate", [profile_id, revision, request.model_dump()])
-        intent = BeginProcessingProfileIntentCommand(self.session_factory).execute(request.idempotency_key, profile_id)
+        intent = BeginProcessingProfileIntentCommand(self.session_factory).execute(request.idempotency_key, operation, profile_id)
         if (replay := self._replay(intent, operation, digest)) is not None: return replay
         selected = next((item for item in intent.revisions if item.revision == revision), None)
         if selected is None: raise ProcessingRegistryError("profile_revision_not_found", "processing.profile_revision_was_not_found", 404)

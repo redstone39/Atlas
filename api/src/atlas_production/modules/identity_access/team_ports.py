@@ -5,15 +5,22 @@ from typing import ContextManager, Protocol
 from atlas_production.shared.public import (
     AuditEventRecord,
 )
+from .api_models import TeamCreateRequest
 from .records import (
     TeamMembershipRecord,
     TeamRecord,
     UserRecord,
 )
-from .team_contracts import TeamAuditCommand
+from .team_contracts import TeamActionOutcome, TeamAuditCommand
 
 
 class TeamAccessRepository(Protocol):
+    def create_team_once(
+        self,
+        actor: UserRecord,
+        payload: TeamCreateRequest,
+    ) -> TeamActionOutcome: ...
+
     def team_mutation(
         self,
         team_id: str,

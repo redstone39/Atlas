@@ -16,7 +16,6 @@ class StrictMessageReferenceModel(MessageReferenceModel):
 
 
 class ProviderConnectionCreateRequest(StrictModel):
-    connection_id: str
     display_name: str
     provider_type: Literal["openai_compatible", "azure_openai", "anthropic"]
     endpoint_url: str
@@ -80,7 +79,6 @@ class ProviderModelDiscoveryResult(StrictMessageReferenceModel):
 
 
 class ModelRouteCreateRequest(StrictModel):
-    route_id: str
     display_name: str
     model_name: str
     connection_id: str

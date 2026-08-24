@@ -21,7 +21,6 @@ class PluginMutationRequest(IdempotentRequest):
 
 
 class ProfileCreateRequest(IdempotentRequest):
-    profile_id: str = Field(min_length=1)
     display_name: str = Field(min_length=1)
 
 

@@ -45,6 +45,7 @@ from .library_records import (
     DocumentLifecycleRequestInput,
 )
 from .upload_stream import (
+    document_upload_checksum,
     inspect_document_upload,
     upload_request_fingerprint,
     uploaded_chunks,
@@ -131,9 +132,13 @@ class DocumentLibraryApplication:
                 "audit-document-library-upload-rejected",
                 422,
             )
-        key = str(command.idempotency_key or "").strip() or (
-            f"upload-{self.new_id()[:10]}"
-        )
+        key = str(command.idempotency_key or "").strip()
+        if not key:
+            return self._error_failure(
+                "validation_error",
+                "document.upload_was_not_valid",
+                422,
+            )
         scope_type = str(command.scope_type or "").strip()
         scope_id = str(command.scope_id or "").strip()
         if scope_type not in {"team", "project"} or not scope_id:
@@ -201,6 +206,7 @@ class DocumentLibraryApplication:
                 filename=filename,
                 client_mime=command.content_type,
             )
+            checksum = document_upload_checksum(uploaded)
         except ArtifactStorageError as exc:
             return self._error_failure(
                 exc.error_code, exc.message_code, exc.status_code
@@ -211,17 +217,11 @@ class DocumentLibraryApplication:
                 exc.message_code,
                 413 if exc.error_code == "artifact_too_large" else 422,
             )
-        document_id = str(command.document_id or "").strip() or (
-            f"doc-{self.new_id()[:12]}"
+        description = (
+            self._normalize_description(str(command.description))
+            if command.description is not None
+            else None
         )
-        _existing, item = self._item(actor, session_token, document_id)
-        if item is not None:
-            return self._admin_failure(
-                key,
-                "document.identity_already_exists",
-                "audit-document-library-upload-rejected",
-                409,
-            )
         allow_download = str(command.allow_member_download or "").strip().lower() in {
             "1",
             "true",
@@ -229,13 +229,9 @@ class DocumentLibraryApplication:
             "on",
         }
         document = DocumentRecord(
-            document_id=document_id,
+            document_id="",
             title=title,
-            description=(
-                self._normalize_description(str(command.description))
-                if command.description is not None
-                else None
-            ),
+            description=description,
             source_digest="sha256:pending",
             searchable_projection="",
             intake_status="queued",
@@ -255,17 +251,19 @@ class DocumentLibraryApplication:
                 chunks=uploaded_chunks(uploaded),
                 request_fingerprint=upload_request_fingerprint(
                     {
-                        "document_id": document_id,
                         "filename": filename,
                         "owner": [scope_type, scope_id],
-                        "tags": [[tag.tag_type, tag.tag_id] for tag in tags],
+                        "tags": sorted(
+                            [tag.tag_type, tag.tag_id] for tag in tags
+                        ),
                         "allow_member_download": allow_download,
+                        "description": description,
                         "document_format": detected.document_format,
+                        "content_type": detected.canonical_mime,
                     },
-                    None,
+                    checksum,
                 ),
                 artifact_class="original_document",
-                logical_identity=f"document:{document_id}:original_document:{key}",
                 content_type=detected.canonical_mime,
                 document=document,
                 tag_refs=tags,
@@ -313,8 +311,9 @@ class DocumentLibraryApplication:
             return self._error_failure(
                 exc.error_code, exc.message_code, exc.status_code
             )
-        if result.publication.job is not None:
+        if result.publication.job is not None and not result.replayed:
             self.dispatch()
+        document_id = result.publication.version.document_id
         _projection_after, uploaded_item = self._item(
             actor, session_token, document_id
         )

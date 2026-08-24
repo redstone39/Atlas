@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Callable, Literal
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +20,8 @@ from atlas_production.infrastructure.postgres_owner.project import (
     ProjectAclChangeSet,
     ProjectAclRepository,
     ProjectAuthorizationConflict,
+    ProjectCreatePrepared,
+    ProjectCreateReplayConflict,
     ProjectCurrentnessConflict,
 )
 from atlas_production.infrastructure.postgres_owner.team import TeamRepository
@@ -29,7 +35,9 @@ from atlas_production.modules.identity_access.records import (
     TeamRecord,
     UserRecord,
 )
+from atlas_production.modules.project_governance.api_models import ProjectCreateRequest
 from atlas_production.modules.project_governance.contracts import (
+    ProjectActionOutcome,
     ProjectAuditCommand,
     ProjectGovernanceError,
 )
@@ -40,7 +48,7 @@ from atlas_production.modules.project_governance.records import ProjectRecord
 from atlas_production.modules.project_governance.service import (
     ProjectGovernanceService,
 )
-from atlas_production.shared.public import AuditEventRecord
+from atlas_production.shared.public import AdminActionResult, AuditEventRecord, utc_now_iso
 
 
 SessionFactory = Callable[[], Session]
@@ -64,15 +72,115 @@ class PostgresProjectGovernanceRepository(ProjectGovernanceRepository):
         self,
         session_factory: SessionFactory,
         acl_authority: ActionAwareAclAuthority | None = None,
+        id_allocator: Callable[[], str] | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.owner = ProjectAclRepository(session_factory)
+        self.owner = ProjectAclRepository(
+            session_factory,
+            id_allocator=id_allocator or (lambda: uuid4().hex),
+        )
         self.identity_owner = IdentityRepository(session_factory)
         self.team_owner = TeamRepository(session_factory)
         self.acl_authority = acl_authority or ActionAwareAclAuthority(session_factory)
         self._buffer: ContextVar[_ProjectMutationBuffer | None] = ContextVar(
             f"atlas_postgres_project_buffer_{id(self)}",
             default=None,
+        )
+
+    def create_project_once(
+        self,
+        actor: UserRecord,
+        payload: ProjectCreateRequest,
+    ) -> ProjectActionOutcome:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "name": payload.name,
+                    "policy_profile_id": payload.policy_profile_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+        def prepare(project_id: str) -> ProjectCreatePrepared:
+            project = ProjectRecord(
+                project_id=project_id,
+                name=payload.name,
+                policy_profile_id=payload.policy_profile_id,
+                status="active",
+            )
+            grant = PermissionGrantRecord(
+                grant_id=ProjectGovernanceService.project_access_grant_id(
+                    project_id,
+                    actor.actor_type,
+                    actor.actor_id,
+                ),
+                project_id=project_id,
+                subject_type=actor.actor_type,
+                subject_id=actor.actor_id,
+                role="admin",
+                effect="allow",
+                status="active",
+                created_at=utc_now_iso(),
+            )
+            audit = build_audit_event(
+                event_type="project_created",
+                actor_id=actor.actor_id,
+                target_ref=f"project:{project_id}",
+                project_id=project_id,
+                message_code="project.is_ready_for_membership_setup",
+                metadata={"policy_profile_id": payload.policy_profile_id},
+            )
+            result = AdminActionResult(
+                request_id=payload.idempotency_key,
+                status="applied",
+                target_ref=f"project:{project_id}",
+                message_code="project.is_ready_for_membership_setup",
+                audit_event_ref=audit.event_id,
+            )
+            return ProjectCreatePrepared(
+                target_ref=f"project:{project_id}",
+                response_json=result.model_dump_json(),
+                change_set=ProjectAclChangeSet(
+                    projects=(project,),
+                    expected_projects=((project_id, None),),
+                    grants=(grant,),
+                    expected_grants=((grant.grant_id, None),),
+                    audit_events=(audit,),
+                    authorization_actor_id=actor.actor_id,
+                    authorization_requires_system_admin=True,
+                ),
+            )
+
+        try:
+            receipt = self.owner.create_once(
+                scope_actor_id=actor.actor_id,
+                idempotency_key=payload.idempotency_key,
+                request_fingerprint=fingerprint,
+                prepare=prepare,
+            )
+        except ProjectCreateReplayConflict as exc:
+            raise ProjectGovernanceError(
+                "idempotency_conflict",
+                "request.idempotency_key_was_already_used_for_a_different_request",
+                409,
+            ) from exc
+        except ProjectAuthorizationConflict as exc:
+            raise ProjectGovernanceError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+            ) from exc
+        except ProjectCurrentnessConflict as exc:
+            raise ProjectGovernanceError(
+                "idempotency_conflict",
+                "project.already_exists",
+                409,
+            ) from exc
+        return ProjectActionOutcome(
+            result=AdminActionResult.model_validate_json(receipt.response_json),
+            success_status_code=200 if receipt.replayed else 201,
         )
 
     def get_project(self, project_id: str) -> ProjectRecord | None:
@@ -333,9 +441,14 @@ def build_postgres_project_governance(
     directory_identity: ScopedDirectoryIdentityCapability,
     directory_import_commit: ScopedDirectoryImportCommitPort,
     acl_authority: ActionAwareAclAuthority | None = None,
+    id_allocator: Callable[[], str] | None = None,
 ) -> ProjectGovernanceService:
     return ProjectGovernanceService(
-        PostgresProjectGovernanceRepository(session_factory, acl_authority),
+        PostgresProjectGovernanceRepository(
+            session_factory,
+            acl_authority,
+            id_allocator,
+        ),
         directory_identity,
         directory_import_commit,
     )

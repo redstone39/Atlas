@@ -195,6 +195,13 @@ class DirectoryFilterValidator(Protocol):
 
 
 class DirectoryRepository(IdentityAccessRepository, Protocol):
+    def create_directory_connection_once(
+        self,
+        actor: UserRecord,
+        payload,
+        prepare_material,
+    ): ...
+
     def directory_mutation(
         self,
         owner_key: str,

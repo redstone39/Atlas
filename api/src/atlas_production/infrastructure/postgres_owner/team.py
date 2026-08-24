@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.persistence.identity_access import (
+    AtlasIdentityCreateReceiptRow,
     AtlasTeamMembershipRow,
     AtlasTeamRow,
     AtlasUserRow,
@@ -84,6 +86,23 @@ class TeamMembershipWriter:
 
 
 @dataclass(frozen=True, slots=True)
+class TeamCreatePrepared:
+    target_ref: str
+    response_json: str
+    change_set: "TeamGovernanceChangeSet"
+
+
+@dataclass(frozen=True, slots=True)
+class TeamCreateReceipt:
+    target_ref: str
+    response_json: str
+    replayed: bool
+
+
+class TeamCreateReplayConflict(RuntimeError):
+    pass
+
+@dataclass(frozen=True, slots=True)
 class TeamGovernanceChangeSet:
     teams: tuple[TeamRecord, ...] = ()
     expected_teams: tuple[tuple[str, TeamRecord | None], ...] = ()
@@ -119,6 +138,117 @@ class TeamCurrentnessConflict(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class TeamRepository:
     session_factory: SessionFactory
+    id_allocator: Callable[[], str] = field(
+        default_factory=lambda: lambda: uuid4().hex
+    )
+
+    def create_once(
+        self,
+        *,
+        scope_actor_id: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        prepare: Callable[[str], TeamCreatePrepared],
+    ) -> TeamCreateReceipt:
+        receipt_lock = (
+            f"team:create:{scope_actor_id}:create_team:{idempotency_key}"
+        )
+        session = self.session_factory()
+        with session:
+            try:
+                acquire_owner_locks(
+                    session,
+                    domain_keys=("team:hierarchy-control",),
+                    identity_keys=(receipt_lock,),
+                )
+                row = session.scalar(
+                    select(AtlasIdentityCreateReceiptRow)
+                    .where(
+                        AtlasIdentityCreateReceiptRow.scope_actor_id
+                        == scope_actor_id,
+                        AtlasIdentityCreateReceiptRow.operation == "create_team",
+                        AtlasIdentityCreateReceiptRow.idempotency_key
+                        == idempotency_key,
+                    )
+                    .with_for_update()
+                )
+                if row is not None:
+                    if row.request_fingerprint != request_fingerprint:
+                        raise TeamCreateReplayConflict(
+                            "Team create idempotency key was reused"
+                        )
+                    receipt = TeamCreateReceipt(
+                        target_ref=row.target_ref,
+                        response_json=row.response_json,
+                        replayed=True,
+                    )
+                    session.rollback()
+                    return receipt
+                team_id = f"team-{self.id_allocator()}"
+                prepared = prepare(team_id)
+                change_set = prepared.change_set
+                acquire_owner_locks(
+                    session,
+                    domain_keys=(
+                        *(
+                            ("team:hierarchy-control",)
+                            if change_set.protect_hierarchy
+                            else ()
+                        ),
+                        *(
+                            ("team:membership-control",)
+                            if change_set.memberships
+                            else ()
+                        ),
+                    ),
+                    identity_keys=(
+                        receipt_lock,
+                        *(
+                            identity_actor_owner_key(actor_id)
+                            for actor_id in (
+                                *change_set.authorization_actor_ids,
+                                *change_set.current_actor_ids,
+                            )
+                        ),
+                        *(team_owner_key(team.team_id) for team in change_set.teams),
+                    ),
+                )
+                self._validate_currentness(session, change_set)
+                self._validate_actor_currentness(session, change_set)
+                if change_set.protect_hierarchy:
+                    self._validate_hierarchy(session, change_set.teams)
+                self._validate_authorization(session, change_set)
+                self._validate_direct_admins(
+                    session,
+                    change_set.memberships,
+                    change_set.protected_admin_team_ids,
+                )
+                for team in change_set.teams:
+                    session.merge(_team_row(team))
+                writer = TeamMembershipWriter(session)
+                for membership in change_set.memberships:
+                    writer.merge(membership)
+                AuditEventWriter(session).append_many(change_set.audit_events)
+                row = AtlasIdentityCreateReceiptRow(
+                    receipt_id=f"identity-create-{uuid4().hex}",
+                    scope_actor_id=scope_actor_id,
+                    operation="create_team",
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    target_ref=prepared.target_ref,
+                    response_json=prepared.response_json,
+                    created_at=prepared.change_set.teams[0].created_at,
+                )
+                session.add(row)
+                session.commit()
+                return TeamCreateReceipt(
+                    target_ref=prepared.target_ref,
+                    response_json=prepared.response_json,
+                    replayed=False,
+                )
+            except Exception:
+                session.rollback()
+                raise
 
     def team_governance(self, change_set: TeamGovernanceChangeSet) -> None:
         session = self.session_factory()
@@ -381,6 +511,9 @@ class TeamRepository:
 
 __all__ = [
     "TeamAuthorizationConflict",
+    "TeamCreatePrepared",
+    "TeamCreateReceipt",
+    "TeamCreateReplayConflict",
     "TeamCurrentnessConflict",
     "TeamGovernanceChangeSet",
     "TeamInvariantViolation",

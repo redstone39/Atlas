@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from secrets import token_urlsafe
+from uuid import uuid4
 
 from atlas_production.shared.public import (
     AdminActionResult,
@@ -130,6 +131,21 @@ class IdentityAccessService:
         payload: UserInviteCreateRequest,
     ) -> UserInviteCreateResult:
         normalized_email = canonical_identifier(payload.email)
+        current_actor = self._require_actor(actor)
+        self._validate_invite_scope(current_actor, payload)
+        create_once = getattr(self.repository, "create_invite_once", None)
+        if create_once is not None:
+            cipher = (
+                self.directory_identity.cipher
+                if self.directory_identity is not None
+                else None
+            )
+            return create_once(
+                current_actor,
+                payload,
+                normalized_email,
+                cipher,
+            )
         email_owner = sha256(normalized_email.encode("utf-8")).hexdigest()
         return self._run_identity_mutation(
             self._identity_mutation_context(
@@ -169,7 +185,7 @@ class IdentityAccessService:
                 409,
             )
 
-        actor_id = existing_user.actor_id if existing_user else self._stable_actor_id(normalized_email)
+        actor_id = existing_user.actor_id if existing_user else f"user-{uuid4().hex}"
         if not existing_user:
             self.repository.put_user(
                 UserRecord(
@@ -710,9 +726,6 @@ class IdentityAccessService:
             scope_role=invite.scope_role,
         )
 
-    @staticmethod
-    def _stable_actor_id(email: str) -> str:
-        return f"user-{sha256(email.encode('utf-8')).hexdigest()[:12]}"
 
     @staticmethod
     def _would_remove_active_admin(

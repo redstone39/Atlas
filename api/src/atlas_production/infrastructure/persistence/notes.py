@@ -13,6 +13,43 @@ from .base import OrmBase
 OWNER = "notes"
 
 
+class AtlasNoteCreateReceiptRow(OrmBase):
+    __tablename__ = "atlas_note_create_receipts"
+
+    receipt_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    operation: Mapped[str] = mapped_column(String(30), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    canonical_response: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "operation IN ('note_create','category_create')",
+            name="ck_atlas_note_create_receipt_operation",
+        ),
+        CheckConstraint(
+            "scope_type IN ('project','team')",
+            name="ck_atlas_note_create_receipt_scope_type",
+        ),
+        CheckConstraint(
+            "request_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_atlas_note_create_receipt_fingerprint",
+        ),
+        UniqueConstraint(
+            "actor_id",
+            "operation",
+            "scope_type",
+            "scope_id",
+            "idempotency_key",
+            name="uq_atlas_note_create_receipt_identity",
+        ),
+    )
+
 class AtlasNoteCategoryRow(OrmBase):
     __tablename__ = "atlas_note_categories"
 

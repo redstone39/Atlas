@@ -81,9 +81,35 @@ class DirectoryConnectionConfig(StrictIdentityModel):
 
 
 
-class DirectoryConnectionCreateRequest(DirectoryConnectionConfig):
+class DirectoryConnectionCreateRequest(StrictIdentityModel):
+    display_name: str = Field(min_length=1, max_length=200)
+    priority: int = Field(ge=0)
+    provider_type: Literal["active_directory", "ldap"]
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(ge=1, le=65535)
+    tls_mode: Literal["ldaps", "start_tls", "plain"]
+    connect_timeout_seconds: int = Field(ge=1, le=30)
+    operation_timeout_seconds: int = Field(ge=1, le=30)
+    bind_dn: str = Field(min_length=1, max_length=1000)
+    user_base_dn: str = Field(min_length=1, max_length=1000)
+    user_object_filter: str = Field(min_length=1, max_length=2000)
+    login_attribute: str = Field(min_length=1, max_length=200)
+    stable_id_attribute: str = Field(min_length=1, max_length=200)
+    display_name_attribute: str = Field(min_length=1, max_length=200)
+    email_attribute: str = Field(min_length=1, max_length=200)
+    groups_attribute: str = Field(min_length=1, max_length=200)
+    department_attribute: str = Field(min_length=1, max_length=200)
+    title_attribute: str = Field(min_length=1, max_length=200)
+    employee_id_attribute: str = Field(min_length=1, max_length=200)
+    enabled: bool
     bind_password: SecretStr = Field(min_length=1)
     custom_ca_pem: SecretStr | None = Field(default=None, min_length=1)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_transport(self) -> "DirectoryConnectionCreateRequest":
+        validate_directory_transport(self.provider_type, self.tls_mode)
+        return self
 
 
 class DirectoryConnectionUpdateRequest(StrictIdentityModel):
@@ -294,10 +320,9 @@ class InviteAcceptResult(MessageReferenceModel):
     audit_event_ref: str
 
 
-class AgentUserCreateRequest(BaseModel):
-    actor_id: str
-    display_name: str
-    idempotency_key: str
+class AgentUserCreateRequest(StrictIdentityModel):
+    display_name: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 class AgentUserUpdateRequest(BaseModel):
@@ -387,12 +412,11 @@ class TeamMemberCandidatesResult(BaseModel):
     users: list[TeamMemberCandidate]
 
 
-class TeamCreateRequest(BaseModel):
-    team_id: str
-    name: str
+class TeamCreateRequest(StrictIdentityModel):
+    name: str = Field(min_length=1, max_length=200)
     parent_team_id: str | None = None
     inherit_parent_documents: bool = True
-    idempotency_key: str
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 class TeamUpdateRequest(BaseModel):

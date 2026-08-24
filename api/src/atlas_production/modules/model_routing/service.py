@@ -70,7 +70,7 @@ class ModelRoutingService:
         *,
         idempotency_key: str,
         operation: str,
-        target_ref: str,
+        target_ref: str | None,
         response_model: type[BaseModel],
         payload: BaseModel,
     ) -> tuple[BaseModel, int] | None:
@@ -184,9 +184,8 @@ class ModelRoutingService:
         payload: ProviderConnectionCreateRequest,
     ) -> ModelRouteOutcome:
         actor = self._require_admin(actor)
-        connection_id = payload.connection_id.strip()
         api_key = payload.api_key.get_secret_value()
-        if not connection_id or not payload.display_name.strip() or not api_key:
+        if not payload.display_name.strip() or not api_key:
             self._invalid("provider.connection_fields_are_invalid")
         try:
             endpoint, api_version = normalize_provider_connection(
@@ -197,25 +196,20 @@ class ModelRoutingService:
         except ProviderError as exc:
             self._provider_error(exc)
         operation = "provider_connection_create"
-        target_ref = f"provider-connection:{connection_id}"
         with self.repository.mutation_scope(
-            self._lock_ids([connection_id], payload.idempotency_key)
+            self._lock_ids([], payload.idempotency_key)
         ):
             replayed = self._replayed(
                 idempotency_key=payload.idempotency_key,
                 operation=operation,
-                target_ref=target_ref,
+                target_ref=None,
                 response_model=ProviderConnectionStatus,
                 payload=payload,
             )
             if replayed is not None:
                 return ModelRouteOutcome(replayed[0], replayed[1])
-            if self.repository.get_connection(connection_id):
-                raise ModelRoutingError(
-                    "provider_connection_exists",
-                    'provider.connection_already_exists',
-                    409,
-                )
+            connection_id = self.repository.next_connection_id()
+            target_ref = f"provider-connection:{connection_id}"
             now = utc_now_iso()
             connection = ProviderConnectionRecord(
                 connection_id=connection_id,
@@ -655,28 +649,23 @@ class ModelRoutingService:
     ) -> ModelRouteOutcome:
         actor = self._require_admin(actor)
         operation = "model_route_create"
-        target_ref = f"model-route:{payload.route_id}"
         with self.repository.mutation_scope(
             self._lock_ids([payload.connection_id], payload.idempotency_key)
         ):
             replayed = self._replayed(
                 idempotency_key=payload.idempotency_key,
                 operation=operation,
-                target_ref=target_ref,
+                target_ref=None,
                 response_model=ModelRouteStatus,
                 payload=payload,
             )
             if replayed is not None:
                 return ModelRouteOutcome(replayed[0], replayed[1])
-            if self.repository.get_route(payload.route_id):
-                raise ModelRoutingError(
-                    "model_route_exists",
-                    'model.route_already_exists',
-                    409,
-                )
+            route_id = self.repository.next_route_id()
+            target_ref = f"model-route:{route_id}"
             connection = self._connection(payload.connection_id)
             route = ModelRouteRecord(
-                route_id=payload.route_id,
+                route_id=route_id,
                 display_name=payload.display_name,
                 provider_type=connection.provider_type,
                 model_name=payload.model_name,

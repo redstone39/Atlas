@@ -11,11 +11,18 @@ from atlas_production.modules.identity_access.records import (
 from atlas_production.shared.public import (
     AuditEventRecord,
 )
+from .api_models import ProjectCreateRequest
+from .contracts import ProjectActionOutcome, ProjectAuditCommand
 from .records import ProjectRecord
-from .contracts import ProjectAuditCommand
 
 
 class ProjectGovernanceRepository(Protocol):
+    def create_project_once(
+        self,
+        actor: UserRecord,
+        payload: ProjectCreateRequest,
+    ) -> ProjectActionOutcome: ...
+
     def get_project(self, project_id: str) -> ProjectRecord | None: ...
 
     def list_projects(self) -> list[ProjectRecord]: ...

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from uuid import uuid4
 from atlas_production.shared.public import (
     AdminActionResult,
 )
@@ -54,26 +55,12 @@ class AgentAccessService:
         payload: AgentUserCreateRequest,
     ) -> AgentCreateOutcome:
         actor = self._require_system_admin(actor)
-        if self.repository.get_user(payload.actor_id):
-            audit = self.repository.append_audit(
-                AgentAuditCommand(
-                    event_type="agent_user_rejected",
-                    actor_id=actor.actor_id,
-                    target_ref=f"agent:{payload.actor_id}",
-                    message_code='agent.already_exists',
-                    metadata={},
-                )
-            )
-            raise AgentAccessError(
-                "admin_action_rejected",
-                'agent.already_exists',
-                409,
-                audit.event_id,
-                payload.idempotency_key,
-                f"agent:{payload.actor_id}",
-            )
+        create_once = getattr(self.repository, "create_agent_once", None)
+        if create_once is not None:
+            return create_once(actor, payload)
+        actor_id = f"agent-{uuid4().hex}"
         agent = UserRecord(
-            actor_id=payload.actor_id,
+            actor_id=actor_id,
             display_name=payload.display_name,
             email=None,
             system_role="agent",
@@ -86,9 +73,9 @@ class AgentAccessService:
             AgentAuditCommand(
                 event_type="agent_user_created",
                 actor_id=actor.actor_id,
-                target_ref=f"agent:{payload.actor_id}",
-                message_code='agent.user_is_ready_for_token_issue',
-                metadata={"agent_actor_id": payload.actor_id},
+                target_ref=f"agent:{actor_id}",
+                message_code="agent.user_is_ready_for_token_issue",
+                metadata={"agent_actor_id": actor_id},
             )
         )
         return AgentCreateOutcome(
@@ -96,7 +83,7 @@ class AgentAccessService:
                 request_id=payload.idempotency_key,
                 status="applied",
                 agent=self._agent_status(agent),
-                message_code='agent.user_is_ready_for_token_issue',
+                message_code="agent.user_is_ready_for_token_issue",
                 audit_event_ref=audit.event_id,
             ),
             201,

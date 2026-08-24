@@ -478,63 +478,7 @@ class ProjectGovernanceService:
         payload: ProjectCreateRequest,
     ) -> ProjectActionOutcome:
         actor = self._require_system_admin(actor)
-        if self.repository.get_project(payload.project_id):
-            self._reject(
-                "project.already_exists",
-                "audit-p0-admin-project-rejected",
-                409,
-                request_id=payload.idempotency_key,
-            )
-        self.repository.put_project(
-            ProjectRecord(
-                project_id=payload.project_id,
-                name=payload.name,
-                policy_profile_id=payload.policy_profile_id,
-                status="active",
-            ),
-            expected_project=None,
-            authorization="system_admin",
-        )
-        creator_grant_id = self.project_access_grant_id(
-            payload.project_id,
-            actor.actor_type,
-            actor.actor_id,
-        )
-        self.repository.put_grant(
-            PermissionGrantRecord(
-                grant_id=creator_grant_id,
-                project_id=payload.project_id,
-                subject_type=actor.actor_type,
-                subject_id=actor.actor_id,
-                role="admin",
-                effect="allow",
-                status="active",
-                created_at=utc_now_iso(),
-            )
-        )
-        audit = self.repository.append_audit(
-            ProjectAuditCommand(
-                event_type="project_created",
-                actor_id=actor.actor_id,
-                target_ref=f"project:{payload.project_id}",
-                project_id=payload.project_id,
-                message_code='project.is_ready_for_membership_setup',
-                metadata={
-                    "policy_profile_id": payload.policy_profile_id,
-                },
-            )
-        )
-        self.repository.persist()
-        return ProjectActionOutcome(
-            AdminActionResult(
-                request_id=payload.idempotency_key,
-                status="applied",
-                target_ref=f"project:{payload.project_id}",
-                message_code='project.is_ready_for_membership_setup',
-                audit_event_ref=audit.event_id,
-            ),
-            201,
-        )
+        return self.repository.create_project_once(actor, payload)
 
     def update_project(
         self,

@@ -96,11 +96,15 @@ class ModelRoutingRepository(Protocol):
         self,
         idempotency_key: str,
         operation: str,
-        target_ref: str,
+        target_ref: str | None,
         request_fingerprint: str,
     ) -> ModelRoutingReplayRecord | None: ...
 
     def fingerprint_request(self, canonical_payload: bytes) -> str: ...
+    def next_connection_id(self) -> str: ...
+
+    def next_route_id(self) -> str: ...
+
 
     def get_connection(self, connection_id: str) -> ProviderConnectionRecord | None: ...
 

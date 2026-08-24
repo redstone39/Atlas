@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .api_models import AgentUserCreateRequest
 from .records import (
     AgentTokenRecord,
     UserRecord,
@@ -9,10 +10,20 @@ from .records import (
 from atlas_production.shared.public import (
     AuditEventRecord,
 )
-from .agent_contracts import AgentAuditCommand, AgentProjectGrantView
+from .agent_contracts import (
+    AgentAuditCommand,
+    AgentCreateOutcome,
+    AgentProjectGrantView,
+)
 
 
 class AgentAccessRepository(Protocol):
+    def create_agent_once(
+        self,
+        actor: UserRecord,
+        payload: AgentUserCreateRequest,
+    ) -> AgentCreateOutcome: ...
+
     def get_user(self, actor_id: str) -> UserRecord | None: ...
 
     def list_users(self) -> list[UserRecord]: ...

@@ -378,7 +378,7 @@ class _ModelRoutingCommandCoordinator:
                 for write in change_set.routes
             ),
             *(
-                f"model-routing:replay:{record.idempotency_key}"
+                f"model-routing:replay:{record.operation}:{record.idempotency_key}"
                 for record in change_set.replays
             ),
             *(
@@ -507,13 +507,14 @@ class _ModelRoutingCommandCoordinator:
                 select(AtlasModelRoutingReplayRow)
                 .where(
                     AtlasModelRoutingReplayRow.idempotency_key
-                    == replay.idempotency_key
+                    == replay.idempotency_key,
+                    AtlasModelRoutingReplayRow.operation == replay.operation,
                 )
                 .with_for_update()
             )
             if current is not None:
                 raise ModelRoutingCurrentnessConflict(
-                    "model-routing idempotency key already exists"
+                    "model-routing operation idempotency key already exists"
                 )
 
         for write in change_set.invocations:
@@ -733,12 +734,14 @@ class ModelRoutingReadModel:
     def get_replay(
         self,
         idempotency_key: str,
+        operation: str,
     ) -> ModelRoutingReplayRecord | None:
         with self.session_factory() as session:
             row = session.scalar(
                 select(AtlasModelRoutingReplayRow).where(
                     AtlasModelRoutingReplayRow.idempotency_key
-                    == idempotency_key
+                    == idempotency_key,
+                    AtlasModelRoutingReplayRow.operation == operation,
                 )
             )
             return (
@@ -815,7 +818,7 @@ class BeginProviderConnectionIntentCommand:
             if (connection := reader.get_connection(connection_id)) is not None
         )
         return ProviderConnectionIntent(
-            replay=reader.get_replay(idempotency_key),
+            replay=None,
             connections=connections,
             secrets=tuple(
                 secret
@@ -848,7 +851,7 @@ class BeginRouteConfigurationIntentCommand:
         connection = reader.get_connection(route.connection_id) if route else None
         secret = reader.get_secret(route.connection_id) if route else None
         return RouteConfigurationIntent(
-            reader.get_replay(idempotency_key), route, connection, secret
+            None, route, connection, secret
         )
 
 
@@ -871,8 +874,9 @@ class BeginDefaultRouteIntentCommand:
         purpose: Literal["text", "vision"],
     ) -> DefaultRouteIntent:
         reader = ModelRoutingReadModel(self.session_factory)
+        operation = f"model_route_default_{purpose}"
         return DefaultRouteIntent(
-            reader.get_replay(idempotency_key),
+            reader.get_replay(idempotency_key, operation),
             reader.get_route(route_id),
             reader.default_route(purpose),
             purpose,

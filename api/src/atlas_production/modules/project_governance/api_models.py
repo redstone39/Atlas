@@ -3,7 +3,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class ProjectCreateRequest(BaseModel):
-    project_id: str
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     policy_profile_id: str
     idempotency_key: str

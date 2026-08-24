@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from time import sleep
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -89,9 +91,44 @@ def acquire_mixed_owner_locks(
         )
 
 
+@contextmanager
+def hold_owner_operation_lock(
+    session_factory: Callable[[], Session],
+    *,
+    owner_key: str,
+) -> Iterator[None]:
+    """Serialize detached work without a transaction or blocked pool waiter."""
+
+    lock_key = advisory_lock_key(owner_key)
+    with session_factory() as discovery:
+        bind = discovery.get_bind()
+    while True:
+        with bind.connect() as connection:
+            acquired = bool(
+                connection.scalar(
+                    text("SELECT pg_try_advisory_lock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
+            )
+            connection.commit()
+            if not acquired:
+                sleep(0.01)
+                continue
+            try:
+                yield
+            finally:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
+                connection.commit()
+            return
+
+
 __all__ = [
     "acquire_mixed_owner_locks",
     "acquire_owner_locks",
     "acquire_shared_owner_locks",
     "advisory_lock_key",
+    "hold_owner_operation_lock",
 ]

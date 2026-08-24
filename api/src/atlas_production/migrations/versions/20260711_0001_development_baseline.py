@@ -475,7 +475,77 @@ def upgrade() -> None:
     sa.Column('response_payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
     sa.Column('status_code', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.String(), nullable=False),
-    sa.PrimaryKeyConstraint('idempotency_key')
+    sa.PrimaryKeyConstraint('idempotency_key', 'operation')
+    )
+    op.create_table('atlas_identity_create_receipts',
+    sa.Column('receipt_id', sa.String(), nullable=False),
+    sa.Column('scope_actor_id', sa.String(), nullable=False),
+    sa.Column('operation', sa.String(), nullable=False),
+    sa.Column('idempotency_key', sa.String(), nullable=False),
+    sa.Column('request_fingerprint', sa.String(), nullable=False),
+    sa.Column('target_ref', sa.String(), nullable=False),
+    sa.Column('response_json', sa.Text(), nullable=False),
+    sa.Column('secret_ciphertext', sa.Text(), nullable=True),
+    sa.Column('secret_nonce', sa.Text(), nullable=True),
+    sa.Column('secret_key_id', sa.String(), nullable=True),
+    sa.Column('secret_version', sa.Integer(), nullable=True),
+    sa.Column('secret_algorithm', sa.String(), nullable=True),
+    sa.Column('secret_storage_backend', sa.String(), nullable=True),
+    sa.Column('created_at', sa.String(), nullable=False),
+    sa.PrimaryKeyConstraint('receipt_id'),
+    sa.UniqueConstraint('scope_actor_id', 'operation', 'idempotency_key', name='uq_atlas_identity_create_receipt_scope_operation_key')
+    )
+    op.create_index(op.f('ix_atlas_identity_create_receipts_scope_actor_id'), 'atlas_identity_create_receipts', ['scope_actor_id'], unique=False)
+    op.create_table('atlas_project_create_receipts',
+    sa.Column('receipt_id', sa.String(), nullable=False),
+    sa.Column('scope_actor_id', sa.String(), nullable=False),
+    sa.Column('operation', sa.String(), nullable=False),
+    sa.Column('idempotency_key', sa.String(), nullable=False),
+    sa.Column('request_fingerprint', sa.String(), nullable=False),
+    sa.Column('target_ref', sa.String(), nullable=False),
+    sa.Column('response_json', sa.Text(), nullable=False),
+    sa.Column('created_at', sa.String(), nullable=False),
+    sa.PrimaryKeyConstraint('receipt_id'),
+    sa.UniqueConstraint('scope_actor_id', 'operation', 'idempotency_key', name='uq_atlas_project_create_receipt_scope_operation_key')
+    )
+    op.create_index(op.f('ix_atlas_project_create_receipts_scope_actor_id'), 'atlas_project_create_receipts', ['scope_actor_id'], unique=False)
+    op.create_table('atlas_document_upload_intents',
+    sa.Column('actor_id', sa.String(), nullable=False),
+    sa.Column('scope_type', sa.String(), nullable=False),
+    sa.Column('scope_id', sa.String(), nullable=False),
+    sa.Column('operation', sa.String(), nullable=False),
+    sa.Column('idempotency_key', sa.String(), nullable=False),
+    sa.Column('request_fingerprint', sa.String(), nullable=False),
+    sa.Column('document_id', sa.String(), nullable=False),
+    sa.Column('status', sa.String(), nullable=False),
+    sa.Column('document_version_id', sa.String(), nullable=True),
+    sa.Column('artifact_id', sa.String(), nullable=True),
+    sa.Column('job_id', sa.String(), nullable=True),
+    sa.Column('audit_event_id', sa.String(), nullable=True),
+    sa.Column('created_at', sa.String(), nullable=False),
+    sa.Column('completed_at', sa.String(), nullable=True),
+    sa.CheckConstraint("scope_type IN ('team','project')", name='ck_atlas_document_upload_intent_scope'),
+    sa.CheckConstraint("status IN ('allocated','completed')", name='ck_atlas_document_upload_intent_status'),
+    sa.CheckConstraint("(status = 'allocated' AND document_version_id IS NULL AND artifact_id IS NULL AND audit_event_id IS NULL AND completed_at IS NULL) OR (status = 'completed' AND document_version_id IS NOT NULL AND artifact_id IS NOT NULL AND audit_event_id IS NOT NULL AND completed_at IS NOT NULL)", name='ck_atlas_document_upload_intent_result'),
+    sa.PrimaryKeyConstraint('actor_id', 'scope_type', 'scope_id', 'operation', 'idempotency_key'),
+    sa.UniqueConstraint('document_id')
+    )
+    op.create_table('atlas_note_create_receipts',
+    sa.Column('receipt_id', sa.String(length=200), nullable=False),
+    sa.Column('actor_id', sa.String(length=200), nullable=False),
+    sa.Column('operation', sa.String(length=30), nullable=False),
+    sa.Column('scope_type', sa.String(length=20), nullable=False),
+    sa.Column('scope_id', sa.String(length=200), nullable=False),
+    sa.Column('idempotency_key', sa.String(length=200), nullable=False),
+    sa.Column('request_fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('target_ref', sa.String(length=200), nullable=False),
+    sa.Column('canonical_response', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("operation IN ('note_create','category_create')", name='ck_atlas_note_create_receipt_operation'),
+    sa.CheckConstraint("scope_type IN ('project','team')", name='ck_atlas_note_create_receipt_scope_type'),
+    sa.CheckConstraint("request_fingerprint ~ '^[0-9a-f]{64}$'", name='ck_atlas_note_create_receipt_fingerprint'),
+    sa.PrimaryKeyConstraint('receipt_id'),
+    sa.UniqueConstraint('actor_id', 'operation', 'scope_type', 'scope_id', 'idempotency_key', name='uq_atlas_note_create_receipt_scope_operation_key')
     )
     op.create_table('atlas_parser_adapter_invocations',
     sa.Column('id', sa.String(), nullable=False),
@@ -1730,6 +1800,12 @@ def downgrade() -> None:
     bind = op.get_bind()
     for table in reversed(_atr020_tables()):
         table.drop(bind=bind, checkfirst=False)
+    op.drop_table('atlas_note_create_receipts')
+    op.drop_table('atlas_document_upload_intents')
+    op.drop_index(op.f('ix_atlas_project_create_receipts_scope_actor_id'), table_name='atlas_project_create_receipts')
+    op.drop_table('atlas_project_create_receipts')
+    op.drop_index(op.f('ix_atlas_identity_create_receipts_scope_actor_id'), table_name='atlas_identity_create_receipts')
+    op.drop_table('atlas_identity_create_receipts')
     op.execute("DROP TRIGGER IF EXISTS atlas_note_attachments_immutable ON atlas_note_attachments")
     op.execute("DROP TRIGGER IF EXISTS atlas_note_categories_no_delete ON atlas_note_categories")
     op.execute("DROP TRIGGER IF EXISTS atlas_notes_no_delete ON atlas_notes")

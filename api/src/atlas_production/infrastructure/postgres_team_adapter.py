@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
+from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from atlas_production.infrastructure.postgres_audit_adapter import (
@@ -14,11 +17,14 @@ from atlas_production.infrastructure.postgres_audit_adapter import (
 from atlas_production.infrastructure.postgres_owner.identity import IdentityRepository
 from atlas_production.infrastructure.postgres_owner.team import (
     TeamAuthorizationConflict,
+    TeamCreatePrepared,
+    TeamCreateReplayConflict,
     TeamCurrentnessConflict,
     TeamGovernanceChangeSet,
     TeamInvariantViolation,
     TeamRepository,
 )
+from atlas_production.modules.identity_access.api_models import TeamCreateRequest
 from atlas_production.modules.identity_access.records import (
     TeamMembershipRecord,
     TeamRecord,
@@ -26,6 +32,7 @@ from atlas_production.modules.identity_access.records import (
 )
 from atlas_production.modules.identity_access.team_contracts import (
     TeamAccessError,
+    TeamActionOutcome,
     TeamAuditCommand,
 )
 from atlas_production.modules.identity_access.team_ports import TeamAccessRepository
@@ -35,7 +42,11 @@ from atlas_production.modules.identity_access.directory_ports import (
 )
 from atlas_production.modules.identity_access.team_service import TeamAccessService
 from atlas_production.rbac import TEAM_ROLE_ORDER
-from atlas_production.shared.public import AuditEventRecord
+from atlas_production.shared.public import (
+    AdminActionResult,
+    AuditEventRecord,
+    utc_now_iso,
+)
 
 
 SessionFactory = Callable[[], Session]
@@ -58,13 +69,117 @@ class _TeamMutationBuffer:
 
 
 class PostgresTeamAccessRepository(TeamAccessRepository):
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        id_allocator: Callable[[], str] | None = None,
+    ) -> None:
         self.session_factory = session_factory
-        self.owner = TeamRepository(session_factory)
+        self.owner = TeamRepository(
+            session_factory,
+            id_allocator=id_allocator or (lambda: uuid4().hex),
+        )
         self.identity_owner = IdentityRepository(session_factory)
         self._buffer: ContextVar[_TeamMutationBuffer | None] = ContextVar(
             f"atlas_postgres_team_buffer_{id(self)}",
             default=None,
+        )
+
+    def create_team_once(
+        self,
+        actor: UserRecord,
+        payload: TeamCreateRequest,
+    ) -> TeamActionOutcome:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "name": payload.name,
+                    "parent_team_id": payload.parent_team_id,
+                    "inherit_parent_documents": payload.inherit_parent_documents,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+        def prepare(team_id: str) -> TeamCreatePrepared:
+            team = TeamRecord(
+                team_id=team_id,
+                name=payload.name,
+                parent_team_id=payload.parent_team_id,
+                status="active",
+                created_at=utc_now_iso(),
+                inherit_parent_documents=payload.inherit_parent_documents,
+            )
+            audit = build_audit_event(
+                event_type="team_created",
+                actor_id=actor.actor_id,
+                target_ref=f"team:{team_id}",
+                project_id=None,
+                message_code="team.is_ready",
+                metadata={
+                    "parent_team_id": payload.parent_team_id,
+                    "inherit_parent_documents": payload.inherit_parent_documents,
+                },
+            )
+            result = AdminActionResult(
+                request_id=payload.idempotency_key,
+                status="applied",
+                target_ref=f"team:{team_id}",
+                message_code="team.is_ready",
+                audit_event_ref=audit.event_id,
+            )
+            return TeamCreatePrepared(
+                target_ref=f"team:{team_id}",
+                response_json=result.model_dump_json(),
+                change_set=TeamGovernanceChangeSet(
+                    teams=(team,),
+                    expected_teams=((team_id, None),),
+                    audit_events=(audit,),
+                    protect_hierarchy=True,
+                    authorization_actor_ids=(actor.actor_id,),
+                    current_actor_ids=(actor.actor_id,),
+                    authorization_requires_system_admin=True,
+                ),
+            )
+
+        try:
+            receipt = self.owner.create_once(
+                scope_actor_id=actor.actor_id,
+                idempotency_key=payload.idempotency_key,
+                request_fingerprint=fingerprint,
+                prepare=prepare,
+            )
+        except TeamCreateReplayConflict as exc:
+            raise TeamAccessError(
+                "idempotency_conflict",
+                "team.already_exists",
+                409,
+            ) from exc
+        except TeamAuthorizationConflict as exc:
+            raise TeamAccessError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+            ) from exc
+        except TeamInvariantViolation as exc:
+            message = str(exc)
+            if "acyclic" in message:
+                code = "team.parent_would_create_cycle"
+            elif "depth" in message:
+                code = "team.depth_limit_exceeded"
+            else:
+                code = "team.parent_was_not_found"
+            raise TeamAccessError("admin_action_rejected", code, 422) from exc
+        except TeamCurrentnessConflict as exc:
+            raise TeamAccessError(
+                "admin_action_rejected",
+                "team.parent_was_not_found",
+                409,
+            ) from exc
+        return TeamActionOutcome(
+            result=AdminActionResult.model_validate_json(receipt.response_json),
+            success_status_code=200 if receipt.replayed else 201,
         )
 
     @contextmanager

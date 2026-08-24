@@ -93,7 +93,6 @@ class DocumentLibraryUploadBackend(Protocol):
         chunks: Iterable[bytes],
         request_fingerprint: str,
         artifact_class: str,
-        logical_identity: str,
         content_type: str,
         document: DocumentRecord,
         tag_refs: list[DocumentTagRef],

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from atlas_production.infrastructure.provider_key_cipher import (
     CredentialCryptoError,
     model_routing_request_fingerprint,
 )
+from atlas_production.infrastructure.postgres_locks import hold_owner_operation_lock
 from atlas_production.infrastructure.postgres_owner.identity import IdentityRepository
 from atlas_production.infrastructure.postgres_owner.model_routing import (
     BeginDefaultRouteIntentCommand,
@@ -74,6 +74,10 @@ from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 
 
 ProviderAdapterFactory = Callable[[ProviderConnectionRecord, str], object]
+def _uuid_hex() -> str:
+    return uuid4().hex
+
+
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -111,6 +115,10 @@ class PostgresModelRoutingAdapter:
 
     session_factory: SessionFactory
     provider_adapter_factory: ProviderAdapterFactory
+    connection_id_allocator: Callable[[], str] = field(
+        default=_uuid_hex, repr=False
+    )
+    route_id_allocator: Callable[[], str] = field(default=_uuid_hex, repr=False)
     _intent: ContextVar[ProviderConnectionIntent | DefaultRouteIntent | None] = field(init=False, repr=False)
     _default_connection: ContextVar[ProviderConnectionRecord | None] = field(
         init=False, repr=False
@@ -143,8 +151,8 @@ class PostgresModelRoutingAdapter:
         *,
         idempotency_key: str = "",
     ) -> Iterator[None]:
-        # execute() fully detaches rows before yielding; external work cannot
-        # accidentally inherit a SQL Session from this orchestration boundary.
+        # The session-level advisory lock retains only a checked-out connection,
+        # not a transaction or ORM state, while Provider I/O is in flight.
         embedded_keys = tuple(
             value.removeprefix("idempotency:")
             for value in connection_ids
@@ -154,14 +162,23 @@ class PostgresModelRoutingAdapter:
             value for value in connection_ids if not value.startswith("idempotency:")
         )
         replay_key = idempotency_key or (embedded_keys[0] if embedded_keys else "")
-        intent = BeginProviderConnectionIntentCommand(self.session_factory).execute(
-            scoped_connections, replay_key
+        lock_scope = (
+            hold_owner_operation_lock(
+                self.session_factory,
+                owner_key=f"model-routing-operation:{replay_key}",
+            )
+            if replay_key
+            else nullcontext()
         )
-        token = self._intent.set(intent)
-        try:
-            yield
-        finally:
-            self._intent.reset(token)
+        with lock_scope:
+            intent = BeginProviderConnectionIntentCommand(self.session_factory).execute(
+                scoped_connections, replay_key
+            )
+            token = self._intent.set(intent)
+            try:
+                yield
+            finally:
+                self._intent.reset(token)
 
     def mutation_scope(
         self, connection_ids: list[str]
@@ -202,13 +219,12 @@ class PostgresModelRoutingAdapter:
         self,
         idempotency_key: str,
         operation: str,
-        target_ref: str,
+        target_ref: str | None,
         request_fingerprint: str,
     ) -> ModelRoutingReplayRecord | None:
-        replay = self._reader.get_replay(idempotency_key)
+        replay = self._reader.get_replay(idempotency_key, operation)
         if replay is not None and (
-            replay.operation != operation
-            or replay.target_ref != target_ref
+            (target_ref is not None and replay.target_ref != target_ref)
             or replay.request_fingerprint != request_fingerprint
         ):
             raise ModelRoutingError(
@@ -223,6 +239,12 @@ class PostgresModelRoutingAdapter:
             return model_routing_request_fingerprint(canonical_payload)
         except CredentialCryptoError as exc:
             raise ModelRoutingError(exc.code, exc.message_code, 503) from exc
+    def next_connection_id(self) -> str:
+        return f"connection-{self.connection_id_allocator()}"
+
+    def next_route_id(self) -> str:
+        return f"route-{self.route_id_allocator()}"
+
 
     def get_connection(self, connection_id: str) -> ProviderConnectionRecord | None:
         return self._reader.get_connection(connection_id)

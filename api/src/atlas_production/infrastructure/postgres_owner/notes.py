@@ -14,12 +14,15 @@ from sqlalchemy.orm import Session
 from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow, add_event_rows
 from atlas_production.infrastructure.persistence.identity_access import AtlasTeamRow, AtlasUserRow
 from atlas_production.infrastructure.persistence.notes import (
-    AtlasNoteAttachmentRow, AtlasNoteCategoryRow, AtlasNoteRevisionRow, AtlasNoteRow,
-    AtlasNoteSavepointRow, AtlasNotesSettingsRow,
+    AtlasNoteAttachmentRow, AtlasNoteCategoryRow, AtlasNoteCreateReceiptRow,
+    AtlasNoteRevisionRow, AtlasNoteRow, AtlasNoteSavepointRow, AtlasNotesSettingsRow,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
-from atlas_production.infrastructure.postgres_locks import acquire_owner_locks
+from atlas_production.infrastructure.postgres_locks import (
+    acquire_mixed_owner_locks,
+    acquire_owner_locks,
+)
 from atlas_production.infrastructure.postgres_owner.project import (
     ActionAwareAclAuthority,
     PostgresNotesMembershipAuthority,
@@ -90,13 +93,32 @@ def _receipt(actor_id: str, operation: str, target_ref: str, key: str) -> str:
     raw = f"notes-v1\0{actor_id}\0{operation}\0{target_ref}\0{key}".encode()
     return f"audit-notes-{hashlib.sha256(raw).hexdigest()}"
 
+def _create_receipt(
+    actor_id: str,
+    operation: str,
+    scope_type: ScopeType,
+    scope_id: str,
+    key: str,
+) -> str:
+    raw = f"notes-create-v1\0{actor_id}\0{operation}\0{scope_type}\0{scope_id}\0{key}".encode()
+    return f"notes-receipt-{hashlib.sha256(raw).hexdigest()}"
+
 
 class PostgresNotesOwner:
     """Sole transaction owner for Notes state, authority rechecks and audit."""
 
-    def __init__(self, session_factory: SessionFactory, artifact_reader: object | None = None) -> None:
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        artifact_reader: object | None = None,
+        *,
+        note_id_allocator: Callable[[], str] = lambda: uuid4().hex,
+        category_id_allocator: Callable[[], str] = lambda: uuid4().hex,
+    ) -> None:
         self.session_factory = session_factory
         self.artifact_reader = artifact_reader
+        self.note_id_allocator = note_id_allocator
+        self.category_id_allocator = category_id_allocator
 
     def _tx(self, callback: Callable[[Session], Any]) -> Any:
         session = self.session_factory()
@@ -303,14 +325,34 @@ class PostgresNotesOwner:
 
     def authorize_attachment_open(
         self, *, actor_id: str, note_id: str, attachment_ref: str
-    ) -> tuple[NoteAttachmentV1, str]:
+    ) -> tuple[NoteAttachmentV1, str, str]:
         def run(session: Session):
+            acquire_mixed_owner_locks(
+                session, shared_domain_keys=("artifact:control",)
+            )
             self._note_scope(session, actor_id, note_id, write=True)
             note = session.get(AtlasNoteRow, note_id)
             row = session.get(AtlasNoteAttachmentRow, attachment_ref)
             if note is None or row is None or row.note_id != note_id:
                 raise _error("note_not_found", "Attachment was not found", 404)
-            return self._attachment(row), row.artifact_id
+            if self.artifact_reader is None:
+                raise _error("storage_unavailable", "Notes attachment storage is unavailable", 503)
+            try:
+                lease_id = self.artifact_reader.stage_active_read(  # type: ignore[attr-defined]
+                    session,
+                    artifact_id=row.artifact_id,
+                    expected_artifact_class="note_image",
+                    expected_parent_resource_id=note_id,
+                    expected_owner_scope_type=note.scope_type,
+                    expected_owner_scope_id=note.scope_id,
+                    expected_content_type=row.mime_type,
+                    expected_byte_size=row.byte_size,
+                    expected_sha256=row.sha256,
+                    lease_owner=f"notes:{actor_id}",
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise _error("integrity_failure", "Attachment storage graph is invalid", 503) from exc
+            return self._attachment(row), row.artifact_id, lease_id
 
         return self._tx(run)
 
@@ -416,6 +458,54 @@ class PostgresNotesOwner:
         return row
 
     @staticmethod
+    def _create_replay(
+        session: Session,
+        actor_id: str,
+        operation: str,
+        scope_type: ScopeType,
+        scope_id: str,
+        key: str,
+        fingerprint: str,
+    ) -> AtlasNoteCreateReceiptRow | None:
+        row = session.get(
+            AtlasNoteCreateReceiptRow,
+            _create_receipt(actor_id, operation, scope_type, scope_id, key),
+        )
+        if row is not None and row.request_fingerprint != fingerprint:
+            raise _error("idempotency_payload_conflict", "Idempotency key payload conflicts", 409)
+        return row
+
+    @staticmethod
+    def _save_create_receipt(
+        session: Session,
+        *,
+        actor_id: str,
+        operation: str,
+        scope_type: ScopeType,
+        scope_id: str,
+        key: str,
+        fingerprint: str,
+        target_ref: str,
+        canonical_response: dict[str, object],
+        created_at: datetime,
+    ) -> None:
+        session.add(
+            AtlasNoteCreateReceiptRow(
+                receipt_id=_create_receipt(actor_id, operation, scope_type, scope_id, key),
+                actor_id=actor_id,
+                operation=operation,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                idempotency_key=key,
+                request_fingerprint=fingerprint,
+                target_ref=target_ref,
+                canonical_response=canonical_response,
+                created_at=created_at,
+            )
+        )
+        session.flush()
+
+    @staticmethod
     def _audit(session: Session, *, event_type: str, actor_id: str, target_ref: str,
                scope_type: ScopeType | None, scope_id: str | None,
                metadata: dict[str, object], event_id: str | None = None) -> None:
@@ -475,40 +565,120 @@ class PostgresNotesOwner:
 
     def create_note(self, *, actor_id: str, command: NoteCreateRequestV1) -> NoteDetailV1:
         fingerprint = _fingerprint(command.model_dump(mode="json", exclude={"idempotency_key"}))
+
         def run(session: Session):
-            self._locks(session, f"actor:{actor_id}", f"scope:{command.scope_type}:{command.scope_id}", f"note:{command.note_id}")
-            self._authorize(session, actor_id=actor_id, scope_type=command.scope_type, scope_id=command.scope_id, lock=True)
-            if self._replay(session, actor_id, "note_create", command.note_id, command.idempotency_key, fingerprint):
-                row = session.get(AtlasNoteRow, command.note_id)
-                if row is None: raise _error("audit_failure", "Accepted replay target unavailable", 503)
-                return self._note(session, row)
-            if session.get(AtlasNoteRow, command.note_id):
-                raise _error("idempotency_payload_conflict", "Note identity exists", 409)
+            operation = "note_create"
+            self._locks(
+                session,
+                f"actor:{actor_id}",
+                f"scope:{command.scope_type}:{command.scope_id}",
+                f"create:{operation}:{command.idempotency_key}",
+            )
+            self._authorize(
+                session,
+                actor_id=actor_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                lock=True,
+            )
+            replay = self._create_replay(
+                session,
+                actor_id,
+                operation,
+                command.scope_type,
+                command.scope_id,
+                command.idempotency_key,
+                fingerprint,
+            )
+            if replay is not None:
+                return NoteDetailV1.model_validate(replay.canonical_response)
+
+            note_id = f"note-{self.note_id_allocator()}"
             self._valid_category(session, command.category_id, command.scope_type, command.scope_id)
             at, digest = _now(), _digest(EMPTY_BODY)
-            note = AtlasNoteRow(note_id=command.note_id, scope_type=command.scope_type,
-                scope_id=command.scope_id, category_id=command.category_id, title=command.title,
-                lifecycle_status="active", metadata_revision=1, accepted_update_head=1,
-                savepoint_head=1, collaboration_epoch=1, created_actor_id=actor_id,
-                created_at=at, updated_actor_id=actor_id, updated_at=at,
-                trashed_actor_id=None, trashed_at=None)
+            note = AtlasNoteRow(
+                note_id=note_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                category_id=command.category_id,
+                title=command.title,
+                lifecycle_status="active",
+                metadata_revision=1,
+                accepted_update_head=1,
+                savepoint_head=1,
+                collaboration_epoch=1,
+                created_actor_id=actor_id,
+                created_at=at,
+                updated_actor_id=actor_id,
+                updated_at=at,
+                trashed_actor_id=None,
+                trashed_at=None,
+            )
             revision_id, savepoint_id = f"nrev-{uuid4().hex}", f"nsp-{uuid4().hex}"
-            session.add(note); session.flush()
-            session.add(AtlasNoteSavepointRow(savepoint_id=savepoint_id, note_id=command.note_id,
-                sequence=1, covered_revision=1, encoded_yjs_state=EMPTY_STATE,
-                canonical_body=EMPTY_BODY, document_schema=NOTE_DOCUMENT_SCHEMA_V2,
-                body_digest=digest, aggregate_change_set=NoteChangeSetV1().model_dump(mode="json"),
-                contributor_actor_ids=[actor_id], created_at=at)); session.flush()
-            session.add(AtlasNoteRevisionRow(revision_id=revision_id, note_id=command.note_id,
-                sequence=1, server_timestamp=at, actor_id=actor_id, event_kind="create",
-                raw_yjs_update=EMPTY_STATE, before_digest=digest, after_digest=digest,
-                change_set=NoteChangeSetV1().model_dump(mode="json"), restore_source_savepoint_id=None)); session.flush()
-            self._audit(session, event_type="note_created", actor_id=actor_id,
-                target_ref=command.note_id, scope_type=command.scope_type, scope_id=command.scope_id,
-                metadata={"operation":"note_create","request_fingerprint":fingerprint,
-                    "revision":1,"digest":digest,"event_kind":"create"},
-                event_id=_receipt(actor_id,"note_create",command.note_id,command.idempotency_key))
-            return self._note(session, note)
+            session.add(note)
+            session.flush()
+            session.add(
+                AtlasNoteSavepointRow(
+                    savepoint_id=savepoint_id,
+                    note_id=note_id,
+                    sequence=1,
+                    covered_revision=1,
+                    encoded_yjs_state=EMPTY_STATE,
+                    canonical_body=EMPTY_BODY,
+                    document_schema=NOTE_DOCUMENT_SCHEMA_V2,
+                    body_digest=digest,
+                    aggregate_change_set=NoteChangeSetV1().model_dump(mode="json"),
+                    contributor_actor_ids=[actor_id],
+                    created_at=at,
+                )
+            )
+            session.flush()
+            session.add(
+                AtlasNoteRevisionRow(
+                    revision_id=revision_id,
+                    note_id=note_id,
+                    sequence=1,
+                    server_timestamp=at,
+                    actor_id=actor_id,
+                    event_kind="create",
+                    raw_yjs_update=EMPTY_STATE,
+                    before_digest=digest,
+                    after_digest=digest,
+                    change_set=NoteChangeSetV1().model_dump(mode="json"),
+                    restore_source_savepoint_id=None,
+                )
+            )
+            session.flush()
+            result = self._note(session, note)
+            self._audit(
+                session,
+                event_type="note_created",
+                actor_id=actor_id,
+                target_ref=note_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                metadata={
+                    "operation": operation,
+                    "request_fingerprint": fingerprint,
+                    "revision": 1,
+                    "digest": digest,
+                    "event_kind": "create",
+                },
+            )
+            self._save_create_receipt(
+                session,
+                actor_id=actor_id,
+                operation=operation,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                key=command.idempotency_key,
+                fingerprint=fingerprint,
+                target_ref=note_id,
+                canonical_response=result.model_dump(mode="json"),
+                created_at=at,
+            )
+            return result
+
         return self._tx(run)
 
     def _mutate_note(self, *, actor_id: str, note_id: str, expected: int, key: str,
@@ -581,31 +751,91 @@ class PostgresNotesOwner:
 
     def create_category(self, *, actor_id: str, command: NoteCategoryCreateRequestV1) -> NoteCategoryV1:
         fingerprint = _fingerprint(command.model_dump(mode="json", exclude={"idempotency_key"}))
+
         def run(session: Session):
-            self._locks(session, f"actor:{actor_id}", f"scope:{command.scope_type}:{command.scope_id}", f"category:{command.category_id}")
-            self._authorize(session, actor_id=actor_id, scope_type=command.scope_type, scope_id=command.scope_id, lock=True)
-            if self._replay(session, actor_id, "category_create", command.category_id, command.idempotency_key, fingerprint):
-                row = session.get(AtlasNoteCategoryRow, command.category_id)
-                if row is None: raise _error("audit_failure", "Accepted replay target unavailable", 503)
-                return self._category(session, row)
-            duplicate = session.scalar(select(AtlasNoteCategoryRow).where(
-                (AtlasNoteCategoryRow.category_id == command.category_id) |
-                ((AtlasNoteCategoryRow.scope_type == command.scope_type) &
-                 (AtlasNoteCategoryRow.scope_id == command.scope_id) &
-                 (AtlasNoteCategoryRow.name == command.name))))
-            if duplicate: raise _error("idempotency_payload_conflict", "Category identity or name exists", 409)
+            operation = "category_create"
+            self._locks(
+                session,
+                f"actor:{actor_id}",
+                f"scope:{command.scope_type}:{command.scope_id}",
+                f"create:{operation}:{command.idempotency_key}",
+            )
+            self._authorize(
+                session,
+                actor_id=actor_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                lock=True,
+            )
+            replay = self._create_replay(
+                session,
+                actor_id,
+                operation,
+                command.scope_type,
+                command.scope_id,
+                command.idempotency_key,
+                fingerprint,
+            )
+            if replay is not None:
+                return NoteCategoryV1.model_validate(replay.canonical_response)
+
+            category_id = f"category-{self.category_id_allocator()}"
+            duplicate = session.scalar(
+                select(AtlasNoteCategoryRow).where(
+                    AtlasNoteCategoryRow.scope_type == command.scope_type,
+                    AtlasNoteCategoryRow.scope_id == command.scope_id,
+                    AtlasNoteCategoryRow.name == command.name,
+                )
+            )
+            if duplicate:
+                raise _error("idempotency_payload_conflict", "Category name exists", 409)
             at = _now()
-            row = AtlasNoteCategoryRow(category_id=command.category_id, scope_type=command.scope_type,
-                scope_id=command.scope_id, name=command.name, lifecycle_status="active",
-                metadata_revision=1, created_actor_id=actor_id, created_at=at,
-                updated_actor_id=actor_id, updated_at=at, trashed_actor_id=None, trashed_at=None)
-            session.add(row); session.flush()
-            self._audit(session,event_type="note_category_created",actor_id=actor_id,
-                target_ref=command.category_id,scope_type=command.scope_type,scope_id=command.scope_id,
-                metadata={"operation":"category_create","request_fingerprint":fingerprint,
-                    "category_id":command.category_id,"revision":1,"event_kind":"create"},
-                event_id=_receipt(actor_id,"category_create",command.category_id,command.idempotency_key))
-            return self._category(session,row)
+            row = AtlasNoteCategoryRow(
+                category_id=category_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                name=command.name,
+                lifecycle_status="active",
+                metadata_revision=1,
+                created_actor_id=actor_id,
+                created_at=at,
+                updated_actor_id=actor_id,
+                updated_at=at,
+                trashed_actor_id=None,
+                trashed_at=None,
+            )
+            session.add(row)
+            session.flush()
+            result = self._category(session, row)
+            self._audit(
+                session,
+                event_type="note_category_created",
+                actor_id=actor_id,
+                target_ref=category_id,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                metadata={
+                    "operation": operation,
+                    "request_fingerprint": fingerprint,
+                    "category_id": category_id,
+                    "revision": 1,
+                    "event_kind": "create",
+                },
+            )
+            self._save_create_receipt(
+                session,
+                actor_id=actor_id,
+                operation=operation,
+                scope_type=command.scope_type,
+                scope_id=command.scope_id,
+                key=command.idempotency_key,
+                fingerprint=fingerprint,
+                target_ref=category_id,
+                canonical_response=result.model_dump(mode="json"),
+                created_at=at,
+            )
+            return result
+
         return self._tx(run)
 
     def _mutate_category(self, *, actor_id: str, category_id: str, expected: int, key: str,
@@ -870,9 +1100,8 @@ class PostgresNotesOwner:
             if note.collaboration_epoch != command.expected_collaboration_epoch:
                 raise _error("stale_collaboration_epoch", "Collaboration epoch is stale", 409)
             self._validate_attachment_refs(session, command.note_id, attachment_refs)
-            digest = _digest(command.canonical_body)
             source = session.scalar(
-                select(AtlasNoteSavepointRow).where(
+                select(AtlasNoteSavepointRow.savepoint_id).where(
                     AtlasNoteSavepointRow.note_id == command.note_id,
                     AtlasNoteSavepointRow.savepoint_id
                     == command.restore_source_savepoint_id,
@@ -880,15 +1109,6 @@ class PostgresNotesOwner:
             )
             if source is None:
                 raise _error("note_not_found", "Restore source was not found", 404)
-            if (
-                source.body_digest != digest
-                or source.document_schema != command.document_schema
-            ):
-                raise _error(
-                    "restore_source_mismatch",
-                    "Restore body does not match the selected savepoint",
-                    409,
-                )
             previous = session.scalar(
                 select(AtlasNoteRevisionRow).where(
                     AtlasNoteRevisionRow.note_id == command.note_id,
@@ -900,6 +1120,7 @@ class PostgresNotesOwner:
             at = _now()
             revision_sequence = note.accepted_update_head + 1
             savepoint_sequence = note.savepoint_head + 1
+            digest = _digest(command.canonical_body)
             revision = AtlasNoteRevisionRow(
                 revision_id=f"nrev-{uuid4().hex}",
                 note_id=command.note_id,

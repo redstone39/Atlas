@@ -14,7 +14,6 @@ class DocumentLibraryUploadCommand:
     scope_type: str | None
     scope_id: str | None
     tag_refs: str | None
-    document_id: str | None
     allow_member_download: str | None
     description: str | None
     filename: str | None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal, cast
 from uuid import uuid4
 
@@ -14,7 +14,10 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasTeamRow,
     AtlasUserRow,
 )
-from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
+from atlas_production.infrastructure.persistence.project_governance import (
+    AtlasProjectCreateReceiptRow,
+    AtlasProjectRow,
+)
 from atlas_production.infrastructure.postgres_lock_keys import (identity_actor_owner_key,
 project_acl_subject_owner_key,
 project_owner_key,
@@ -135,6 +138,24 @@ class ProjectGrantWriter:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectCreatePrepared:
+    target_ref: str
+    response_json: str
+    change_set: "ProjectAclChangeSet"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCreateReceipt:
+    target_ref: str
+    response_json: str
+    replayed: bool
+
+
+class ProjectCreateReplayConflict(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectAclChangeSet:
     projects: tuple[ProjectRecord, ...] = ()
     expected_projects: tuple[tuple[str, ProjectRecord | None], ...] = ()
@@ -160,97 +181,175 @@ class ProjectAclChangeSet:
 @dataclass(frozen=True, slots=True)
 class ProjectAclRepository:
     session_factory: SessionFactory
+    id_allocator: Callable[[], str] = field(
+        default_factory=lambda: lambda: uuid4().hex
+    )
 
-    def project_acl(self, change_set: ProjectAclChangeSet) -> None:
+    def create_once(
+        self,
+        *,
+        scope_actor_id: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        prepare: Callable[[str], ProjectCreatePrepared],
+    ) -> ProjectCreateReceipt:
+        receipt_lock = (
+            f"project:create:{scope_actor_id}:create_project:{idempotency_key}"
+        )
         session = self.session_factory()
         with session:
             try:
                 acquire_owner_locks(
                     session,
-                    domain_keys=(
-                        *(("team:hierarchy-control", "team:membership-control")
-                          if change_set.authorization_action is not None else ()),
-                        *(
-                            f"project:acl-control:{project_id}"
-                            for project_id in {
-                                *(grant.project_id for grant in change_set.grants),
-                                *(
-                                    (change_set.authorization_project_id,)
-                                    if change_set.authorization_project_id
-                                    else ()
-                                ),
-                            }
-                        ),
-                    ),
-                    identity_keys=(
-                        *(
-                            (identity_actor_owner_key(change_set.authorization_actor_id),)
-                            if change_set.authorization_actor_id
-                            else ()
-                        ),
-                        *(
-                            (
-                                team_subject_owner_key(
-                                    "user",
-                                    change_set.authorization_actor_id,
-                                ),
-                                team_subject_owner_key(
-                                    "service_account",
-                                    change_set.authorization_actor_id,
-                                ),
-                                project_acl_subject_owner_key(
-                                    "user",
-                                    change_set.authorization_actor_id,
-                                ),
-                                project_acl_subject_owner_key(
-                                    "service_account",
-                                    change_set.authorization_actor_id,
-                                ),
-                            )
-                            if change_set.authorization_actor_id
-                            and change_set.authorization_action is not None
-                            else ()
-                        ),
-                        *(
-                            project_owner_key(project.project_id)
-                            for project in change_set.projects
-                        ),
-                        *(
-                            f"project:grant:{grant.grant_id}"
-                            for grant in change_set.grants
-                        ),
-                        *(
-                            project_owner_key(grant.project_id)
-                            for grant in change_set.grants
-                        ),
-                        *(
-                            project_acl_subject_owner_key(
-                                grant.subject_type,
-                                grant.subject_id,
-                            )
-                            for grant in change_set.grants
-                        ),
-                        *(
-                            f"audit:decision:{decision.decision_id}"
-                            for decision in change_set.access_decisions
-                        ),
-                    ),
+                    domain_keys=(),
+                    identity_keys=(receipt_lock,),
                 )
-                self._validate_currentness(session, change_set)
-                self._validate_authorization(session, change_set)
-                for project in change_set.projects:
-                    session.merge(_project_row(project))
-                grant_writer = ProjectGrantWriter(session)
-                for grant in change_set.grants:
-                    grant_writer.merge(grant)
-                decision_writer = AccessDecisionWriter(session)
-                for decision in change_set.access_decisions:
-                    decision_writer.append(decision)
-                AuditEventWriter(session).append_many(change_set.audit_events)
+                row = session.scalar(
+                    select(AtlasProjectCreateReceiptRow)
+                    .where(
+                        AtlasProjectCreateReceiptRow.scope_actor_id
+                        == scope_actor_id,
+                        AtlasProjectCreateReceiptRow.operation
+                        == "create_project",
+                        AtlasProjectCreateReceiptRow.idempotency_key
+                        == idempotency_key,
+                    )
+                    .with_for_update()
+                )
+                if row is not None:
+                    if row.request_fingerprint != request_fingerprint:
+                        raise ProjectCreateReplayConflict(
+                            "Project create idempotency key was reused"
+                        )
+                    receipt = ProjectCreateReceipt(
+                        target_ref=row.target_ref,
+                        response_json=row.response_json,
+                        replayed=True,
+                    )
+                    session.rollback()
+                    return receipt
+                project_id = f"proj-{self.id_allocator()}"
+                prepared = prepare(project_id)
+                self._apply_change_set(session, prepared.change_set)
+                session.add(
+                    AtlasProjectCreateReceiptRow(
+                        receipt_id=f"project-create-{uuid4().hex}",
+                        scope_actor_id=scope_actor_id,
+                        operation="create_project",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        target_ref=prepared.target_ref,
+                        response_json=prepared.response_json,
+                        created_at=utc_now_iso(),
+                    )
+                )
+                session.commit()
+                return ProjectCreateReceipt(
+                    target_ref=prepared.target_ref,
+                    response_json=prepared.response_json,
+                    replayed=False,
+                )
+            except Exception:
+                session.rollback()
+                raise
+
+    def project_acl(self, change_set: ProjectAclChangeSet) -> None:
+        session = self.session_factory()
+        with session:
+            try:
+                self._apply_change_set(session, change_set)
                 session.commit()
             except Exception:
                 session.rollback()
                 raise
+
+    def _apply_change_set(
+        self,
+        session: Session,
+        change_set: ProjectAclChangeSet,
+    ) -> None:
+        acquire_owner_locks(
+            session,
+            domain_keys=(
+                *(("team:hierarchy-control", "team:membership-control")
+                  if change_set.authorization_action is not None else ()),
+                *(
+                    f"project:acl-control:{project_id}"
+                    for project_id in {
+                        *(grant.project_id for grant in change_set.grants),
+                        *(
+                            (change_set.authorization_project_id,)
+                            if change_set.authorization_project_id
+                            else ()
+                        ),
+                    }
+                ),
+            ),
+            identity_keys=(
+                *(
+                    (identity_actor_owner_key(change_set.authorization_actor_id),)
+                    if change_set.authorization_actor_id
+                    else ()
+                ),
+                *(
+                    (
+                        team_subject_owner_key(
+                            "user",
+                            change_set.authorization_actor_id,
+                        ),
+                        team_subject_owner_key(
+                            "service_account",
+                            change_set.authorization_actor_id,
+                        ),
+                        project_acl_subject_owner_key(
+                            "user",
+                            change_set.authorization_actor_id,
+                        ),
+                        project_acl_subject_owner_key(
+                            "service_account",
+                            change_set.authorization_actor_id,
+                        ),
+                    )
+                    if change_set.authorization_actor_id
+                    and change_set.authorization_action is not None
+                    else ()
+                ),
+                *(
+                    project_owner_key(project.project_id)
+                    for project in change_set.projects
+                ),
+                *(
+                    f"project:grant:{grant.grant_id}"
+                    for grant in change_set.grants
+                ),
+                *(
+                    project_owner_key(grant.project_id)
+                    for grant in change_set.grants
+                ),
+                *(
+                    project_acl_subject_owner_key(
+                        grant.subject_type,
+                        grant.subject_id,
+                    )
+                    for grant in change_set.grants
+                ),
+                *(
+                    f"audit:decision:{decision.decision_id}"
+                    for decision in change_set.access_decisions
+                ),
+            ),
+        )
+        self._validate_currentness(session, change_set)
+        self._validate_authorization(session, change_set)
+        for project in change_set.projects:
+            session.merge(_project_row(project))
+        grant_writer = ProjectGrantWriter(session)
+        for grant in change_set.grants:
+            grant_writer.merge(grant)
+        decision_writer = AccessDecisionWriter(session)
+        for decision in change_set.access_decisions:
+            decision_writer.append(decision)
+        AuditEventWriter(session).append_many(change_set.audit_events)
 
     @staticmethod
     def _validate_currentness(
@@ -1011,6 +1110,9 @@ __all__ = [
     "ProjectAclChangeSet",
     "ProjectAclRepository",
     "ProjectAuthorizationConflict",
+    "ProjectCreatePrepared",
+    "ProjectCreateReceipt",
+    "ProjectCreateReplayConflict",
     "ProjectCurrentnessConflict",
     "ProjectGrantWriter",
 ]

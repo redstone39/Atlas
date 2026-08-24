@@ -66,15 +66,15 @@ _BUILTIN_SPECS = (
 
 
 _PROFILE_SPECS = (
-    ("default-pdf", "Default PDF", "application/pdf", "atlas-pypdf", ("atlas-docling-layout", "atlas-generic-text")),
-    ("default-text", "Default text", "text/plain", "atlas-plain-text", ("atlas-generic-text",)),
-    ("default-docx", "Default Word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "atlas-python-docx", ("atlas-generic-text", "atlas-rapidocr")),
-    ("default-pptx", "Default PowerPoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "atlas-python-pptx", ("atlas-generic-text", "atlas-rapidocr")),
-    ("default-xlsx", "Default Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "atlas-openpyxl", ("atlas-generic-text", "atlas-rapidocr")),
-    ("default-csv", "Default CSV", "text/csv", "atlas-csv", ("atlas-generic-text",)),
-    ("default-doc", "Default legacy Word", "application/msword", "atlas-libreoffice-doc", ("atlas-generic-text", "atlas-rapidocr")),
-    ("default-ppt", "Default legacy PowerPoint", "application/vnd.ms-powerpoint", "atlas-libreoffice-ppt", ("atlas-generic-text", "atlas-rapidocr")),
-    ("default-xls", "Default legacy Excel", "application/vnd.ms-excel", "atlas-libreoffice-xls", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-7b1e3a6c9d2f40a8b5c7e1f3096d4a2b", "Default PDF", "application/pdf", "atlas-pypdf", ("atlas-docling-layout", "atlas-generic-text")),
+    ("profile-c4a8f2e71b6d49c0a3e5f7082d9b1c6a", "Default text", "text/plain", "atlas-plain-text", ("atlas-generic-text",)),
+    ("profile-1f6c8a3d5e704b29a2d9c7e4f0b16538", "Default Word", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "atlas-python-docx", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-a9d3e7b15c684f20b6a1d8c2e5f70934", "Default PowerPoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "atlas-python-pptx", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-3e8b1c6d9f244a70a5d2e7c1b809f364", "Default Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "atlas-openpyxl", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-d2a7f4c91e6b43a8b0c5d9e317f2684a", "Default CSV", "text/csv", "atlas-csv", ("atlas-generic-text",)),
+    ("profile-6c1e9a4b3d784f25a7b0e2d8c5961f3a", "Default legacy Word", "application/msword", "atlas-libreoffice-doc", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-b5f2d8a70c134e69a4d7c1e9386b205f", "Default legacy PowerPoint", "application/vnd.ms-powerpoint", "atlas-libreoffice-ppt", ("atlas-generic-text", "atlas-rapidocr")),
+    ("profile-8a3d6f1c5e294b70b2c9e4a7d106f538", "Default legacy Excel", "application/vnd.ms-excel", "atlas-libreoffice-xls", ("atlas-generic-text", "atlas-rapidocr")),
 )
 
 

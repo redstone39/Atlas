@@ -284,6 +284,33 @@ class AtlasUserInviteRow(OrmBase):
     scope_role: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class AtlasIdentityCreateReceiptRow(OrmBase):
+    __tablename__ = "atlas_identity_create_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_actor_id",
+            "operation",
+            "idempotency_key",
+            name="uq_atlas_identity_create_receipt_scope_operation_key",
+        ),
+    )
+
+    receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_actor_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    target_ref: Mapped[str] = mapped_column(String, nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_nonce: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    secret_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secret_algorithm: Mapped[str | None] = mapped_column(String, nullable=True)
+    secret_storage_backend: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class AtlasTeamRow(OrmBase):
     __tablename__ = "atlas_teams"
 

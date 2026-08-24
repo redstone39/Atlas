@@ -94,13 +94,18 @@ async def upload_document_library_file(request: Request):
     except Exception:
         command = None
     else:
+        if "document_id" in form:
+            return error(
+                "validation_error",
+                "document.upload_was_not_valid",
+                422,
+            )
         uploaded = form.get("file")
         command = DocumentLibraryUploadCommand(
             idempotency_key=_form_text(form, "idempotency_key"),
             scope_type=_form_text(form, "scope_type"),
             scope_id=_form_text(form, "scope_id"),
             tag_refs=_form_text(form, "tag_refs"),
-            document_id=_form_text(form, "document_id"),
             allow_member_download=_form_text(form, "allow_member_download"),
             description=_form_text(form, "description"),
             filename=getattr(uploaded, "filename", None),

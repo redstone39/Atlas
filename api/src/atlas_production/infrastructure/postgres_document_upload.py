@@ -7,12 +7,14 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Callable
 
+from uuid import uuid4
 from sqlalchemy import select
 
 from atlas_production.infrastructure.persistence.audit_events import AtlasAuditEventRow
 from atlas_production.infrastructure.persistence.document_intake import (
     AtlasDocumentRow,
     AtlasDocumentTagRow,
+    AtlasDocumentUploadIntentRow,
     AtlasDocumentVersionRow,
     _document_row,
     _document_version_payload,
@@ -108,6 +110,7 @@ class NewDocumentUploadInput:
     job_kind: str
     idempotency_scope: str
     idempotency_key: str
+    request_fingerprint: str
     created_by: str | None
     audit_events: tuple[AuditEventRecord, ...]
     execution_snapshot: ProcessingExecutionSnapshot
@@ -122,6 +125,143 @@ class NewDocumentUploadResult:
     artifact_id: str
     job: ProcessingJobRecord | None
     audit_event_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NewDocumentUploadIntent:
+    actor_id: str
+    scope_type: str
+    scope_id: str
+    operation: str
+    idempotency_key: str
+    request_fingerprint: str
+    document_id: str
+    status: str
+    document_version_id: str | None = None
+    artifact_id: str | None = None
+    job_id: str | None = None
+    audit_event_id: str | None = None
+
+    @property
+    def replayed(self) -> bool:
+        return self.status == "completed"
+
+
+def _upload_intent_key(
+    actor_id: str,
+    scope_type: str,
+    scope_id: str,
+    operation: str,
+    idempotency_key: str,
+) -> tuple[str, str, str, str, str]:
+    return actor_id, scope_type, scope_id, operation, idempotency_key
+
+
+def _upload_intent_lock_identity(key: tuple[str, str, str, str, str]) -> str:
+    return "document:upload-intent:" + ":".join(key)
+
+
+@dataclass(frozen=True, slots=True)
+class NewDocumentUploadIntentCommand:
+    """Allocate the canonical Document ID under the request identity lock."""
+
+    session_factory: SessionFactory
+    new_id: Callable[[], str] = lambda: uuid4().hex
+
+    def execute(
+        self,
+        *,
+        actor_id: str,
+        scope_type: str,
+        scope_id: str,
+        operation: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> NewDocumentUploadIntent:
+        if (
+            not actor_id
+            or scope_type not in {"team", "project"}
+            or not scope_id
+            or not operation
+            or not idempotency_key
+            or not request_fingerprint
+        ):
+            raise ValueError("document upload intent is incomplete")
+        key = _upload_intent_key(
+            actor_id, scope_type, scope_id, operation, idempotency_key
+        )
+        session = self.session_factory()
+        with session:
+            try:
+                acquire_mixed_owner_locks(
+                    session,
+                    exclusive_identity_keys=(
+                        _upload_intent_lock_identity(key),
+                    ),
+                )
+                row = session.get(AtlasDocumentUploadIntentRow, key)
+                if row is not None:
+                    if row.request_fingerprint != request_fingerprint:
+                        raise DocumentUploadReplayConflict(
+                            "document upload intent request changed"
+                        )
+                    intent = NewDocumentUploadIntent(
+                        actor_id=row.actor_id,
+                        scope_type=row.scope_type,
+                        scope_id=row.scope_id,
+                        operation=row.operation,
+                        idempotency_key=row.idempotency_key,
+                        request_fingerprint=row.request_fingerprint,
+                        document_id=row.document_id,
+                        status=row.status,
+                        document_version_id=row.document_version_id,
+                        artifact_id=row.artifact_id,
+                        job_id=row.job_id,
+                        audit_event_id=row.audit_event_id,
+                    )
+                    session.commit()
+                    return intent
+                document_id = f"doc-{self.new_id()}"
+                if not document_id.removeprefix("doc-"):
+                    raise ValueError("document allocator returned an empty identity")
+                if (
+                    session.get(AtlasDocumentRow, document_id) is not None
+                    or session.scalar(
+                        select(AtlasDocumentUploadIntentRow).where(
+                            AtlasDocumentUploadIntentRow.document_id == document_id
+                        )
+                    )
+                    is not None
+                ):
+                    raise ValueError("document allocator returned an existing identity")
+                created_at = utc_now_iso()
+                session.add(
+                    AtlasDocumentUploadIntentRow(
+                        actor_id=actor_id,
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                        operation=operation,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        document_id=document_id,
+                        status="allocated",
+                        created_at=created_at,
+                    )
+                )
+                session.commit()
+                return NewDocumentUploadIntent(
+                    actor_id=actor_id,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    operation=operation,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    document_id=document_id,
+                    status="allocated",
+                )
+            except Exception:
+                session.rollback()
+                raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +406,7 @@ class NewDocumentUploadTerminalFacts:
     job_kind: str
     idempotency_scope: str
     idempotency_key: str
+    request_fingerprint: str
     created_by: str
     audit_events: tuple[AuditEventRecord, ...]
     execution_snapshot: ProcessingExecutionSnapshot
@@ -284,6 +425,7 @@ class NewDocumentUploadRequestFacts:
     job_kind: str
     idempotency_scope: str
     idempotency_key: str
+    request_fingerprint: str
     created_by: str
     audit_events: tuple[AuditEventRecord, ...]
     progress_total: int | None = None
@@ -341,6 +483,7 @@ def _validate_input(command: NewDocumentUploadInput) -> None:
         or command.job_kind != "ingest"
         or not command.idempotency_scope
         or not command.idempotency_key
+        or not command.request_fingerprint
         or document.source_kind != "file_upload"
         or publication.artifact.parent_lifecycle_epoch
         != document.resource_lifecycle_epoch
@@ -479,6 +622,35 @@ class NewDocumentUploadCommand:
     """Commit document, artifact, processing request, job/outbox and audit once."""
 
     session_factory: SessionFactory
+
+    def canonical_intent_result(
+        self, intent: NewDocumentUploadIntent
+    ) -> NewDocumentUploadResult:
+        if (
+            not intent.replayed
+            or intent.document_version_id is None
+            or intent.artifact_id is None
+            or intent.audit_event_id is None
+        ):
+            raise DocumentUploadReplayConflict(
+                "document upload intent has no canonical result"
+            )
+        job = (
+            JobTransitionCommand(self.session_factory).get_job(intent.job_id)
+            if intent.job_id is not None
+            else None
+        )
+        if intent.job_id is not None and job is None:
+            raise DocumentUploadReplayConflict(
+                "document upload canonical job is missing"
+            )
+        return NewDocumentUploadResult(
+            document_id=intent.document_id,
+            document_version_id=intent.document_version_id,
+            artifact_id=intent.artifact_id,
+            job=job,
+            audit_event_id=intent.audit_event_id,
+        )
 
     def canonical_result(
         self,
@@ -853,9 +1025,17 @@ class NewDocumentUploadCommand:
                 scopes=tag_scopes,
             )
         )
+        intent_key = _upload_intent_key(
+            command.created_by or "",
+            command.document.scope_type or "",
+            command.document.scope_id or "",
+            command.idempotency_scope,
+            command.idempotency_key,
+        )
         identity_keys = tuple(
             sorted(
                 {
+                    _upload_intent_lock_identity(intent_key),
                     *new_document_original_artifact_lock_identities(publication),
                     *document_processing_acceptance_lock_identities(
                         document_id=command.document.document_id,
@@ -894,6 +1074,16 @@ class NewDocumentUploadCommand:
                         *identity_keys,
                     ),
                 )
+                intent_row = session.get(AtlasDocumentUploadIntentRow, intent_key)
+                if (
+                    intent_row is None
+                    or intent_row.status != "allocated"
+                    or intent_row.request_fingerprint != command.request_fingerprint
+                    or intent_row.document_id != command.document.document_id
+                ):
+                    raise DocumentUploadReplayConflict(
+                        "document upload intent does not match terminal request"
+                    )
                 for scope_type, scope_id in tag_scopes:
                     if not document_owner_row_is_active(
                         session, scope_type, scope_id
@@ -1013,17 +1203,26 @@ class NewDocumentUploadCommand:
                         raise ValueError("new-document upload audit replay conflict")
                 else:
                     AuditEventWriter(session).append_many(command.audit_events)
+                audit_event_id = (
+                    min(event.event_id for event in command.audit_events)
+                    if command.audit_events
+                    else None
+                )
+                if audit_event_id is None:
+                    raise ValueError("new-document upload audit result is missing")
+                intent_row.status = "completed"
+                intent_row.document_version_id = command.version.document_version_id
+                intent_row.artifact_id = publication.artifact.artifact_id
+                intent_row.job_id = job.job_id if job is not None else None
+                intent_row.audit_event_id = audit_event_id
+                intent_row.completed_at = utc_now_iso()
                 session.commit()
                 return NewDocumentUploadResult(
                     document_id=command.document.document_id,
                     document_version_id=command.version.document_version_id,
                     artifact_id=publication.artifact.artifact_id,
                     job=job,
-                    audit_event_id=(
-                        min(event.event_id for event in command.audit_events)
-                        if command.audit_events
-                        else None
-                    ),
+                    audit_event_id=audit_event_id,
                 )
             except Exception:
                 session.rollback()
@@ -1038,6 +1237,11 @@ class NewDocumentUploadJourneyCommand:
     boundary_command: NewDocumentUploadRequestBoundaryCommand
     terminal_command: NewDocumentUploadCommand
     dispatch_accepted_job: DispatchAcceptedJob
+
+    def canonical_intent_result(
+        self, intent: NewDocumentUploadIntent
+    ) -> NewDocumentUploadResult:
+        return self.terminal_command.canonical_intent_result(intent)
 
     def execute(self, request: NewDocumentUploadJourneyInput) -> NewDocumentUploadResult:
         facts = request.request
@@ -1079,6 +1283,7 @@ class NewDocumentUploadJourneyCommand:
             job_kind=facts.job_kind,
             idempotency_scope=facts.idempotency_scope,
             idempotency_key=facts.idempotency_key,
+            request_fingerprint=facts.request_fingerprint,
             created_by=facts.created_by,
             audit_events=audit_events,
             execution_snapshot=boundary.execution_snapshot,
@@ -1173,6 +1378,7 @@ class NewDocumentUploadJourneyCommand:
                     job_kind=terminal.job_kind,
                     idempotency_scope=terminal.idempotency_scope,
                     idempotency_key=terminal.idempotency_key,
+                    request_fingerprint=terminal.request_fingerprint,
                     created_by=terminal.created_by,
                     audit_events=terminal.audit_events,
                     execution_snapshot=terminal.execution_snapshot,
@@ -1199,6 +1405,8 @@ __all__ = [
     "NewDocumentUploadBoundaryFacts",
     "NewDocumentUploadCommand",
     "NewDocumentUploadInput",
+    "NewDocumentUploadIntent",
+    "NewDocumentUploadIntentCommand",
     "NewDocumentUploadJourneyCommand",
     "NewDocumentUploadJourneyInput",
     "NewDocumentUploadResult",

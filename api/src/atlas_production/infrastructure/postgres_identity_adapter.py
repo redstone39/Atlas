@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from secrets import token_urlsafe
 from typing import Callable
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from atlas_production.infrastructure.envelope_cipher import (
+    AesGcmEnvelopeCipher,
+    EncryptedCredential,
+)
 from atlas_production.infrastructure.postgres_audit_adapter import (
     build_audit_event,
     persist_rejection_audit,
@@ -15,6 +23,9 @@ from atlas_production.infrastructure.postgres_audit_adapter import (
 from atlas_production.infrastructure.postgres_owner.identity import (
     ExpireInviteCommand,
     IdentityAuthorizationConflict,
+    IdentityCreatePrepared,
+    IdentityCreateSecret,
+    IdentityCreateReplayConflict,
     IdentityCurrentnessConflict,
     IdentityInvariantViolation,
     IdentityRepository,
@@ -30,8 +41,13 @@ from atlas_production.infrastructure.postgres_owner.project import (
 )
 from atlas_production.infrastructure.postgres_owner.team import TeamRepository
 from atlas_production.modules.identity_access.api_models import (
+    DirectoryConnectionCreateRequest,
+    DirectoryConnectionStatus,
+    LocalPilotInviteAcceptance,
     ProjectSummary,
     SessionState,
+    UserInviteCreateRequest,
+    UserInviteCreateResult,
 )
 from atlas_production.modules.identity_access.contracts import (
     IdentityAccessError,
@@ -123,12 +139,23 @@ class PostgresIdentityAccessRepository(
         self,
         session_factory: SessionFactory,
         acl_authority: ActionAwareAclAuthority | None = None,
+        id_allocator: Callable[[], str] | None = None,
+        request_fingerprint: Callable[[bytes], str] | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.owner = IdentityRepository(session_factory)
+        self.owner = IdentityRepository(
+            session_factory,
+            id_allocator=id_allocator or (lambda: uuid4().hex),
+        )
         self.team_owner = TeamRepository(session_factory)
         self.project_owner = ProjectAclRepository(session_factory)
         self.acl_authority = acl_authority or ActionAwareAclAuthority(session_factory)
+        self.request_fingerprint = request_fingerprint or (
+            lambda payload: AesGcmEnvelopeCipher.from_environment().keyed_fingerprint(
+                domain="identity-directory-create",
+                payload=payload,
+            )
+        )
         self.issue_session_command = IssueBrowserSessionCommand(session_factory)
         self.revoke_session_command = RevokeBrowserSessionCommand(session_factory)
         self.expire_invite_command = ExpireInviteCommand(session_factory)
@@ -186,6 +213,274 @@ class PostgresIdentityAccessRepository(
             authorization_actor_ids=authorization_actor_ids,
         ):
             yield
+
+    def create_directory_connection_once(
+        self,
+        actor: UserRecord,
+        payload: DirectoryConnectionCreateRequest,
+        prepare_material,
+    ) -> DirectoryConnectionStatus:
+        fingerprint_payload = payload.model_dump(
+            mode="json",
+            exclude={"idempotency_key", "bind_password", "custom_ca_pem"},
+        )
+        fingerprint_payload["bind_password"] = (
+            payload.bind_password.get_secret_value()
+        )
+        fingerprint_payload["custom_ca_pem"] = (
+            payload.custom_ca_pem.get_secret_value()
+            if payload.custom_ca_pem is not None
+            else None
+        )
+        fingerprint = self.request_fingerprint(
+            json.dumps(
+                fingerprint_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+
+        def prepare(connection_id: str) -> IdentityCreatePrepared:
+            connection, secrets, status = prepare_material(connection_id)
+            audit = build_audit_event(
+                event_type="directory_connection_created",
+                actor_id=actor.actor_id,
+                target_ref=f"directory-connection:{connection_id}",
+                project_id=None,
+                message_code="directory.connection_created",
+                metadata={"connection_id": connection_id, "status": "created"},
+            )
+            return IdentityCreatePrepared(
+                target_ref=f"directory-connection:{connection_id}",
+                response_json=status.model_dump_json(),
+                change_set=IdentitySessionChangeSet(
+                    directory_connections=(connection,),
+                    expected_directory_connections=((connection_id, None),),
+                    directory_secrets=secrets,
+                    expected_directory_secrets=tuple(
+                        (connection_id, secret.secret_kind, None)
+                        for secret in secrets
+                    ),
+                    audit_events=(audit,),
+                    authorization_actor_id=actor.actor_id,
+                    authorization_requires_system_admin=True,
+                ),
+            )
+
+        try:
+            receipt = self.owner.create_once(
+                scope_actor_id=actor.actor_id,
+                operation="create_directory_connection",
+                idempotency_key=payload.idempotency_key,
+                request_fingerprint=fingerprint,
+                target_prefix="directory-",
+                prepare=prepare,
+            )
+        except IdentityCreateReplayConflict as exc:
+            raise IdentityAccessError(
+                "idempotency_conflict",
+                "directory.concurrent_change",
+                409,
+            ) from exc
+        except IdentityAuthorizationConflict as exc:
+            raise IdentityAccessError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+            ) from exc
+        except IdentityCurrentnessConflict as exc:
+            raise IdentityAccessError(
+                "directory_conflict",
+                "directory.concurrent_change",
+                409,
+            ) from exc
+        return DirectoryConnectionStatus.model_validate_json(receipt.response_json)
+
+    def create_invite_once(
+        self,
+        actor: UserRecord,
+        payload: UserInviteCreateRequest,
+        normalized_email: str,
+        cipher=None,
+    ) -> UserInviteCreateResult:
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "display_name": payload.display_name,
+                    "email": normalized_email,
+                    "system_role": payload.system_role,
+                    "scope_type": payload.scope_type,
+                    "scope_id": payload.scope_id,
+                    "scope_role": payload.scope_role,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        existing_user = self.user_by_email(normalized_email)
+        selected_cipher = cipher or AesGcmEnvelopeCipher.from_environment()
+
+        def prepare(actor_id: str) -> IdentityCreatePrepared:
+            user = existing_user
+            if user is not None and user.active:
+                raise IdentityAccessError(
+                    "admin_action_rejected",
+                    "identity.user_with_email_already_exists",
+                    409,
+                )
+            if user is None:
+                user = UserRecord(
+                    actor_id=actor_id,
+                    display_name=payload.display_name,
+                    email=normalized_email,
+                    system_role=payload.system_role,
+                    password_digest=None,
+                    active=False,
+                    actor_type="user",
+                    created_at=utc_now_iso(),
+                )
+                expected_user = None
+            else:
+                expected_user = replace(user)
+                user = replace(
+                    user,
+                    display_name=payload.display_name,
+                    system_role=payload.system_role,
+                )
+            raw_token = f"atlas_invite_{token_urlsafe(32)}"
+            digest = invite_token_digest(raw_token)
+            created_at = datetime.now(timezone.utc)
+            invite = UserInviteRecord(
+                invite_id=f"inv-{hashlib.sha256(digest.encode()).hexdigest()[:12]}",
+                actor_id=user.actor_id,
+                email=normalized_email,
+                display_name=payload.display_name,
+                system_role=payload.system_role,
+                token_digest=digest,
+                token_fingerprint=digest[:12],
+                status="pending",
+                created_at=created_at.isoformat(),
+                expires_at=(created_at + timedelta(days=7)).isoformat(),
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+                scope_role=payload.scope_role,
+            )
+            audit = build_audit_event(
+                event_type="user_invite_created",
+                actor_id=actor.actor_id,
+                target_ref=f"user:{user.actor_id}",
+                project_id=(
+                    payload.scope_id if payload.scope_type == "project" else None
+                ),
+                message_code="invite.user_invite_has_been_created",
+                metadata={
+                    "invite_id": invite.invite_id,
+                    "email": normalized_email,
+                    "delivery_mode": "copy_link",
+                    "scope_role": payload.scope_role,
+                },
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+            )
+            result = UserInviteCreateResult(
+                request_id=payload.idempotency_key,
+                status="applied",
+                invite=IdentityAccessService._invite_summary(invite),
+                message_code="invite.is_ready_copy_the_local_acceptance_link",
+                audit_event_ref=audit.event_id,
+                local_pilot_acceptance=None,
+            )
+            encrypted = selected_cipher.encrypt(
+                domain="identity_invite_acceptance",
+                owner_id=user.actor_id,
+                owner_kind="identity_create_receipt",
+                secret_version=1,
+                plaintext=raw_token,
+            )
+            return IdentityCreatePrepared(
+                target_ref=f"user:{user.actor_id}",
+                response_json=result.model_dump_json(),
+                secret=IdentityCreateSecret(
+                    ciphertext=encrypted.ciphertext,
+                    nonce=encrypted.nonce,
+                    key_id=encrypted.key_id,
+                    version=encrypted.version,
+                    algorithm=encrypted.algorithm,
+                    storage_backend=encrypted.storage_backend,
+                ),
+                change_set=IdentitySessionChangeSet(
+                    users=(user,),
+                    expected_users=((user.actor_id, expected_user),),
+                    invite_transitions=(InviteTransition(invite, None),),
+                    audit_events=(audit,),
+                    identity_lock_keys=(
+                        f"identity-email:{hashlib.sha256(normalized_email.encode()).hexdigest()}",
+                    ),
+                    expected_pending_invite_absent_emails=(normalized_email,),
+                    authorization_actor_id=actor.actor_id,
+                    authorization_scope_type=payload.scope_type,
+                    authorization_scope_id=payload.scope_id,
+                ),
+            )
+
+        try:
+            receipt = self.owner.create_once(
+                scope_actor_id=actor.actor_id,
+                operation="create_invite",
+                idempotency_key=payload.idempotency_key,
+                request_fingerprint=fingerprint,
+                target_prefix="user-" if existing_user is None else None,
+                existing_target_id=(
+                    existing_user.actor_id if existing_user is not None else None
+                ),
+                identity_lock_keys=(
+                    f"identity-email:{hashlib.sha256(normalized_email.encode()).hexdigest()}",
+                ),
+                prepare=prepare,
+            )
+        except IdentityCreateReplayConflict as exc:
+            raise IdentityAccessError(
+                "idempotency_conflict",
+                "invite.already_pending_for_email",
+                409,
+            ) from exc
+        except IdentityCurrentnessConflict as exc:
+            raise IdentityAccessError(
+                "admin_action_rejected",
+                "invite.already_pending_for_email",
+                409,
+            ) from exc
+        except IdentityAuthorizationConflict as exc:
+            raise IdentityAccessError(
+                "access_denied",
+                "permission.admin_permission_is_required",
+                403,
+            ) from exc
+        if receipt.secret is None:
+            raise ValueError("invite create receipt is missing encrypted acceptance")
+        raw_token = selected_cipher.decrypt(
+            EncryptedCredential(
+                ciphertext=receipt.secret.ciphertext,
+                nonce=receipt.secret.nonce,
+                key_id=receipt.secret.key_id,
+                version=receipt.secret.version,
+                algorithm=receipt.secret.algorithm,
+                storage_backend=receipt.secret.storage_backend,
+            ),
+            domain="identity_invite_acceptance",
+            owner_id=receipt.target_ref.removeprefix("user:"),
+            owner_kind="identity_create_receipt",
+        )
+        result = UserInviteCreateResult.model_validate_json(receipt.response_json)
+        return result.model_copy(
+            update={
+                "local_pilot_acceptance": LocalPilotInviteAcceptance(
+                    mode="copy_link",
+                    acceptance_token=raw_token,
+                    acceptance_url=f"/accept-invite?token={raw_token}",
+                )
+            }
+        )
 
     def actor_for_token(self, token: str | None) -> UserRecord | None:
         return self.owner.actor_for_token(token)

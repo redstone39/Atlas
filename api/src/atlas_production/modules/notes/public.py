@@ -208,7 +208,6 @@ class BodyRestoreResultV1(_StrictModel):
 
 
 class NoteCreateRequestV1(_StrictModel):
-    note_id: Identity
     scope_type: ScopeType
     scope_id: Identity
     category_id: Identity | None = None
@@ -235,7 +234,6 @@ class NoteRestoreRequestV1(_StrictModel):
 
 
 class NoteCategoryCreateRequestV1(_StrictModel):
-    category_id: Identity
     scope_type: ScopeType
     scope_id: Identity
     name: str = Field(min_length=1, max_length=200)

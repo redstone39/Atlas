@@ -112,6 +112,45 @@ class AtlasDocumentRow(OrmBase):
     )
 
 
+class AtlasDocumentUploadIntentRow(OrmBase):
+    __tablename__ = "atlas_document_upload_intents"
+
+    actor_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_id: Mapped[str] = mapped_column(String, primary_key=True)
+    operation: Mapped[str] = mapped_column(String, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
+    request_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    document_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    document_version_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    audit_event_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('team','project')",
+            name="ck_atlas_document_upload_intent_scope",
+        ),
+        CheckConstraint(
+            "status IN ('allocated','completed')",
+            name="ck_atlas_document_upload_intent_status",
+        ),
+        CheckConstraint(
+            "(status = 'allocated' AND document_version_id IS NULL "
+            "AND artifact_id IS NULL AND audit_event_id IS NULL "
+            "AND completed_at IS NULL) OR "
+            "(status = 'completed' AND document_version_id IS NOT NULL "
+            "AND artifact_id IS NOT NULL AND audit_event_id IS NOT NULL "
+            "AND completed_at IS NOT NULL)",
+            name="ck_atlas_document_upload_intent_result",
+        ),
+    )
+
+
 class AtlasDocumentTagRow(OrmBase):
     __tablename__ = "atlas_document_tags"
 

@@ -82,49 +82,83 @@ class DirectoryIdentityService:
     ) -> DirectoryConnectionStatus:
         actor = self._require_admin(actor)
         self._validate_directory_filter(payload.user_object_filter)
-        now = utc_now_iso()
-        connection = DirectoryConnectionRecord(
-            **payload.model_dump(exclude={"bind_password", "custom_ca_pem"}),
-            created_at=now,
-            updated_at=now,
-        )
-        with self.repository.directory_mutation(
-            f"identity:directory-connection:{connection.connection_id}",
-            actor_ids=(actor.actor_id,),
-            authorization_actor_ids=(actor.actor_id,),
-            connection_ids=(connection.connection_id,),
-        ):
-            if self.repository.get_directory_connection(connection.connection_id) is not None:
-                self._reject("directory.connection_conflict", 409)
-            self.repository.put_directory_connection(connection)
-            self.repository.put_directory_secret(
+
+        def prepare_material(connection_id: str):
+            now = utc_now_iso()
+            connection = DirectoryConnectionRecord(
+                connection_id=connection_id,
+                **payload.model_dump(
+                    exclude={
+                        "bind_password",
+                        "custom_ca_pem",
+                        "idempotency_key",
+                    }
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+            secrets = [
                 self._encrypt_secret(
-                    connection.connection_id,
+                    connection_id,
                     "bind_password",
                     payload.bind_password.get_secret_value(),
                     1,
                     now,
                 )
-            )
+            ]
+            ca_sha256 = None
             if payload.custom_ca_pem is not None:
-                self.repository.put_directory_secret(
+                ca_plaintext = payload.custom_ca_pem.get_secret_value()
+                secrets.append(
                     self._encrypt_secret(
-                        connection.connection_id,
+                        connection_id,
                         "custom_ca",
-                        payload.custom_ca_pem.get_secret_value(),
+                        ca_plaintext,
                         1,
                         now,
                     )
                 )
+                ca_sha256 = sha256(ca_plaintext.encode("utf-8")).hexdigest()
+            status = DirectoryConnectionStatus(
+                **{
+                    field_name: getattr(connection, field_name)
+                    for field_name in DirectoryConnectionStatus.model_fields
+                    if hasattr(connection, field_name)
+                },
+                bind_password_configured=True,
+                custom_ca_configured=payload.custom_ca_pem is not None,
+                custom_ca_sha256=ca_sha256,
+            )
+            return connection, tuple(secrets), status
+
+        create_once = getattr(
+            self.repository,
+            "create_directory_connection_once",
+            None,
+        )
+        if create_once is not None:
+            return create_once(actor, payload, prepare_material)
+
+        connection_id = f"directory-{uuid4().hex}"
+        connection, secrets, status = prepare_material(connection_id)
+        with self.repository.directory_mutation(
+            f"identity:directory-connection:{connection_id}",
+            actor_ids=(actor.actor_id,),
+            authorization_actor_ids=(actor.actor_id,),
+            connection_ids=(connection_id,),
+        ):
+            self.repository.put_directory_connection(connection)
+            for secret in secrets:
+                self.repository.put_directory_secret(secret)
             self._append_audit(
                 actor.actor_id,
                 "directory_connection_created",
-                f"directory-connection:{connection.connection_id}",
+                f"directory-connection:{connection_id}",
                 "directory.connection_created",
-                {"connection_id": connection.connection_id, "status": "created"},
+                {"connection_id": connection_id, "status": "created"},
             )
             self.repository.persist()
-        return self._connection_status(connection)
+        return status
 
     def update_connection(
         self,

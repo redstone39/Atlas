@@ -341,41 +341,27 @@ class TeamAccessService:
         actor: UserRecord | None,
         payload: TeamCreateRequest,
     ) -> TeamActionOutcome:
-        return self._run_mutation(
-            self._team_mutation_context(
-                payload.team_id,
-                actor_ids=(actor.actor_id,) if actor else (),
-                include_hierarchy=True,
-            ),
-            lambda: self._create_team_locked(actor, payload),
-        )
-
-    def _create_team_locked(
-        self,
-        actor: UserRecord | None,
-        payload: TeamCreateRequest,
-    ) -> TeamActionOutcome:
         actor = self._require_system_admin(actor)
-        if self.repository.get_team(payload.team_id):
-            self._reject(
-                "team.already_exists",
-                "audit-team-create-rejected",
-                409,
-            )
-        if payload.parent_team_id and not self.repository.get_team(payload.parent_team_id):
+        create_once = getattr(self.repository, "create_team_once", None)
+        if create_once is not None:
+            return create_once(actor, payload)
+        team_id = f"team-{uuid4().hex}"
+        if payload.parent_team_id and not self.repository.get_team(
+            payload.parent_team_id
+        ):
             self._reject(
                 "team.parent_was_not_found",
                 "audit-team-create-rejected",
                 404,
             )
-        if self.repository.would_exceed_depth(payload.team_id, payload.parent_team_id):
+        if self.repository.would_exceed_depth(team_id, payload.parent_team_id):
             self._reject(
                 "team.depth_limit_exceeded",
                 "audit-team-create-rejected",
                 422,
             )
         team = TeamRecord(
-            team_id=payload.team_id,
+            team_id=team_id,
             name=payload.name,
             parent_team_id=payload.parent_team_id,
             status="active",
@@ -387,8 +373,8 @@ class TeamAccessService:
             TeamAuditCommand(
                 event_type="team_created",
                 actor_id=actor.actor_id,
-                target_ref=f"team:{payload.team_id}",
-                message_code='team.is_ready',
+                target_ref=f"team:{team_id}",
+                message_code="team.is_ready",
                 metadata={
                     "parent_team_id": payload.parent_team_id,
                     "inherit_parent_documents": payload.inherit_parent_documents,
@@ -399,8 +385,8 @@ class TeamAccessService:
             result=AdminActionResult(
                 request_id=payload.idempotency_key,
                 status="applied",
-                target_ref=f"team:{payload.team_id}",
-                message_code='team.is_ready',
+                target_ref=f"team:{team_id}",
+                message_code="team.is_ready",
                 audit_event_ref=audit.event_id,
             ),
             success_status_code=201,

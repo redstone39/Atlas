@@ -255,7 +255,7 @@ def revoke_project_access_grant(
     return _access_grant_response(outcome)
 
 
-@router.post("/api/v1/admin/projects")
+@router.post("/api/v1/admin/projects", response_model=AdminActionResult)
 def create_project(
     payload: ProjectCreateRequest,
     request: Request,
