@@ -19,7 +19,7 @@ if [[ -n "${ATLAS_PRODUCTION_PROVIDER_MODEL+x}" && -z "$ATLAS_PRODUCTION_PROVIDE
   echo "ATLAS_PRODUCTION_PROVIDER_MODEL must not be empty when set." >&2
   exit 1
 fi
-if [[ -n "${CHROME_EXECUTABLE_PATH+x}" && ! -x "$CHROME_EXECUTABLE_PATH" ]]; then
+if [[ -n "${CHROME_EXECUTABLE_PATH+x}" && ( ! -f "$CHROME_EXECUTABLE_PATH" || ! -x "$CHROME_EXECUTABLE_PATH" ) ]]; then
   echo "CHROME_EXECUTABLE_PATH must name an executable file when set." >&2
   exit 1
 fi
