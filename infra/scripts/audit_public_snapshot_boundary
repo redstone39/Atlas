@@ -64,7 +64,7 @@ DIRECT_PAYLOAD_LITERAL = re.compile(
     ["']?\b(?:conversation|turn|provider|model)[_-]?(?:payload|content|text|response)
     \b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
     |
-    ["']?\btranscript\b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    (?<![a-z0-9_.])["']?\btranscript\b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
     """
 )
 SAFE_DIRECT_PAYLOAD_MARKER = re.compile(
