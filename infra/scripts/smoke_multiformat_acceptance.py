@@ -12,9 +12,9 @@ import time
 import httpx
 
 
-PROJECT_ID = "project-multiformat-acceptance"
-CONNECTION_ID = "conn-multiformat-acceptance"
-ROUTE_ID = "route-multiformat-acceptance"
+PROJECT_NAME = "Multiformat acceptance"
+CONNECTION_NAME = "Multiformat deterministic provider"
+ROUTE_NAME = "Multiformat deterministic route"
 VISION_PROFILES = (
     "default-docx",
     "default-pptx",
@@ -110,28 +110,58 @@ def login(client: httpx.Client) -> None:
     if not session["authenticated"] or session["system_role"] != "admin":
         raise RuntimeError("acceptance login did not create an admin session")
 
+def claim_first_admin(client: httpx.Client) -> None:
+    email = os.environ.get("ATLAS_MULTIFORMAT_ADMIN_EMAIL")
+    password = os.environ.get("ATLAS_MULTIFORMAT_ADMIN_PASSWORD")
+    if not email or not password:
+        raise RuntimeError(
+            "ATLAS_MULTIFORMAT_ADMIN_EMAIL and "
+            "ATLAS_MULTIFORMAT_ADMIN_PASSWORD are required"
+        )
+    status = checked(client.get("/api/v1/auth/first-admin"), 200).json()
+    if status != {"claim_available": True}:
+        raise RuntimeError("fresh acceptance stack cannot claim the first administrator")
+    session = checked(
+        client.post(
+            "/api/v1/auth/first-admin",
+            json={
+                "display_name": "Multiformat Acceptance Admin",
+                "email": email,
+                "password": password,
+            },
+        ),
+        201,
+    ).json()
+    if not session["authenticated"] or session["system_role"] != "admin":
+        raise RuntimeError("first-administrator claim did not create an admin session")
 
-def login_and_configure(client: httpx.Client) -> dict[str, int]:
-    login(client)
 
-    checked(
+
+def login_and_configure(
+    client: httpx.Client,
+) -> tuple[str, dict[str, int]]:
+    claim_first_admin(client)
+
+    project = checked(
         client.post(
             "/api/v1/admin/projects",
             json={
-                "project_id": PROJECT_ID,
-                "name": "Multiformat acceptance",
+                "name": PROJECT_NAME,
                 "policy_profile_id": "policy-default-governed",
                 "idempotency_key": "create-project-multiformat-acceptance",
             },
         ),
         201,
-    )
+    ).json()
+    target_ref = project["target_ref"]
+    if not target_ref.startswith("project:"):
+        raise RuntimeError("acceptance project owner returned an invalid target_ref")
+    project_id = target_ref.split(":", 1)[1]
     connection = checked(
         client.post(
             "/api/v1/admin/config/provider-connections",
             json={
-                "connection_id": CONNECTION_ID,
-                "display_name": "Multiformat deterministic provider",
+                "display_name": CONNECTION_NAME,
                 "provider_type": "openai_compatible",
                 "endpoint_url": "http://127.0.0.1:18081/v1",
                 "api_key": "acceptance-only",
@@ -140,16 +170,16 @@ def login_and_configure(client: httpx.Client) -> dict[str, int]:
         ),
         201,
     ).json()
+    connection_id = connection["connection_id"]
     if connection["status"] != "verified" or not connection["enabled"]:
         raise RuntimeError("deterministic provider connection was not verified")
     route = checked(
         client.post(
             "/api/v1/admin/config/model-routes",
             json={
-                "route_id": ROUTE_ID,
-                "display_name": "Multiformat deterministic route",
+                "display_name": ROUTE_NAME,
                 "model_name": "atlas-deterministic-acceptance",
-                "connection_id": CONNECTION_ID,
+                "connection_id": connection_id,
                 "enabled": True,
                 "supports_vision": True,
                 "runtime_policy": runtime_policy(),
@@ -158,6 +188,7 @@ def login_and_configure(client: httpx.Client) -> dict[str, int]:
         ),
         201,
     ).json()
+    route_id = route["route_id"]
     if (
         route["status"] != "test_passed"
         or not route["enabled"]
@@ -167,7 +198,7 @@ def login_and_configure(client: httpx.Client) -> dict[str, int]:
     for purpose in ("text", "vision"):
         route = checked(
             client.post(
-                f"/api/v1/admin/config/model-routes/{ROUTE_ID}/defaults/{purpose}",
+                f"/api/v1/admin/config/model-routes/{route_id}/defaults/{purpose}",
                 json={
                     "expected_revision": route["revision"],
                     "idempotency_key": (
@@ -244,31 +275,43 @@ def login_and_configure(client: httpx.Client) -> dict[str, int]:
         if activated["status"] != "active":
             raise RuntimeError(f"{profile_id} revision was not activated")
         revisions[profile_id] = revision
-    return revisions
+    return project_id, revisions
 
 
 def login_and_verify_existing_configuration(
     client: httpx.Client,
-) -> dict[str, int]:
+) -> tuple[str, dict[str, int]]:
     login(client)
     projects = checked(client.get("/api/v1/admin/projects"), 200).json()[
         "projects"
     ]
-    if not any(item["project_id"] == PROJECT_ID for item in projects):
-        raise RuntimeError("acceptance project is not configured")
+    matching_projects = [
+        item
+        for item in projects
+        if item["name"] == PROJECT_NAME and item["status"] == "active"
+    ]
+    if len(matching_projects) != 1:
+        raise RuntimeError(
+            "acceptance project name must resolve to exactly one active project"
+        )
+    project_id = matching_projects[0]["project_id"]
     routes = checked(
         client.get("/api/v1/admin/config/model-routes"), 200
     ).json()["routes"]
-    route = next((item for item in routes if item["route_id"] == ROUTE_ID), None)
-    if (
-        route is None
-        or route["status"] != "test_passed"
-        or not route["enabled"]
-        or not route["supports_vision"]
-        or not route["is_text_default"]
-        or not route["is_vision_default"]
-    ):
-        raise RuntimeError("acceptance model route is not ready")
+    matching_routes = [
+        item
+        for item in routes
+        if item["display_name"] == ROUTE_NAME
+        and item["status"] == "test_passed"
+        and item["enabled"]
+        and item["supports_vision"]
+        and item["is_text_default"]
+        and item["is_vision_default"]
+    ]
+    if len(matching_routes) != 1:
+        raise RuntimeError(
+            "acceptance model route name must resolve to exactly one ready route"
+        )
     profiles = checked(
         client.get("/api/v1/admin/processing-profiles"), 200
     ).json()["items"]
@@ -281,26 +324,40 @@ def login_and_verify_existing_configuration(
             item for item in profile["revisions"] if item["status"] == "active"
         )
         revisions[profile_id] = int(active["revision"])
-    return revisions
+    return project_id, revisions
+
+
+def resolve_acceptance_project(client: httpx.Client) -> str:
+    projects = checked(client.get("/api/v1/admin/projects"), 200).json()[
+        "projects"
+    ]
+    matches = [
+        item
+        for item in projects
+        if item["name"] == PROJECT_NAME and item["status"] == "active"
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            "acceptance project name must resolve to exactly one active project"
+        )
+    return matches[0]["project_id"]
 
 
 def upload_documents(
-    client: httpx.Client, fixtures: Path, manifest: dict
+    client: httpx.Client, fixtures: Path, manifest: dict, project_id: str
 ) -> dict[str, dict[str, str]]:
     jobs: dict[str, dict[str, str]] = {}
     for document_format, item in manifest["files"].items():
         path = fixtures / item["filename"]
         if not path.is_file():
             raise RuntimeError(f"missing fixture: {path}")
-        document_id = f"document-multiformat-{document_format}"
         with path.open("rb") as stream:
             response = checked(
                 client.post(
                     "/api/v1/admin/document-library",
                     data={
-                        "document_id": document_id,
                         "scope_type": "project",
-                        "scope_id": PROJECT_ID,
+                        "scope_id": project_id,
                         "description": "Nine-format product acceptance fixture",
                         "allow_member_download": "false",
                         "idempotency_key": f"upload-multiformat-{document_format}",
@@ -325,7 +382,7 @@ def upload_documents(
         jobs[document_format] = {
             "job_id": body["job_id"],
             "status_url": body["status_url"],
-            "document_id": document_id,
+            "document_id": body["document"]["document_id"],
         }
     return jobs
 
@@ -335,6 +392,7 @@ def wait_for_documents(
     jobs: dict[str, dict[str, str]],
     vision_revisions: dict[str, int],
     timeout_seconds: int,
+    project_id: str,
 ) -> dict[str, dict]:
     deadline = time.monotonic() + timeout_seconds
     latest: dict[str, dict] = {}
@@ -381,7 +439,7 @@ def wait_for_documents(
     documents = checked(
         client.get(
             "/api/v1/admin/document-library",
-            params={"scope_type": "project", "scope_id": PROJECT_ID},
+            params={"scope_type": "project", "scope_id": project_id},
         ),
         200,
     ).json()["documents"]
@@ -393,12 +451,14 @@ def wait_for_documents(
     return latest
 
 
-def create_conversation(client: httpx.Client, suffix: str) -> str:
+def create_conversation(
+    client: httpx.Client, project_id: str, suffix: str
+) -> str:
     body = checked(
         client.post(
             "/api/v1/workspace/conversations",
             json={
-                "tag_refs": [{"tag_type": "project", "tag_id": PROJECT_ID}],
+                "tag_refs": [{"tag_type": "project", "tag_id": project_id}],
                 "title": f"Multiformat acceptance {suffix}",
                 "idempotency_key": f"conversation-multiformat-{suffix}",
             },
@@ -455,7 +515,11 @@ def run_turn(
 
 
 def verify_queries_and_viewer(
-    client: httpx.Client, manifest: dict, *, run_suffix: str = ""
+    client: httpx.Client,
+    manifest: dict,
+    project_id: str,
+    *,
+    run_suffix: str = "",
 ) -> dict[str, object]:
     suffix = f"-{run_suffix}" if run_suffix else ""
     format_by_title = {
@@ -487,7 +551,9 @@ def verify_queries_and_viewer(
             200,
         ).json()
 
-    conversation_id = create_conversation(client, f"cross-document{suffix}")
+    conversation_id = create_conversation(
+        client, project_id, f"cross-document{suffix}"
+    )
     cross = run_turn(
         client,
         conversation_id,
@@ -527,7 +593,9 @@ def verify_queries_and_viewer(
     if "plus or minus 5 percent" not in word_open["content"].casefold():
         raise RuntimeError("protected Word evidence did not preserve qualification")
 
-    visual_conversation = create_conversation(client, f"visual{suffix}")
+    visual_conversation = create_conversation(
+        client, project_id, f"visual{suffix}"
+    )
     visual = run_turn(
         client,
         visual_conversation,
@@ -583,8 +651,9 @@ def main() -> int:
     with httpx.Client(base_url=args.base_url, follow_redirects=False) as client:
         if args.journey_only:
             login(client)
+            project_id = resolve_acceptance_project(client)
             journey = verify_queries_and_viewer(
-                client, manifest, run_suffix=args.run_suffix
+                client, manifest, project_id, run_suffix=args.run_suffix
             )
             print(
                 json.dumps(
@@ -600,17 +669,21 @@ def main() -> int:
             )
             return 0
 
-        revisions = (
+        project_id, revisions = (
             login_and_verify_existing_configuration(client)
             if args.configuration_ready
             else login_and_configure(client)
         )
-        jobs = upload_documents(client, fixtures, manifest)
+        jobs = upload_documents(client, fixtures, manifest, project_id)
         statuses = wait_for_documents(
-            client, jobs, revisions, args.processing_timeout_seconds
+            client,
+            jobs,
+            revisions,
+            args.processing_timeout_seconds,
+            project_id,
         )
         journey = verify_queries_and_viewer(
-            client, manifest, run_suffix=args.run_suffix
+            client, manifest, project_id, run_suffix=args.run_suffix
         )
 
     result = {
