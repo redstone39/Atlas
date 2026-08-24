@@ -3,75 +3,25 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-: "${ATLAS_PRODUCTION_DATABASE_URL:?Set ATLAS_PRODUCTION_DATABASE_URL to a PostgreSQL database before running the real human-operable smoke.}"
-: "${ATLAS_CREDENTIAL_MASTER_KEY:?Set the base64-encoded 32-byte credential master key before running the real human-operable smoke.}"
-: "${ATLAS_CREDENTIAL_MASTER_KEY_ID:?Set the credential master key id before running the real human-operable smoke.}"
-: "${ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY:?Set the Provider key that browser automation will enter through the admin UI.}"
+: "${ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY:?Set the Provider key that browser automation will enter through the setup UI.}"
 : "${ATLAS_HUMAN_SMOKE_ADMIN_EMAIL:?Set the fresh-database administrator email.}"
 : "${ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD:?Set a fresh-database administrator password of at least 12 characters.}"
 
-api/scripts/check
-web/scripts/check
-infra/scripts/audit_architecture_boundaries
-infra/scripts/audit_development_baseline
-infra/scripts/audit_provider_key_cutover
+if (( ${#ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD} < 12 )); then
+  echo "ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD must contain at least 12 characters." >&2
+  exit 1
+fi
+if [[ -n "${ATLAS_PRODUCTION_PROVIDER_ENDPOINT+x}" && -z "$ATLAS_PRODUCTION_PROVIDER_ENDPOINT" ]]; then
+  echo "ATLAS_PRODUCTION_PROVIDER_ENDPOINT must not be empty when set." >&2
+  exit 1
+fi
+if [[ -n "${ATLAS_PRODUCTION_PROVIDER_MODEL+x}" && -z "$ATLAS_PRODUCTION_PROVIDER_MODEL" ]]; then
+  echo "ATLAS_PRODUCTION_PROVIDER_MODEL must not be empty when set." >&2
+  exit 1
+fi
+if [[ -n "${CHROME_EXECUTABLE_PATH+x}" && ! -x "$CHROME_EXECUTABLE_PATH" ]]; then
+  echo "CHROME_EXECUTABLE_PATH must name an executable file when set." >&2
+  exit 1
+fi
 
-api_log="$(mktemp)"
-web_log="$(mktemp)"
-api_pid=""
-web_pid=""
-
-cleanup() {
-  if [[ -n "$api_pid" ]]; then
-    kill "$api_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$web_pid" ]]; then
-    kill "$web_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$api_pid" ]]; then
-    wait "$api_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$web_pid" ]]; then
-    wait "$web_pid" 2>/dev/null || true
-  fi
-  rm -f "$api_log" "$web_log"
-}
-trap cleanup EXIT
-
-wait_for_url() {
-  local name="$1"
-  local url="$2"
-  local log_file="$3"
-
-  for _ in {1..80}; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.25
-  done
-
-  echo "Timed out waiting for $name at $url" >&2
-  echo "---- $name log ----" >&2
-  tail -n 80 "$log_file" >&2 || true
-  return 1
-}
-
-(
-  cd api
-  PYTHONPATH=src uv run uvicorn atlas_production.app:create_app --factory --host 127.0.0.1 --port 8002
-) >"$api_log" 2>&1 &
-api_pid="$!"
-
-(
-  cd web
-  npm run build
-  npm run start
-) >"$web_log" 2>&1 &
-web_pid="$!"
-
-wait_for_url "production API" "http://127.0.0.1:8002/api/v1/ops/health" "$api_log"
-wait_for_url "production web" "http://127.0.0.1:5174/login" "$web_log"
-
-ATLAS_PRODUCTION_WEB_URL="http://127.0.0.1:5174" \
-  ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY="$ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY" \
-  node infra/scripts/browser_smoke_human_operable.mjs
+node infra/scripts/browser_smoke_human_operable.mjs

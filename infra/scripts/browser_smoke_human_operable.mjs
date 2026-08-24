@@ -5,18 +5,18 @@ import { createRequire } from "node:module";
 const require = createRequire(new URL("../../web/package.json", import.meta.url));
 const { chromium } = require("playwright-core");
 
-const webUrl = process.env.ATLAS_PRODUCTION_WEB_URL ?? "http://127.0.0.1:5174";
+const webUrl = process.env.ATLAS_PRODUCTION_WEB_URL ?? "http://127.0.0.1:5184";
 const providerEndpoint = process.env.ATLAS_PRODUCTION_PROVIDER_ENDPOINT ?? "https://api.openai.com/v1";
 const providerApiKey = process.env.ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY;
 const providerModel = process.env.ATLAS_PRODUCTION_PROVIDER_MODEL ?? "gpt-4.1-mini";
-const bootstrapAdminEmail = process.env.ATLAS_HUMAN_SMOKE_ADMIN_EMAIL;
-const bootstrapAdminPassword = process.env.ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD;
+const smokeAdminEmail = process.env.ATLAS_HUMAN_SMOKE_ADMIN_EMAIL;
+const smokeAdminPassword = process.env.ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD;
 if (!providerApiKey) {
   throw new Error(
     "ATLAS_PRODUCTION_SMOKE_PROVIDER_API_KEY is required and is entered through the admin UI.",
   );
 }
-if (!bootstrapAdminEmail || !bootstrapAdminPassword) {
+if (!smokeAdminEmail || !smokeAdminPassword) {
   throw new Error(
     "ATLAS_HUMAN_SMOKE_ADMIN_EMAIL and ATLAS_HUMAN_SMOKE_ADMIN_PASSWORD are required.",
   );
@@ -64,35 +64,45 @@ try {
   const documentTitle = `Smoke Layout Guideline ${runId}`;
 
   await page.goto(`${webUrl}/login`);
-  await page.getByRole("heading", { name: "Atlas Production" }).waitFor();
-  await page.getByLabel("Email").fill(bootstrapAdminEmail);
-  await page.getByLabel("Password").fill(bootstrapAdminPassword);
-  await page.getByRole("button", { name: /sign in/i }).click();
-  await page.getByRole("heading", { name: "Workspace" }).waitFor();
-
-  await page.getByRole("button", { name: "Users" }).click();
-  await page.getByRole("heading", { name: "Users" }).waitFor();
-  await page.getByRole("button", { name: /create invite/i }).click();
-  await page.getByLabel("Member name").fill(engineerName);
-  await page.getByLabel("Member email").fill(engineerEmail);
-  await page.getByRole("dialog").getByRole("button", { name: /create invite/i }).click();
-  await page.getByText(/Invite is ready/).first().waitFor();
-  const inviteLink = await page.getByLabel("Invite acceptance link").inputValue();
-  await page.getByRole("dialog").getByRole("button", { name: /cancel/i }).click();
-
-  await page.getByRole("button", { name: "Projects" }).click();
-  await page.getByRole("heading", { name: "Projects" }).waitFor();
-  await page.getByRole("button", { name: /create project/i }).click();
-  await page.getByLabel("Project name").fill(projectName);
-  await page.getByRole("dialog").getByRole("button", { name: /create project/i }).click();
-  await page.getByText(/Project is ready/).first().waitFor();
-  await page.getByRole("button", { name: "Document Library" }).click();
-  await page.getByRole("heading", { name: "Document Library" }).waitFor();
-  await page.getByLabel("Target").click();
   await page
-    .getByRole("option", { name: new RegExp(`Project: ${escapeRegExp(projectName)}`) })
+    .getByRole("heading", { name: "Create the first administrator" })
+    .waitFor();
+  await page.getByLabel("Display name").fill("Atlas Smoke Administrator");
+  await page.getByLabel("Email").fill(smokeAdminEmail);
+  await page.getByLabel("Password").fill(smokeAdminPassword);
+  await page.getByLabel("Confirm password").fill(smokeAdminPassword);
+  await page.getByRole("button", { name: "Create administrator" }).click();
+
+  await page
+    .getByRole("heading", { name: "Connect a model provider" })
+    .waitFor();
+  await page.getByLabel("Connection name").fill(connectionName);
+  await page.getByLabel("Endpoint URL").fill(providerEndpoint);
+  await page.getByLabel("API key").fill(providerApiKey);
+  await page
+    .getByRole("button", { name: "Test connection and find models" })
     .click();
-  await page.getByRole("button", { name: "Upload document" }).click();
+  await page.getByLabel("Text model").waitFor();
+  const textModelCombobox = page.getByRole("combobox", { name: "Text model" });
+  if ((await textModelCombobox.count()) > 0) {
+    await textModelCombobox.click();
+    await page
+      .getByRole("option", { name: providerModel, exact: true })
+      .click();
+  } else {
+    await page.getByLabel("Text model").fill(providerModel);
+  }
+  await page
+    .getByRole("button", { name: "Test and use this text model" })
+    .click();
+
+  await page
+    .getByRole("heading", { name: "Create or choose a project" })
+    .waitFor();
+  await page.getByLabel("New project name").fill(projectName);
+  await page.getByRole("button", { name: "Create project" }).click();
+
+  await page.getByRole("heading", { name: "Add the first document" }).waitFor();
   await page
     .getByLabel("Document file")
     .setInputFiles({
@@ -102,38 +112,39 @@ try {
         "The synthetic reference target is documented in the example source differential, with tolerance set by the project stackup note.",
       ),
     });
-  await page.getByLabel("Document description").fill("Controlled smoke evidence");
-  await page.getByRole("dialog").getByRole("button", { name: /upload document/i }).click();
-  await page.getByText(/Document is uploaded/).first().waitFor();
+  await page.getByRole("button", { name: "Upload document" }).click();
+
+  await page
+    .getByRole("heading", { name: "Review Atlas readiness" })
+    .waitFor();
+  await page.getByRole("button", { name: "Enter Atlas" }).click();
+  await page.getByRole("heading", { name: "Workspace" }).waitFor();
+
+  await page.getByRole("button", { name: "Document Library" }).click();
+  await page.getByRole("heading", { name: "Document Library" }).waitFor();
+  await page.getByLabel("Target").click();
+  await page
+    .getByRole("option", {
+      name: new RegExp(`Project: ${escapeRegExp(projectName)}`),
+    })
+    .click();
   const documentRow = page.getByRole("row").filter({ hasText: documentTitle });
   await documentRow.getByRole("button", { name: "Manage" }).click();
   await page.getByText("Ready", { exact: true }).waitFor({ timeout: 120_000 });
   await page.keyboard.press("Escape");
 
-  await page.getByRole("button", { name: "Models" }).click();
-  await page.getByRole("heading", { name: "Models" }).waitFor();
-  await page.getByRole("button", { name: /add connection/i }).click();
-  await page.getByLabel("Connection name").fill(connectionName);
-  await page.getByLabel("Endpoint URL").fill(providerEndpoint);
-  await page.getByLabel("API key").fill(providerApiKey);
-  await page.getByRole("dialog").getByRole("button", { name: /save connection/i }).click();
-  await page.getByText(/Provider Connection is verified/i).first().waitFor();
-  await page.getByRole("tab", { name: "Models" }).click();
-  await page.getByRole("button", { name: /add model/i }).click();
-  await page.getByLabel("Route name").fill(routeName);
-  await page.getByLabel("Model or deployment name").fill(providerModel);
-  await page.getByRole("dialog").getByRole("button", { name: /save model/i }).click();
-  await page.getByText(/Model route is configured/).first().waitFor();
-  const routeRow = page.getByRole("row").filter({ hasText: routeName });
-  await routeRow.getByRole("button", { name: /test route/i }).click();
-  await page.getByText(/passed the controlled test/).first().waitFor();
-  const setDefaultButton = routeRow.getByRole("button", { name: /set default/i });
-  if (await setDefaultButton.isEnabled()) {
-    await setDefaultButton.focus();
-    await page.keyboard.press("Enter");
-    await page.getByText(/Default model route is updated/).first().waitFor();
-  }
-
+  await page.getByRole("button", { name: "Users" }).click();
+  await page.getByRole("heading", { name: "Users" }).waitFor();
+  await page.getByRole("button", { name: /create invite/i }).click();
+  await page.getByLabel("Member name").fill(engineerName);
+  await page.getByLabel("Member email").fill(engineerEmail);
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: /create invite/i })
+    .click();
+  await page.getByText(/Invite is ready/).first().waitFor();
+  const inviteLink = await page.getByLabel("Invite acceptance link").inputValue();
+  await page.getByRole("dialog").getByRole("button", { name: /cancel/i }).click();
   await page.getByRole("button", { name: /sign out/i }).click();
   await page.goto(new URL(inviteLink, webUrl).toString());
   await page.getByRole("heading", { name: "Accept invite" }).waitFor();
@@ -143,8 +154,8 @@ try {
   await page.getByText(/Your account is active/).waitFor();
   await page.getByRole("button", { name: /go to sign in/i }).click();
   await page.getByRole("heading", { name: "Atlas Production" }).waitFor();
-  await page.getByLabel("Email").fill(bootstrapAdminEmail);
-  await page.getByLabel("Password").fill(bootstrapAdminPassword);
+  await page.getByLabel("Email").fill(smokeAdminEmail);
+  await page.getByLabel("Password").fill(smokeAdminPassword);
   await page.getByRole("button", { name: /sign in/i }).click();
   await page.getByRole("heading", { name: "Workspace" }).waitFor();
   await page.getByRole("button", { name: "Projects" }).click();
@@ -195,8 +206,8 @@ try {
 
   await page.getByRole("button", { name: /sign out/i }).click();
   await page.getByRole("heading", { name: "Atlas Production" }).waitFor();
-  await page.getByLabel("Email").fill(bootstrapAdminEmail);
-  await page.getByLabel("Password").fill(bootstrapAdminPassword);
+  await page.getByLabel("Email").fill(smokeAdminEmail);
+  await page.getByLabel("Password").fill(smokeAdminPassword);
   await page.getByRole("button", { name: /sign in/i }).click();
   await page.getByRole("heading", { name: "Workspace" }).waitFor();
   await page.getByRole("button", { name: "Projects" }).click();
@@ -217,9 +228,9 @@ try {
   await page.getByRole("button", { name: /sign in/i }).click();
   await page.getByRole("heading", { name: "Workspace" }).waitFor();
   await page
-    .getByLabel("Question")
+    .getByLabel("Message")
     .fill("What is the approved value for the selected item?");
-  await page.getByRole("button", { name: /^Ask$/ }).click();
+  await page.getByRole("button", { name: /^Send$/ }).click();
   await page.getByText(/do not currently have access/i).first().waitFor();
 
   await page.screenshot({ path: screenshotPath, fullPage: true });

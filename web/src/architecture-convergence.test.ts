@@ -98,11 +98,39 @@ describe("frontend compatibility convergence", () => {
       'name: /documents/i',
       'getByLabel("Document title")',
       "prepare evidence",
+      'getByLabel("Question")',
+      "name: /^Ask$/",
+      "ATLAS_BOOTSTRAP_ADMIN_EMAIL",
+      "ATLAS_BOOTSTRAP_ADMIN_PASSWORD",
+      "name: /add connection/i",
+      "name: /add model/i",
+      "name: /test route/i",
+      "name: /set default/i",
+      'getByLabel("Project name")',
+      'getByLabel("Document description")',
     ]) {
       expect(humanSmoke).not.toContain(retiredConsumer);
     }
-    expect(humanSmoke).toContain('name: "Document Library"');
-    expect(humanSmoke).toContain('getByLabel("Add existing user")');
+    for (const currentConsumer of [
+      'name: "Create the first administrator"',
+      'getByLabel("Display name")',
+      'name: "Create administrator"',
+      'name: "Connect a model provider"',
+      'name: "Test connection and find models"',
+      'name: "Test and use this text model"',
+      'name: "Create or choose a project"',
+      'getByLabel("New project name")',
+      'name: "Add the first document"',
+      'name: "Upload document"',
+      'name: "Review Atlas readiness"',
+      'name: "Enter Atlas"',
+      'name: "Document Library"',
+      'getByLabel("Add existing user")',
+      'getByLabel("Message")',
+      "name: /^Send$/",
+    ]) {
+      expect(humanSmoke).toContain(currentConsumer);
+    }
 
     for (const locale of ["en.ts", "zh-TW.ts"]) {
       const localeSource = readFileSync(resolve(webRoot, "src/locales", locale), "utf8");
