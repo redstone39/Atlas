@@ -44,8 +44,10 @@ With the public Compose stack running on its default loopback ports, exercise
 the empty-deployment setup journey:
 
 ```sh
+export ATLAS_PUBLIC_SMOKE_PROJECT=atlas_public_first_run
+docker compose -p "$ATLAS_PUBLIC_SMOKE_PROJECT" up --build -d
 infra/scripts/smoke_public_first_run
-docker compose -f infra/docker-compose.p1.yml restart
+docker compose -p "$ATLAS_PUBLIC_SMOKE_PROJECT" restart
 infra/scripts/smoke_public_first_run --verify-restart
 ```
 

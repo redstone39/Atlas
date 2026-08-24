@@ -14,12 +14,12 @@ external code contributions.
 
 ## Where to participate
 
-Use [GitHub Issues](https://github.com/redstone39/atlas-public/issues) for a
+Use [GitHub Issues](https://github.com/redstone39/Atlas/issues) for a
 specific reproducible defect, documentation problem, or deployment and
 compatibility report. Use the repository's Issue form that best matches the
 observed problem.
 
-Use [GitHub Discussions](https://github.com/redstone39/atlas-public/discussions)
+Use [GitHub Discussions](https://github.com/redstone39/Atlas/discussions)
 for questions, self-hosting experiences, architecture discussion, broader use
 cases, and feature ideas that are not yet a bounded defect.
 

@@ -23,23 +23,23 @@ Git build context.
 
 ## Required stack variables
 
-- `ATLAS_BOOTSTRAP_ADMIN_EMAIL` and `ATLAS_BOOTSTRAP_ADMIN_PASSWORD` for an
-  empty Identity database.
 - `ATLAS_SMB_HOST`, `ATLAS_SMB_SHARE`, `ATLAS_SMB_SUBDIR`
 - `ATLAS_SMB_USERNAME`, `ATLAS_SMB_PASSWORD`
 - `ATLAS_SMB_GENERATION`, initially `1`
 - `ATLAS_ARTIFACT_SWITCH_MODE=operator_accepted_unverified`
 - `ATLAS_ARTIFACT_SWITCH_ACK=I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT`
-- `ATLAS_CREDENTIAL_MASTER_KEY` and `ATLAS_CREDENTIAL_MASTER_KEY_ID` before
-  storing Provider or LDAP/Active Directory bind and custom-CA credentials
-- `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` and
-  `ATLAS_NOTES_COLLABORATION_TICKET_SECRET`, generated independently and kept
-  distinct
 - `ATLAS_NOTES_COLLABORATION_PUBLIC_URL`, set to the separately secured
   browser-reachable `ws://` or `wss://` endpoint for this remote deployment
 
 Optional SMB variables are `ATLAS_SMB_DOMAIN` and
 `ATLAS_SMB_VERSION` (`3.1.1` by default; `3.0` is also supported).
+
+`ATLAS_CREDENTIAL_MASTER_KEY` with `ATLAS_CREDENTIAL_MASTER_KEY_ID`, and the
+two distinct `ATLAS_NOTES_COLLABORATION_*_SECRET` values, are optional explicit
+overrides. When absent, `deployment-secret-init` generates them into dedicated
+named volumes and reuses them across stack restarts. Retain those volumes with
+the deployment; losing the credential volume makes stored Provider and
+directory credentials unreadable unless the exact active key is restored.
 
 `ATLAS_SMB_SUBDIR` must be a relative path without empty segments, `.`, `..`,
 backslashes, commas, or control characters. Use a dedicated SMB account limited
@@ -67,6 +67,11 @@ credentials in proxy URLs unless exposure to Portainer and Docker
 administrators is acceptable.
 
 ## Initialization
+
+Confirm `deployment-secret-init` exits `0`. On an empty Identity database, open
+the deployed `/login` URL and follow the redirect to `/setup`. Claim the first
+System Admin there, then continue through the Model, Project, Document, and
+Review steps. No stack variable seeds the first administrator.
 
 Confirm `embedding-model-init` exits `0` before the API and processing/indexing
 workers start. It verifies the separate embedding-model image into the shared

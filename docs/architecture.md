@@ -22,10 +22,12 @@ initializer.
 
 ## User journey
 
-1. On an empty deployment, the stateless setup page checks the Identity owner
-   and claims exactly one first System Admin. The claim is serialized in
+1. On an empty deployment, the stateless setup journey checks the Identity
+   owner and claims exactly one first System Admin. The claim is serialized in
    PostgreSQL and remains unavailable after restart because any existing user
-   closes the gate.
+   closes the gate. The authenticated journey then reuses the existing Model,
+   Project, Document, and readiness owners across resumable Model, Project,
+   Document, and Review steps; it does not create a second setup authority.
 2. A local or imported directory user authenticates; Atlas remains authoritative
    for account activity, roles, grants, ACLs, and sessions.
 3. An authorized Project or Team uploader assigns a scope and uploads one or
@@ -269,9 +271,10 @@ slots**; the runtime and ownership terms below remain the precise contract.
 - System Admin: users and global Directory import, reversible Team and Project
   lifecycle, three-slot Prompt Skills and candidate list/detail/approve/reject,
   Provider/model routes with independent text/vision defaults, explicit
-  LDAP/Active Directory transport and scoped imports, Notes settings, plugins,
-  agents/tokens, safe audit events, ordered completed-turn safe actions, and
-  latest-only read-only feedback in conversation inspection. Candidate
+  LDAP/Active Directory transport and scoped imports, conversation-learning
+  admission, Notes settings, guided-setup re-entry, plugins, agents/tokens,
+  safe audit events, ordered completed-turn safe actions, and latest-only
+  read-only feedback in conversation inspection. Candidate
   mutations require matching request identity and draft revision; stale
   preconditions fail closed. Turn Experience and pre-candidate pipeline recovery
   have no Admin or Web surface.

@@ -51,7 +51,7 @@ precise Prompt Skills ownership and lifecycle terms.
 
 ## Operate
 
-- [Configuration](configuration.md): bootstrap, Notes secrets, credential
+- [Configuration](configuration.md): first-admin setup, Notes secrets, credential
   encryption, Provider and directory connections, reasoning policy, and
   runtime inputs
 - [Local Docker Compose deployment](deployment/local.md): fresh evaluation,
@@ -76,7 +76,7 @@ precise Prompt Skills ownership and lifecycle terms.
   are not currently accepted
 - [Security policy](../SECURITY.md): private reporting direction; do not post
   vulnerabilities or sensitive material publicly
-- [GitHub Issues](https://github.com/redstone39/atlas-public/issues) for specific,
+- [GitHub Issues](https://github.com/redstone39/Atlas/issues) for specific,
   reproducible reports
-- [GitHub Discussions](https://github.com/redstone39/atlas-public/discussions)
+- [GitHub Discussions](https://github.com/redstone39/Atlas/discussions)
   for questions, experiences, architecture discussion, and broader ideas

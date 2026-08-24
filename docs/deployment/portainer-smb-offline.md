@@ -30,12 +30,13 @@ The output contains:
 The output directory must be empty. Build `linux/amd64` and `linux/arm64`
 separately; do not retag an archive for another architecture.
 
-Before deployment, provide two independently generated, distinct
-`ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` and
-`ATLAS_NOTES_COLLABORATION_TICKET_SECRET` values. Set
-`ATLAS_NOTES_COLLABORATION_PUBLIC_URL` to the separately secured WebSocket URL
-reachable by operators' browsers; the Compose-internal API/carrier URL remains
-unchanged.
+Before deployment, set `ATLAS_NOTES_COLLABORATION_PUBLIC_URL` to the separately
+secured WebSocket URL reachable by operators' browsers; the Compose-internal
+API/carrier URL remains unchanged. Credential-encryption and Notes secrets are
+generated into dedicated named volumes when their optional environment
+overrides are absent. Retain those volumes across stack updates. If you provide
+the overrides, supply the credential key and key ID together and use two
+independently generated, distinct Notes secrets.
 
 Before import, verify every `SHA256SUMS` entry and confirm the manifest platform
 matches the Docker host. If an image is missing, re-import the same verified
@@ -47,6 +48,11 @@ status must report `mode=offline_verify` and content digest
 `e052ba4b733767ddea9fd3e6640ff41a0a83599baea0b0eadd97189d92f2d396`.
 Missing or modified model bytes are a startup failure; do not enable a runtime
 download or registry fallback.
+
+Also confirm `deployment-secret-init` exits `0`. On an empty Identity database,
+open `/login`, follow the redirect to `/setup`, and claim the first System Admin
+in the browser. Continue through Model, Project, Document, and Review as needed;
+no Portainer stack variable seeds the account.
 
 For a failed model initialization, verify the archive checksums and the model
 image ID from `bundle-manifest.json`, then re-import the same archive. If the

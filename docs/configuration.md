@@ -18,24 +18,28 @@ The public Compose stack initializes credential-encryption and Notes
 collaboration secrets into dedicated persistent volumes when explicit
 environment overrides are absent. Existing secret files are reused across
 restart. Environment values remain supported as deliberate operator overrides;
-they are deployment inputs and must not be committed.
+they are deployment inputs and must not be committed. The setup journey then
+continues through Model, Project, Document, and Review steps. Those steps may be
+skipped and resumed, but the Review step reports the remaining readiness work.
 
 ## Notes collaboration
 
-| Variable | Required | Meaning |
+| Variable | Compose input | Meaning |
 |---|---:|---|
-| `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` | Yes | API-to-carrier transport authentication |
-| `ATLAS_NOTES_COLLABORATION_TICKET_SECRET` | Yes | API-only collaboration-ticket signing |
+| `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET` | Optional override | API-to-carrier transport authentication |
+| `ATLAS_NOTES_COLLABORATION_TICKET_SECRET` | Optional override | API-only collaboration-ticket signing |
 | `ATLAS_NOTES_COLLABORATION_PUBLIC_URL` | No | Browser-reachable WebSocket URL; defaults to loopback |
 | `ATLAS_PRODUCTION_COLLABORATION_PORT` | No | Loopback host port; defaults to `8015` |
 
-Generate the two required values independently with `openssl rand -base64 32`.
-They must differ. The ticket secret is passed only to the API; the transport
-secret is shared only by the API and collaboration carrier. Retain both across
-normal restarts. Changing either value invalidates current connections; restart
-the API and carrier together. For a browser on another host, provide a secured
-reachable `ws://` or `wss://` public URL and operate its TLS/reverse proxy
-outside this repository.
+At runtime both Notes secrets are required, but a fresh Compose deployment
+generates and retains them when the environment inputs are absent. When
+overriding them, generate the values independently with
+`openssl rand -base64 32`; they must differ. The ticket secret is passed only to
+the API; the transport secret is shared only by the API and collaboration
+carrier. Retain both across normal restarts. Changing either value invalidates
+current connections; restart the API and carrier together. For a browser on
+another host, provide a secured reachable `ws://` or `wss://` public URL and
+operate its TLS/reverse proxy outside this repository.
 
 ## Provider credential encryption
 
@@ -44,6 +48,15 @@ outside this repository.
 | `ATLAS_CREDENTIAL_MASTER_KEY` | Base64-encoded 32-byte active AES-GCM key |
 | `ATLAS_CREDENTIAL_MASTER_KEY_ID` | Stable identifier for the active key |
 | `ATLAS_CREDENTIAL_MASTER_KEYRING` | Optional JSON map of retained keys used to read older ciphertext |
+
+The active key and key ID are optional Compose overrides and must be supplied
+together. When both are absent, the deployment-secret initializer creates and
+retains an active pair in its credential secret volume.
+
+`ATLAS_CREDENTIAL_MASTER_KEYRING` is a process-level recovery input for a
+custom deployment. The bundled Compose path does not project a keyring and the
+current public snapshot does not provide in-place data migration or a managed
+key-rotation procedure.
 
 Generate a local evaluation key:
 
@@ -69,11 +82,12 @@ credential master key using secret-kind-specific authenticated data. They are
 write-only: list, create, update, test, search, scoped import, and
 profile-refresh responses never return plaintext or ciphertext.
 
-Configure a readable `ATLAS_CREDENTIAL_MASTER_KEY`, its key ID, and any retained
-keyring entries before enabling a directory connection. Missing or unreadable
-key material makes directory secret use unavailable and login through the
-selected source fails closed. Atlas provides no per-connection environment or
-automatic fallback credential path.
+Ensure the deployment's active credential key, key ID, and any retained keyring
+entries remain readable before enabling a directory connection. The generated
+Compose secret volume satisfies the active-key requirement without an
+environment override. Missing or unreadable key material makes directory secret
+use unavailable and login through the selected source fails closed. Atlas
+provides no per-connection environment or automatic fallback credential path.
 
 Directory integration is unconfigured by default. Local login remains
 available. Imported identities must be created through the System Admin search

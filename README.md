@@ -18,15 +18,15 @@ just document chat.**
 
 [Try Atlas locally](#local-quick-start) ·
 [Read the documentation](docs/README.md) ·
-[Join the discussion](https://github.com/redstone39/atlas-public/discussions)
+[Join the discussion](https://github.com/redstone39/Atlas/discussions)
 
 ## Product preview
 
-![A fresh Atlas workspace after the first local sign-in](docs/assets/atlas-fresh-workspace.png)
+![A fresh Atlas workspace after leaving the guided setup](docs/assets/atlas-fresh-workspace.png)
 
-*A fresh local evaluation workspace before knowledge or conversations have been
-added. Provider credentials and sample documents are not included in this public
-snapshot.*
+*A fresh local evaluation workspace after completing or skipping the guided
+setup. Provider credentials and sample documents are not included in this
+public snapshot.*
 
 > **Current public snapshot:** local technical preview ·
 > `resettable_development` data lifecycle · **not Release Ready or Internet
@@ -60,8 +60,8 @@ The current public snapshot has these boundaries:
 These boundaries are open to discussion. If Atlas is missing something
 important for your use case, share the scenario, expected outcome, and relevant
 environment details through
-[Issues](https://github.com/redstone39/atlas-public/issues) or
-[Discussions](https://github.com/redstone39/atlas-public/discussions).
+[Issues](https://github.com/redstone39/Atlas/issues) or
+[Discussions](https://github.com/redstone39/Atlas/discussions).
 
 ## How it works
 
@@ -83,31 +83,52 @@ You need Git, Docker Engine with Docker Compose v2, enough memory and disk for
 the complete stack and pinned embedding-model cache, and a fresh disposable
 evaluation environment.
 
-### Milestone 1 — Confirm Atlas is ready
+### Milestone 1 — Start a fresh local deployment
 
 Clone Atlas. No `.env` file is required for a fresh local evaluation: when
 explicit overrides are absent, Compose creates persistent deployment secrets
 for credential encryption and Notes collaboration.
 
 ```sh
-git clone https://github.com/redstone39/atlas-public.git
-cd atlas-public
+git clone https://github.com/redstone39/Atlas.git
+cd Atlas
 ```
-
-The public stack does not seed a user from environment variables.
 
 Start the stack:
 
 ```sh
-docker compose -f infra/docker-compose.p1.yml up --build -d
-docker compose -f infra/docker-compose.p1.yml ps
+docker compose up --build -d
+docker compose ps
 curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
 ```
 
-Open <http://127.0.0.1:5184/login>. An empty deployment redirects to
-<http://127.0.0.1:5184/setup>; claim the first System Admin there with a unique
-email and password. The claim is available only while Identity has no users.
+The root `compose.yml` is the supported general-developer entry point and loads
+the complete local stack.
+
+The health endpoint confirms that the API is running. On an empty deployment,
+readiness may remain degraded while it reports the setup work still needed; it
+is not a failed container start.
+
+### Milestone 2 — Complete the guided first run
+
+Open <http://127.0.0.1:5184/login>. An empty deployment redirects to the
+five-step `/setup` journey:
+
+1. **Administrator:** claim the first System Admin with a display name, unique
+   email, and password of at least 12 characters. This one-time claim is
+   available only while Identity has no users and signs the administrator in.
+2. **Model:** add and test a Provider connection, then save the default text
+   model route. Provider credentials are required for model answers and are not
+   bundled.
+3. **Project:** select an existing active Project or create one for evaluation.
+4. **Document:** upload one non-sensitive document you are authorized to use.
+5. **Review:** inspect the completed items, current readiness, and links back to
+   unfinished steps, then enter Atlas.
+
+Model, Project, and Document may be skipped and resumed from `/setup`. Atlas can
+open without them, but the first governed answer is not ready until a tested
+default route, authorized Project knowledge, and searchable evidence exist.
 
 Read [Local Docker Compose deployment](docs/deployment/local.md) before restart,
 replacement, recovery, or reset. Its `down -v` path permanently deletes the
@@ -115,23 +136,18 @@ Compose project's local application data and is only for the documented
 `resettable_development` lifecycle. [Configuration](docs/configuration.md) owns
 the exact first-admin, secret, Provider, and runtime input rules.
 
-### Milestone 2 — Ask your first governed question
+### Milestone 3 — Verify the first governed answer
 
-Claiming the first System Admin and signing in confirms that the local
-application is running. The first product journey continues through one
-authorized document and its evidence:
+After the setup journey has a tested default model route, an active Project, and
+an uploaded document:
 
-1. Add and test a Provider connection and model route under **Models**.
-   Provider credentials are required for model answers and are not bundled.
-2. Create a Project or Team and add a non-sensitive document with a clear fact
-   that you are authorized to use for evaluation.
-3. Wait until the Document Library shows the document as **Searchable**. A
+1. Wait until the Document Library shows the document as **Searchable**. A
    failed or cancelled processing result is not ready for this journey.
-4. Start a conversation and keep **All accessible knowledge** or select an
+2. Start a conversation and keep **All accessible knowledge** or select an
    allowed Project or Team scope.
-5. Choose **General** (`standard`) or **In-depth** (`deep`) and ask a question
+3. Choose **General** (`standard`) or **In-depth** (`deep`) and ask a question
    whose answer is stated in the document.
-6. Inspect the answer and its available protected evidence. Evidence review is
+4. Inspect the answer and its available protected evidence. Evidence review is
    not a truth or formal citation guarantee.
 
 You have completed the first governed-answer journey when the document is
@@ -146,6 +162,7 @@ answers are included in the public snapshot.
 | Evaluation path | Current status |
 |---|---|
 | Fresh local Docker Compose deployment | Supported for technical evaluation |
+| Guided first-run setup | Browser claim for the first System Admin, then resumable Model, Project, Document, and Review steps |
 | Local identity, governed document processing, scoped conversations, and Notes | Supported in the resettable evaluation lifecycle |
 | Provider connections and model routes | Configurable by System Admin; credentials are not included |
 | LDAP / Active Directory | Shipped unconfigured; live interoperability is not verified here |
@@ -177,9 +194,9 @@ reasoning, configuration, deployment, and lifecycle contracts.
 ![Atlas System Admin settings in a fresh local evaluation deployment](docs/assets/atlas-admin-settings.png)
 
 *System Admin exposes identity, Projects and Teams, the document library,
-Models, Skill slots, processing plugins, agents, audit, system status, language,
-theme, and Notes checkpoint settings. The pictured account is local evaluation
-data.*
+Models, Skill slots, conversation-learning admission, processing plugins,
+agents, audit, system status, language, theme, Notes checkpoint settings, and a
+way to reopen guided setup. The pictured account is local evaluation data.*
 
 ## How Atlas is built
 
@@ -198,7 +215,7 @@ this README:
 | Your question | Start here |
 |---|---|
 | How does Atlas work and who owns each decision? | [Architecture and trust boundaries](docs/architecture.md) |
-| How do bootstrap, secrets, Providers, directory identity, and runtime limits work? | [Configuration](docs/configuration.md) |
+| How do first-admin setup, secrets, Providers, directory identity, and runtime limits work? | [Configuration](docs/configuration.md) |
 | How do I operate or reset a fresh local deployment? | [Local deployment](docs/deployment/local.md) |
 | How do I verify the public source tree? | [Verification](docs/verification.md) |
 | How can I report feedback or discuss Atlas? | [Community and feedback](CONTRIBUTING.md) |
@@ -220,9 +237,9 @@ Not currently accepted:
 - external pull requests;
 - unsolicited patches.
 
-Use [GitHub Issues](https://github.com/redstone39/atlas-public/issues) for
+Use [GitHub Issues](https://github.com/redstone39/Atlas/issues) for
 specific defects and reports. Use
-[GitHub Discussions](https://github.com/redstone39/atlas-public/discussions) for
+[GitHub Discussions](https://github.com/redstone39/Atlas/discussions) for
 questions, experiences, architecture discussion, and broader ideas.
 
 There is no announced timeline for changing the pull-request boundary. Do not

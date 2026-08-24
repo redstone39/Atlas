@@ -5,66 +5,92 @@ This path is for a fresh, loopback-only technical evaluation.
 ## Start
 
 ```sh
-cp infra/.env.example infra/.env
-# Set the two bootstrap values and two independently generated Notes secrets.
-# Generate each Notes secret separately with: openssl rand -base64 32
-cd infra
-docker compose -f docker-compose.p1.yml up --build -d
+git clone https://github.com/redstone39/Atlas.git
+cd Atlas
+docker compose up --build -d
 ```
 
-The Notes transport and ticket secrets must both be non-empty and must differ.
-The stack starts PostgreSQL, Redis, Qdrant, artifact initialization, API, the
-Notes collaboration carrier, plugin runner, Office renderer, four Celery
-workers, Celery beat, and Web. Services that depend on initialization or
-authenticated Notes readiness remain gated when it fails.
+The root `compose.yml` loads the complete local stack and is the supported entry
+point for general developer evaluation.
+
+A fresh local evaluation needs no `.env` file. Before API and Notes consumers
+start, `deployment-secret-init` generates credential-encryption and two distinct
+Notes secrets into dedicated named volumes. Existing secret files are reused on
+later starts. The stack also starts PostgreSQL, Redis, Qdrant, artifact
+initialization, the pinned embedding-model cache, API, the Notes collaboration
+carrier, plugin runner, Office renderer, four Celery workers, Celery beat, and
+Web. Consumers remain gated when a required initializer fails.
+
+Use `infra/.env.example` only when deliberately supplying overrides; copy it to
+`.env` in the repository root before editing. Provide
+`ATLAS_CREDENTIAL_MASTER_KEY` and `ATLAS_CREDENTIAL_MASTER_KEY_ID` together. If
+you override the two Notes secrets, both must be non-empty and distinct. Never
+commit the resulting `.env` file.
 
 ## Observe
 
 ```sh
-docker compose -f docker-compose.p1.yml ps
-docker compose -f docker-compose.p1.yml logs embedding-model-init
-docker compose -f docker-compose.p1.yml logs artifact-storage-init
+docker compose ps
+docker compose logs deployment-secret-init
+docker compose logs embedding-model-init
+docker compose logs artifact-storage-init
 curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
 ```
 
-Use <http://127.0.0.1:5184/login>. The Notes carrier is published only on
-`127.0.0.1:8015` by default, and API readiness includes its authenticated
-settings probe. A running container alone is not proof that Atlas is ready; use
-the initializer result, health, readiness, and a real login.
+Open <http://127.0.0.1:5184/login>. When Identity has no users, Atlas redirects
+to `/setup`. Create the first System Admin with a display name, unique email,
+and password of at least 12 characters. The claim is serialized so only one
+concurrent request succeeds, and it never reopens after any user exists.
 
-## Recover a failed first initialization
+The same setup journey then guides the signed-in administrator through
+**Administrator → Model → Project → Document → Review**. Model, Project, and
+Document can be skipped and resumed. The Review step reports what is complete
+and links back to incomplete work; readiness may remain degraded until a tested
+default model route, an active Project grant, and searchable evidence exist.
 
-If the first initialization fails because the bootstrap values or Notes
-secrets are missing or invalid, correct `infra/.env` and rerun the idempotent
-startup command:
+The Notes carrier is published only on `127.0.0.1:8015` by default, and API
+readiness includes its authenticated settings probe. A running container alone
+is not proof that Atlas is ready; use initializer results, health, readiness,
+and the setup review.
+
+## Recover a failed first start or setup
+
+If `deployment-secret-init` fails because an explicit credential-key pair is
+partial or invalid, or explicit Notes secrets are equal, correct or remove
+those overrides and rerun the idempotent startup command:
 
 ```sh
-cd infra
-docker compose -f docker-compose.p1.yml up -d
+docker compose up -d
 ```
 
-Recheck both initializer logs, service state, health, and readiness using the
-commands in **Observe**. Do not repair Identity records with manual SQL.
+Recheck all three initializer logs, service state, health, and readiness using
+the commands in **Observe**. Existing generated secret files take precedence as
+the deployment's retained identity; do not delete or replace their volumes to
+rotate secrets. Losing the credential secret volume makes previously encrypted
+Provider and directory credentials unreadable unless the exact active key is
+restored through a retained override or backup.
+
+If first-admin submission did not succeed and Identity is still empty, reload
+`/setup` and retry. If another request completed first, the claim is closed;
+sign in with that existing account. Do not repair Identity records with manual
+SQL.
 
 If the environment is still disposable and you need a completely fresh first
 initialization, use the destructive **Reset** procedure below, correct the
 configuration, and start again. Do not use reset when application data must be
 preserved: `down -v` permanently deletes the Compose project's local
-application data.
+application data and generated deployment secrets.
 
 ## Restart
 
-After the first administrator exists, remove the bootstrap values from
-`infra/.env` if desired:
-
 ```sh
-cd infra
-docker compose -f docker-compose.p1.yml up -d
+docker compose up -d
 ```
 
-The initializer observes non-empty Identity state and does not require or alter
-the original credentials.
+The deployment-secret initializer reuses the retained secret files. Identity
+state keeps the first-admin claim closed, while the setup journey remains
+available to the System Admin for reviewing or completing optional steps.
 
 ## Replace an earlier snapshot
 
@@ -73,9 +99,8 @@ new snapshot, stop the earlier stack and remove its disposable volumes before
 building and starting the new version:
 
 ```sh
-cd infra
-docker compose -f docker-compose.p1.yml down -v
-docker compose -f docker-compose.p1.yml up --build -d
+docker compose down -v
+docker compose up --build -d
 ```
 
 `down -v` permanently deletes PostgreSQL, Redis, Qdrant, and other named-volume
@@ -88,8 +113,7 @@ runtime history are not migrated between snapshots.
 ## Reset
 
 ```sh
-cd infra
-docker compose -f docker-compose.p1.yml down -v
+docker compose down -v
 ```
 
 This destroys the Compose project's local application data. Use it only for the
