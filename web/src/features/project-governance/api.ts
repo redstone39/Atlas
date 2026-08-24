@@ -15,14 +15,13 @@ import type {
 
 export const projectGovernanceApi = {
   listProjects: () => requestJson<ProjectAdminListResult>("/api/v1/admin/projects"),
-  createProject: (projectId: string, name: string) =>
+  createProject: (name: string, idempotencyKey: string) =>
     requestJson<AdminActionResult>("/api/v1/admin/projects", {
       method: "POST",
       body: JSON.stringify({
-        project_id: projectId,
         name,
         policy_profile_id: "policy-default-governed",
-        idempotency_key: `project-${projectId}`,
+        idempotency_key: idempotencyKey,
       }),
     }),
   updateProject: (

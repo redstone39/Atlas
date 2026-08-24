@@ -67,7 +67,6 @@ export interface AvailableModelsResult extends MessageReference {
 }
 
 export interface ProviderConnectionCreateInput {
-  connectionId: string;
   displayName: string;
   providerType: ProviderType;
   endpointUrl: string;
@@ -108,7 +107,6 @@ export interface ModelRouteListResult {
 }
 
 export interface ModelRouteConfigInput {
-  routeId: string;
   displayName: string;
   modelName: string;
   connectionId: string;

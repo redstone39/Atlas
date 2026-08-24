@@ -13,11 +13,12 @@ export const userAdministrationApi = {
   createInvite: (
     displayName: string,
     email: string,
-    scope?: {
+    scope: {
       scopeType: "team" | "project";
       scopeId: string;
       scopeRole: "member" | "uploader" | "viewer" | "contributor" | "admin";
-    },
+    } | undefined,
+    idempotencyKey: string,
   ) =>
     requestJson<UserInviteCreateResult>("/api/v1/admin/user-invites", {
       method: "POST",
@@ -28,7 +29,7 @@ export const userAdministrationApi = {
         scope_type: scope?.scopeType,
         scope_id: scope?.scopeId,
         scope_role: scope?.scopeRole,
-        idempotency_key: `invite-${email}`,
+        idempotency_key: idempotencyKey,
       }),
     }),
   listInvites: () => requestJson<UserInviteListResult>("/api/v1/admin/user-invites"),

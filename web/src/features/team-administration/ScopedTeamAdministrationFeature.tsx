@@ -56,6 +56,10 @@ import {
   serverMessage,
 } from "../../shared/product-ui";
 import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
+import {
   adminTeamDetailRoute,
   documentLibraryDestination,
   type AppDestination,
@@ -105,6 +109,7 @@ export function ScopedTeamAdministrationFeature({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<TeamScopeRole>("member");
   const [inviteUrl, setInviteUrl] = useState("");
+  const createInviteOperation = useRef<ClientOperationKey | null>(null);
   const [showEditTeam, setShowEditTeam] = useState(false);
   const [editTeamName, setEditTeamName] = useState("");
   const [showAddMember, setShowAddMember] = useState(false);
@@ -266,6 +271,7 @@ export function ScopedTeamAdministrationFeature({
     setShowAddMember(false);
   }
   function openInviteDialog() {
+    createInviteOperation.current = null;
     setInviteName("");
     setInviteEmail("");
     setInviteRole("member");
@@ -321,15 +327,24 @@ export function ScopedTeamAdministrationFeature({
     setPendingAction("invite");
     setActionError("");
     try {
+      const scope = {
+        scopeType: "team" as const,
+        scopeId: selectedTeamId,
+        scopeRole: inviteRole,
+      };
+      const operation = retainClientRequestId(
+        createInviteOperation.current,
+        "team-invite-create",
+        JSON.stringify([inviteName.trim(), inviteEmail.trim(), scope]),
+      );
+      createInviteOperation.current = operation;
       const result = await userAdministrationApi.createInvite(
         inviteName.trim(),
         inviteEmail.trim(),
-        {
-          scopeType: "team",
-          scopeId: selectedTeamId,
-          scopeRole: inviteRole,
-        },
+        scope,
+        operation.idempotencyKey,
       );
+      createInviteOperation.current = null;
       setInviteUrl(result.local_pilot_acceptance?.acceptance_url ?? "");
       setInviteName("");
       setInviteEmail("");

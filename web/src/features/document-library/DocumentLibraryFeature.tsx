@@ -53,7 +53,7 @@ import { Textarea } from "../../components/ui/textarea";
 import type { MessageReference } from "../../shared/user-messages";
 import type { AuditEvent } from "../conversation-audit/index";
 import type { DocumentTagRef } from "../../shared/document-contracts";
-import { generatedId } from "../../shared/ids";
+import { clientRequestId } from "../../shared/ids";
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
 import { titleFromFilename } from "../../shared/document-upload";
 import {
@@ -89,7 +89,7 @@ type ScopeKey = "all" | `team:${string}` | `project:${string}`;
 type TagKey = Exclude<ScopeKey, "all">;
 
 type UploadItem = {
-  documentId: string;
+  clientKey: string;
   file: File;
 };
 
@@ -369,7 +369,7 @@ export function DocumentLibraryFeature({
         for (const [index, item] of items.entries()) {
           setUploadProgress({ current: index + 1, total: items.length });
           const result = await documentLibraryApi.uploadDocumentLibraryFile({
-            documentId: item.documentId,
+            clientKey: item.clientKey,
             scopeType: ownerRef.tag_type,
             scopeId: ownerRef.tag_id,
             tagRefs,
@@ -380,7 +380,7 @@ export function DocumentLibraryFeature({
           lastMessageCode = result.message_code;
           acceptedCount += 1;
           setUploadItems((current) =>
-            current.filter((candidate) => candidate.documentId !== item.documentId),
+            current.filter((candidate) => candidate.clientKey !== item.clientKey),
           );
         }
       } catch (err) {
@@ -684,7 +684,7 @@ export function DocumentLibraryFeature({
                   onChange={(event) =>
                     setUploadItems(
                       Array.from(event.currentTarget.files ?? []).map((file) => ({
-                        documentId: generatedId("doc", titleFromFilename(file.name)),
+                        clientKey: clientRequestId("document-upload"),
                         file,
                       })),
                     )
@@ -696,7 +696,7 @@ export function DocumentLibraryFeature({
                 {uploadItems.length > 0 && (
                   <div className="max-h-40 space-y-1 overflow-y-auto">
                     {uploadItems.map((item) => (
-                      <FieldDescription key={item.documentId}>
+                      <FieldDescription key={item.clientKey}>
                         {item.file.name} · {formatFileSize(item.file.size)}
                       </FieldDescription>
                     ))}

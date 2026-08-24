@@ -1,4 +1,5 @@
 import { requestJson } from "../../shared/api-client";
+import { clientRequestId } from "../../shared/ids";
 import type {
   AnswerBehaviorStatus,
   AnswerBehaviorUpdateInput,
@@ -14,9 +15,6 @@ import type {
   ProviderConnectionUpdateInput,
 } from "./types";
 
-function idempotencyKey(scope: string) {
-  return `${scope}-${globalThis.crypto.randomUUID()}`;
-}
 
 export const modelRoutingApi = {
   getAnswerBehavior: () =>
@@ -27,33 +25,35 @@ export const modelRoutingApi = {
       body: JSON.stringify({
         custom_guidance: input.customGuidance,
         expected_revision: input.expectedRevision,
-        idempotency_key: idempotencyKey("answer-behavior"),
+        idempotency_key: clientRequestId("answer-behavior"),
       }),
     }),
   listProviderConnections: () =>
     requestJson<ProviderConnectionListResult>(
       "/api/v1/admin/config/provider-connections",
     ),
-  createProviderConnection: (input: ProviderConnectionCreateInput) =>
+  createProviderConnection: (
+    input: ProviderConnectionCreateInput,
+    idempotencyKey: string,
+  ) =>
     requestJson<ProviderConnectionStatus>(
       "/api/v1/admin/config/provider-connections",
       {
         method: "POST",
         body: JSON.stringify({
-          connection_id: input.connectionId,
           display_name: input.displayName,
           provider_type: input.providerType,
           endpoint_url: input.endpointUrl,
           api_version: input.apiVersion,
           api_key: input.apiKey,
-          idempotency_key: idempotencyKey(`provider-connection-${input.connectionId}`),
+          idempotency_key: idempotencyKey,
         }),
       },
     ),
   updateProviderConnection: (input: ProviderConnectionUpdateInput) => {
     const body: Record<string, unknown> = {
       expected_revision: input.expectedRevision,
-      idempotency_key: idempotencyKey(`provider-connection-${input.connectionId}`),
+      idempotency_key: clientRequestId(`provider-connection-update-${input.connectionId}`),
     };
     if (input.displayName !== undefined) body.display_name = input.displayName;
     if (input.endpointUrl !== undefined) body.endpoint_url = input.endpointUrl;
@@ -72,7 +72,7 @@ export const modelRoutingApi = {
         method: "POST",
         body: JSON.stringify({
           expected_revision: expectedRevision,
-          idempotency_key: idempotencyKey(`provider-connection-test-${connectionId}`),
+          idempotency_key: clientRequestId(`provider-connection-test-${connectionId}`),
         }),
       },
     ),
@@ -83,24 +83,26 @@ export const modelRoutingApi = {
     ),
   listModelRoutes: () =>
     requestJson<ModelRouteListResult>("/api/v1/admin/config/model-routes"),
-  configureModelRoute: (config: ModelRouteConfigInput) =>
+  configureModelRoute: (
+    config: ModelRouteConfigInput,
+    idempotencyKey: string,
+  ) =>
     requestJson<ModelRouteStatus>("/api/v1/admin/config/model-routes", {
       method: "POST",
       body: JSON.stringify({
-        route_id: config.routeId,
         display_name: config.displayName,
         model_name: config.modelName,
         connection_id: config.connectionId,
         enabled: config.enabled,
         supports_vision: config.supportsVision,
         runtime_policy: config.runtimePolicy,
-        idempotency_key: idempotencyKey(`model-route-${config.routeId}`),
+        idempotency_key: idempotencyKey,
       }),
     }),
   updateModelRoute: (input: ModelRouteUpdateInput) => {
     const body: Record<string, unknown> = {
       expected_revision: input.expectedRevision,
-      idempotency_key: idempotencyKey(`model-route-${input.routeId}`),
+      idempotency_key: clientRequestId(`model-route-update-${input.routeId}`),
     };
     if (input.displayName !== undefined) body.display_name = input.displayName;
     if (input.modelName !== undefined) body.model_name = input.modelName;
@@ -120,7 +122,7 @@ export const modelRoutingApi = {
         method: "POST",
         body: JSON.stringify({
           expected_revision: expectedRevision,
-          idempotency_key: idempotencyKey(`model-test-${routeId}`),
+          idempotency_key: clientRequestId(`model-test-${routeId}`),
         }),
       },
     ),
@@ -135,7 +137,7 @@ export const modelRoutingApi = {
         method: "POST",
         body: JSON.stringify({
           expected_revision: expectedRevision,
-          idempotency_key: idempotencyKey(`model-default-${purpose}-${routeId}`),
+          idempotency_key: clientRequestId(`model-default-${purpose}-${routeId}`),
         }),
       },
     ),

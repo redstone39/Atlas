@@ -1,5 +1,5 @@
 import { Bot, Clipboard, KeyRound, Plus, RotateCcw, Save, ShieldCheck, UserX } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -21,8 +21,11 @@ import {
 } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import type { MessageReference } from "../../shared/user-messages";
-import { generatedId } from "../../shared/ids";
 import { OptionSelect, type OptionSelectItem } from "../../shared/OptionSelect";
 import { SearchSelect } from "../../shared/SearchSelect";
 import {
@@ -76,6 +79,7 @@ export function AgentAccessFeature({
   const [showIssueToken, setShowIssueToken] = useState(false);
   const [showAgentPermission, setShowAgentPermission] = useState(false);
   const [newAgentName, setNewAgentName] = useState("");
+  const createAgentOperation = useRef<ClientOperationKey | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [editAgentName, setEditAgentName] = useState("");
   const [projectId, setProjectId] = useState(() => projects[0]?.project_id ?? "");
@@ -107,6 +111,7 @@ export function AgentAccessFeature({
   }
 
   function closeCreateAgentDialog() {
+    createAgentOperation.current = null;
     resetCreateAgentDraft();
     setShowCreateAgent(false);
   }
@@ -329,12 +334,23 @@ export function AgentAccessFeature({
               onClick={() =>
                 runAction(
                   "create-agent",
-                  () =>
-                    agentAccessApi.createAgent(
-                      generatedId("agent", newAgentName),
-                      newAgentName,
-                    ),
-                  () => closeCreateAgentDialog(),
+                  () => {
+                    const displayName = newAgentName.trim();
+                    const operation = retainClientRequestId(
+                      createAgentOperation.current,
+                      "agent-create",
+                      displayName,
+                    );
+                    createAgentOperation.current = operation;
+                    return agentAccessApi.createAgent(
+                      displayName,
+                      operation.idempotencyKey,
+                    );
+                  },
+                  () => {
+                    createAgentOperation.current = null;
+                    closeCreateAgentDialog();
+                  },
                 )
               }
               disabled={pendingAction === "create-agent" || !canCreateAgent}

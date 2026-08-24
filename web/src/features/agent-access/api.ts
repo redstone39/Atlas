@@ -8,13 +8,12 @@ import type {
 
 export const agentAccessApi = {
   listAgents: () => requestJson<AgentUserListResult>("/api/v1/admin/agent-users"),
-  createAgent: (actorId: string, displayName: string) =>
+  createAgent: (displayName: string, idempotencyKey: string) =>
     requestJson<AgentUserCreateResult>("/api/v1/admin/agent-users", {
       method: "POST",
       body: JSON.stringify({
-        actor_id: actorId,
         display_name: displayName,
-        idempotency_key: `agent-${actorId}`,
+        idempotency_key: idempotencyKey,
       }),
     }),
   updateAgent: (

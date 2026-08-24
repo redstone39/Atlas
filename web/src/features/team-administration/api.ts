@@ -1,5 +1,6 @@
 import type { AdminActionResult } from "../../shared/api-contracts";
 import { requestJson } from "../../shared/api-client";
+import { clientRequestId } from "../../shared/ids";
 import type { TeamScopeRole } from "../../shared/identity-access-contracts";
 import type {
   TeamDirectoryConnectionListResult,
@@ -53,14 +54,17 @@ export const teamAdministrationApi = {
         }),
       },
     ),
-  createTeam: (teamId: string, name: string, parentTeamId: string | null) =>
+  createTeam: (
+    name: string,
+    parentTeamId: string | null,
+    idempotencyKey: string,
+  ) =>
     requestJson<AdminActionResult>("/api/v1/admin/teams", {
       method: "POST",
       body: JSON.stringify({
-        team_id: teamId,
         name,
         parent_team_id: parentTeamId || null,
-        idempotency_key: `team-${teamId}`,
+        idempotency_key: idempotencyKey,
       }),
     }),
   updateTeam: (

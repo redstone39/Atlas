@@ -76,5 +76,6 @@ export interface ProjectGovernanceFeatureProps {
       scopeId: string;
       scopeRole: ProjectMemberRole;
     },
+    idempotencyKey: string,
   ) => Promise<ProjectInviteResult>;
 }

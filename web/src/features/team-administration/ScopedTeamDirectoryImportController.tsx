@@ -11,7 +11,7 @@ import { Input } from "../../components/ui/input";
 import { OptionSelect } from "../../shared/OptionSelect";
 import { LoadErrorState, LoadingState, serverMessage } from "../../shared/product-ui";
 import { adminTeamDetailRoute } from "../../shared/routes";
-import { generatedId } from "../../shared/ids";
+import { clientRequestId } from "../../shared/ids";
 import { teamAdministrationApi } from "./api";
 import type {
   TeamDirectoryConnectionListResult,
@@ -140,7 +140,7 @@ export function useScopedTeamDirectoryImportController({
       );
       if (requestId !== requestIdRef.current) return;
       setSearch(result);
-      setIdempotencyKey(generatedId("team-directory-import", connectionId));
+      setIdempotencyKey(clientRequestId("team-directory-import"));
     } catch (error) {
       if (requestId !== requestIdRef.current) return;
       setActionError(error instanceof Error ? error.message : t("admin.actionFailed"));

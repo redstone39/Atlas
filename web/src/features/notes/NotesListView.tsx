@@ -12,6 +12,10 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Spinner } from "../../components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import { useIsMobile } from "../../hooks/use-mobile";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { activateOnEnterOrSpace, clickableSurfaceClassName, LoadErrorState, LoadingState, PageHeader } from "../../shared/product-ui";
 import { scopeNotesRoute } from "../../shared/routes";
 import { notesApi } from "./api";
@@ -46,6 +50,7 @@ export function NotesListView({
   const requestGeneration = useRef(0);
   const mutationGeneration = useRef(0);
   const mutationInFlight = useRef(false);
+  const createNoteOperation = useRef<ClientOperationKey | null>(null);
   useEffect(() => () => {
     mutationGeneration.current += 1;
   }, [lifecycle, scope.scope_id, scope.scope_type]);
@@ -90,13 +95,28 @@ export function NotesListView({
     const generation = ++mutationGeneration.current;
     setSaving(true);
     try {
+      const categoryId =
+        newNoteCategory === NO_CATEGORY ? null : newNoteCategory;
+      const operation = retainClientRequestId(
+        createNoteOperation.current,
+        "note-create",
+        JSON.stringify([
+          scope.scope_type,
+          scope.scope_id,
+          title.trim(),
+          categoryId,
+        ]),
+      );
+      createNoteOperation.current = operation;
       const note = await notesApi.createNote({
         scopeType: scope.scope_type,
         scopeId: scope.scope_id,
         title: title.trim(),
-        categoryId: newNoteCategory === NO_CATEGORY ? null : newNoteCategory,
+        categoryId,
+        idempotencyKey: operation.idempotencyKey,
       });
       if (generation !== mutationGeneration.current) return;
+      createNoteOperation.current = null;
       setCreateOpen(false);
       setTitle("");
       setNewNoteCategory(NO_CATEGORY);
@@ -164,7 +184,17 @@ export function NotesListView({
             </DialogContent>
           </Dialog>
           {lifecycle === "active" && (
-            <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+            <Dialog
+              open={createOpen}
+              onOpenChange={(open) => {
+                setCreateOpen(open);
+                if (!open) {
+                  createNoteOperation.current = null;
+                  setTitle("");
+                  setNewNoteCategory(NO_CATEGORY);
+                }
+              }}
+            >
               <DialogTrigger asChild><Button size="sm"><Plus data-icon="inline-start" />{t("notes.newNote")}</Button></DialogTrigger>
               <DialogContent>
                 <DialogHeader><DialogTitle>{t("notes.newNote")}</DialogTitle><DialogDescription>{t("notes.newNoteDescription")}</DialogDescription></DialogHeader>
@@ -223,6 +253,7 @@ function CategoryManager({ scope, active, trashed, onChanged }: { scope: NoteSco
 
   const mutationGeneration = useRef(0);
   const mutationInFlight = useRef(false);
+  const createCategoryOperation = useRef<ClientOperationKey | null>(null);
   useEffect(() => () => {
     mutationGeneration.current += 1;
   }, [scope.scope_id, scope.scope_type]);
@@ -233,8 +264,24 @@ function CategoryManager({ scope, active, trashed, onChanged }: { scope: NoteSco
     const generation = ++mutationGeneration.current;
     setBusy(true);
     try {
-      if (editing) await notesApi.updateCategory(editing, name.trim());
-      else await notesApi.createCategory(scope.scope_type, scope.scope_id, name.trim());
+      if (editing) {
+        createCategoryOperation.current = null;
+        await notesApi.updateCategory(editing, name.trim());
+      } else {
+        const operation = retainClientRequestId(
+          createCategoryOperation.current,
+          "note-category-create",
+          JSON.stringify([scope.scope_type, scope.scope_id, name.trim()]),
+        );
+        createCategoryOperation.current = operation;
+        await notesApi.createCategory(
+          scope.scope_type,
+          scope.scope_id,
+          name.trim(),
+          operation.idempotencyKey,
+        );
+        createCategoryOperation.current = null;
+      }
       if (generation !== mutationGeneration.current) return;
       setName("");
       setEditing(null);

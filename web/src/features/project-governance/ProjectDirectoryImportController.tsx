@@ -11,7 +11,7 @@ import { Input } from "../../components/ui/input";
 import { OptionSelect } from "../../shared/OptionSelect";
 import { LoadErrorState, LoadingState, serverMessage } from "../../shared/product-ui";
 import { adminProjectDetailRoute } from "../../shared/routes";
-import { generatedId } from "../../shared/ids";
+import { clientRequestId } from "../../shared/ids";
 import { projectGovernanceApi } from "./api";
 import type {
   ProjectDirectoryConnectionListResult,
@@ -140,7 +140,7 @@ export function useProjectDirectoryImportController({
       );
       if (requestId !== requestIdRef.current) return;
       setSearch(result);
-      setIdempotencyKey(generatedId("project-directory-import", connectionId));
+      setIdempotencyKey(clientRequestId("project-directory-import"));
     } catch (error) {
       if (requestId !== requestIdRef.current) return;
       setActionError(error instanceof Error ? error.message : t("admin.actionFailed"));

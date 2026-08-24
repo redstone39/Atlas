@@ -1,10 +1,14 @@
 import { Clipboard, FilterX, RefreshCw, RotateCcw, Save, Search, UserPlus, UserX } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { Button } from "../../components/ui/button";
 import {
   AdminBreadcrumb,
@@ -105,6 +109,7 @@ export function UserAdministrationFeature({
   const [showEditUser, setShowEditUser] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
+  const createInviteOperation = useRef<ClientOperationKey | null>(null);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [editDisplayName, setEditDisplayName] = useState("");
   const [editSystemRole, setEditSystemRole] = useState<EditableSystemRole>("user");
@@ -350,6 +355,7 @@ export function UserAdministrationFeature({
   }
 
   function closeInviteDialog() {
+    createInviteOperation.current = null;
     resetInviteDraft();
     setShowInviteForm(false);
   }
@@ -905,7 +911,25 @@ export function UserAdministrationFeature({
             </Button>
             <Button
               onClick={() =>
-                runAction("invite", () => userAdministrationApi.createInvite(displayName, email))
+                runAction("invite", () => {
+                  const canonicalDisplayName = displayName.trim();
+                  const canonicalEmail = email.trim();
+                  const operation = retainClientRequestId(
+                    createInviteOperation.current,
+                    "invite-create",
+                    JSON.stringify([canonicalDisplayName, canonicalEmail]),
+                  );
+                  createInviteOperation.current = operation;
+                  return userAdministrationApi.createInvite(
+                    canonicalDisplayName,
+                    canonicalEmail,
+                    undefined,
+                    operation.idempotencyKey,
+                  ).then((result) => {
+                    createInviteOperation.current = null;
+                    return result;
+                  });
+                })
               }
               disabled={pendingAction === "invite" || !canCreateInvite}
             >

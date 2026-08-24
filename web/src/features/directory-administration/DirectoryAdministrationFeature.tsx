@@ -3,7 +3,7 @@ import {
   Plus,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -33,7 +33,10 @@ import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import { Switch } from "../../components/ui/switch";
 import { Textarea } from "../../components/ui/textarea";
-import { generatedId } from "../../shared/ids";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { LoadErrorState, LoadingState, PageHeader, serverMessage } from "../../shared/product-ui";
 import { directoryAdministrationApi } from "./api";
 import type {
@@ -111,6 +114,7 @@ export function DirectoryAdministrationFeature({
   const [customCaPem, setCustomCaPem] = useState("");
   const [clearBindPassword, setClearBindPassword] = useState(false);
   const [clearCustomCa, setClearCustomCa] = useState(false);
+  const createConnectionOperation = useRef<ClientOperationKey | null>(null);
 
   useEffect(() => {
     void refreshConnections();
@@ -208,6 +212,7 @@ export function DirectoryAdministrationFeature({
   }
 
   function closeDialog() {
+    createConnectionOperation.current = null;
     resetSecrets();
     setEditing(null);
     setDialogOpen(false);
@@ -376,13 +381,37 @@ export function DirectoryAdministrationFeature({
             <Button
               disabled={!canSave || pendingAction === "save-connection"}
               onClick={() => {
-                const connectionId = editing?.connection_id ?? generatedId("directory", draft.display_name);
                 void runAction(
                   "save-connection",
-                  () => editing
-                    ? directoryAdministrationApi.updateConnection({ connectionId, config: draft, bindPassword: bindPassword || undefined, clearBindPassword, customCaPem: customCaPem || undefined, clearCustomCa })
-                    : directoryAdministrationApi.createConnection({ connection_id: connectionId, ...draft, bind_password: bindPassword, custom_ca_pem: customCaPem || undefined }),
                   () => {
+                    if (editing) {
+                      return directoryAdministrationApi.updateConnection({
+                        connectionId: editing.connection_id,
+                        config: draft,
+                        bindPassword: bindPassword || undefined,
+                        clearBindPassword,
+                        customCaPem: customCaPem || undefined,
+                        clearCustomCa,
+                      });
+                    }
+                    const input = {
+                      ...draft,
+                      bind_password: bindPassword,
+                      custom_ca_pem: customCaPem || undefined,
+                    };
+                    const operation = retainClientRequestId(
+                      createConnectionOperation.current,
+                      "directory-connection-create",
+                      JSON.stringify(input),
+                    );
+                    createConnectionOperation.current = operation;
+                    return directoryAdministrationApi.createConnection(
+                      input,
+                      operation.idempotencyKey,
+                    );
+                  },
+                  () => {
+                    createConnectionOperation.current = null;
                     closeDialog();
                   },
                 );

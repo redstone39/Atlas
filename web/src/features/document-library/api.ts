@@ -16,7 +16,7 @@ export const documentLibraryApi = {
         : "/api/v1/admin/document-library",
     ),
   uploadDocumentLibraryFile: (input: {
-    documentId: string;
+    clientKey: string;
     scopeType: "team" | "project";
     scopeId: string;
     tagRefs: DocumentTagRef[];
@@ -25,12 +25,11 @@ export const documentLibraryApi = {
     allowMemberDownload: boolean;
   }) => {
     const form = new FormData();
-    form.set("document_id", input.documentId);
     form.set("scope_type", input.scopeType);
     form.set("scope_id", input.scopeId);
     form.set("tag_refs", JSON.stringify(input.tagRefs));
     form.set("allow_member_download", String(input.allowMemberDownload));
-    form.set("idempotency_key", `doclib-${input.documentId}`);
+    form.set("idempotency_key", input.clientKey);
     form.set("file", input.file);
     if (input.description.trim()) form.set("description", input.description.trim());
     return requestJson<DocumentLibraryMutationResult>("/api/v1/admin/document-library", {

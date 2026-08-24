@@ -37,7 +37,8 @@ export interface DirectoryConnectionListResult {
   connections: DirectoryConnectionStatus[];
 }
 
-export interface DirectoryConnectionCreateInput extends DirectoryConnectionConfig {
+export interface DirectoryConnectionCreateInput
+  extends Omit<DirectoryConnectionConfig, "connection_id"> {
   bind_password: string;
   custom_ca_pem?: string;
 }

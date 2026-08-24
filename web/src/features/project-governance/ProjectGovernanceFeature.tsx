@@ -27,6 +27,10 @@ import {
 } from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { useIsMobile } from "../../hooks/use-mobile";
 import {
   Table,
@@ -36,7 +40,6 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table";
-import { generatedId } from "../../shared/ids";
 import {
   AdminBreadcrumb,
   AdminResourceHeader,
@@ -101,6 +104,7 @@ export function ProjectGovernanceFeature({
   const [accessSubjectType, setAccessSubjectType] =
     useState<"user" | "team" | "service_account">("user");
   const [projectName, setProjectName] = useState("");
+  const createProjectOperation = useRef<ClientOperationKey | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [editProjectName, setEditProjectName] = useState("");
   const [editProjectStatus, setEditProjectStatus] =
@@ -125,6 +129,7 @@ export function ProjectGovernanceFeature({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<ProjectMemberRole>("viewer");
   const [inviteLink, setInviteLink] = useState("");
+  const createProjectInviteOperation = useRef<ClientOperationKey | null>(null);
   const [actionError, setActionError] = useState("");
   const [pendingAction, setPendingAction] = useState("");
   const [loading, setLoading] = useState(true);
@@ -301,6 +306,7 @@ export function ProjectGovernanceFeature({
     setShowAddAccess(false);
   }
   function openInviteUserDialog() {
+    createProjectInviteOperation.current = null;
     setInviteName("");
     setInviteEmail("");
     setInviteRole("viewer");
@@ -332,6 +338,7 @@ export function ProjectGovernanceFeature({
   }
 
   function closeCreateProjectDialog() {
+    createProjectOperation.current = null;
     resetProjectDraft();
     setShowCreateProject(false);
   }
@@ -484,15 +491,28 @@ export function ProjectGovernanceFeature({
       setPendingAction("project-member-invite");
       setActionError("");
       try {
-        const result = await createInvite(inviteName.trim(), inviteEmail.trim(), {
-          scopeType: "project",
+        const scope = {
+          scopeType: "project" as const,
           scopeId: selectedProject.project_id,
           scopeRole: inviteRole,
-        });
+        };
+        const operation = retainClientRequestId(
+          createProjectInviteOperation.current,
+          "project-invite-create",
+          JSON.stringify([inviteName.trim(), inviteEmail.trim(), scope]),
+        );
+        createProjectInviteOperation.current = operation;
+        const result = await createInvite(
+          inviteName.trim(),
+          inviteEmail.trim(),
+          scope,
+          operation.idempotencyKey,
+        );
         const message = serverMessage(result, t);
         setInviteLink(result.local_pilot_acceptance?.acceptance_url ?? "");
         onNotice(result.message_code);
         toast.success(message);
+        createProjectInviteOperation.current = null;
         setInviteName("");
         setInviteEmail("");
         setInviteRole("viewer");
@@ -1057,12 +1077,24 @@ export function ProjectGovernanceFeature({
               onClick={() =>
                 runAction(
                   "project",
-                  () =>
-                    projectGovernanceApi.createProject(
-                      generatedId("proj", projectName),
-                      projectName,
-                    ),
-                  () => closeCreateProjectDialog(),
+                  () => {
+                    const name = projectName.trim();
+                    if (!name) throw new Error("project.name_is_required");
+                    const operation = retainClientRequestId(
+                      createProjectOperation.current,
+                      "project-create",
+                      name,
+                    );
+                    createProjectOperation.current = operation;
+                    return projectGovernanceApi.createProject(
+                      name,
+                      operation.idempotencyKey,
+                    );
+                  },
+                  () => {
+                    createProjectOperation.current = null;
+                    closeCreateProjectDialog();
+                  },
                 )
               }
               disabled={pendingAction === "project" || !canCreateProject}

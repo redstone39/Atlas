@@ -22,6 +22,10 @@ import {
   TechnicalDetails,
   serverMessage,
 } from "../../shared/product-ui";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { processingPluginsApi } from "./api";
 import type { ProcessingPluginVersion, ProcessingProfile, ProcessingRun, ProcessingRunDetail } from "./types";
 
@@ -55,7 +59,6 @@ export function ProcessingPluginsFeature({
   const [runsError, setRunsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [profileId, setProfileId] = useState("");
   const [profileName, setProfileName] = useState("");
   const [mediaType, setMediaType] = useState("application/pdf");
   const [baseId, setBaseId] = useState("");
@@ -68,6 +71,10 @@ export function ProcessingPluginsFeature({
   const [maxTotalInvocations, setMaxTotalInvocations] = useState(500);
   const profilesRequestRef = useRef<Promise<void> | null>(null);
   const runsRequestRef = useRef<Promise<void> | null>(null);
+  const createProfileOperation = useRef<ClientOperationKey | null>(null);
+  const createRevisionOperation = useRef<ClientOperationKey | null>(null);
+  const createdProfile = useRef<ProcessingProfile | null>(null);
+  const nextRevisionOperation = useRef<ClientOperationKey | null>(null);
 
   const verified = plugins.filter((plugin) => plugin.status === "verified");
   const baseParsers = verified.filter((plugin) => plugin.plugin_kind === "base_parser");
@@ -188,19 +195,73 @@ export function ProcessingPluginsFeature({
 
   async function createProfileAndRevision() {
     const payload = draftRevisionPayload();
-    if (!profileId.trim() || !profileName.trim() || !payload) { toast.error(t("plugins.profileRequired")); return; }
+    const displayName = profileName.trim();
+    if (!displayName || !payload) {
+      toast.error(t("plugins.profileRequired"));
+      return;
+    }
     await action(async () => {
-      await processingPluginsApi.createProfile(profileId.trim(), profileName.trim());
-      await processingPluginsApi.createRevision(profileId.trim(), 0, payload);
-      setProfileId(""); setProfileName(""); setEligible([]); setMandatory([]);
+      const priorProfileOperation = createProfileOperation.current;
+      const profileOperation = retainClientRequestId(
+        priorProfileOperation,
+        "processing-profile-create",
+        displayName,
+      );
+      if (priorProfileOperation?.fingerprint !== profileOperation.fingerprint) {
+        createdProfile.current = null;
+        createRevisionOperation.current = null;
+      }
+      createProfileOperation.current = profileOperation;
+      const profile = createdProfile.current ??
+        await processingPluginsApi.createProfile(
+          displayName,
+          profileOperation.idempotencyKey,
+        );
+      createdProfile.current = profile;
+      const revisionOperation = retainClientRequestId(
+        createRevisionOperation.current,
+        "processing-profile-revision-create",
+        JSON.stringify([profile.profile_id, payload]),
+      );
+      createRevisionOperation.current = revisionOperation;
+      await processingPluginsApi.createRevision(
+        profile.profile_id,
+        0,
+        payload,
+        revisionOperation.idempotencyKey,
+      );
+      createProfileOperation.current = null;
+      createRevisionOperation.current = null;
+      createdProfile.current = null;
+      setProfileName("");
+      setEligible([]);
+      setMandatory([]);
     }, t("plugins.profileCreated"));
   }
 
   async function createNextRevision(profile: ProcessingProfile) {
     const payload = draftRevisionPayload();
-    if (!payload) { toast.error(t("plugins.profileRequired")); return; }
+    if (!payload) {
+      toast.error(t("plugins.profileRequired"));
+      return;
+    }
     const current = Math.max(0, ...profile.revisions.map((item) => item.revision));
-    await action(() => processingPluginsApi.createRevision(profile.profile_id, current, payload), t("plugins.revisionCreated"));
+    await action(async () => {
+      const operation = retainClientRequestId(
+        nextRevisionOperation.current,
+        "processing-profile-revision-create",
+        JSON.stringify([profile.profile_id, current, payload]),
+      );
+      nextRevisionOperation.current = operation;
+      const result = await processingPluginsApi.createRevision(
+        profile.profile_id,
+        current,
+        payload,
+        operation.idempotencyKey,
+      );
+      nextRevisionOperation.current = null;
+      return result;
+    }, t("plugins.revisionCreated"));
   }
 
   const pageHeader = (
@@ -274,12 +335,11 @@ export function ProcessingPluginsFeature({
         ) : <>
         <Card><CardHeader><CardTitle>{t("plugins.newProfile")}</CardTitle><CardDescription>{t("plugins.newProfileDescription")}</CardDescription></CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            <Field><FieldLabel>{t("plugins.profileId")}</FieldLabel><Input value={profileId} onChange={(e) => setProfileId(e.target.value)} /></Field>
-            <Field><FieldLabel>{t("plugins.profileName")}</FieldLabel><Input value={profileName} onChange={(e) => setProfileName(e.target.value)} /></Field>
+            <Field><FieldLabel htmlFor="processing-profile-name">{t("plugins.profileName")}</FieldLabel><Input id="processing-profile-name" value={profileName} onChange={(e) => setProfileName(e.target.value)} /></Field>
             <TechnicalDetails label={t("common.advancedSettings")} className="md:col-span-2">
               <div className="grid gap-4 rounded-md border p-4 md:grid-cols-2">
-            <Field><FieldLabel>{t("plugins.mediaType")}</FieldLabel><Input value={mediaType} onChange={(e) => setMediaType(e.target.value)} /></Field>
-            <Field><FieldLabel>{t("plugins.baseParser")}</FieldLabel><OptionSelect value={baseId} onValueChange={setBaseId} options={baseParsers.map((item) => ({ value: pluginKey(item), label: `${item.plugin_id} ${item.plugin_version}` }))} /></Field>
+            <Field><FieldLabel htmlFor="processing-profile-media-type">{t("plugins.mediaType")}</FieldLabel><Input id="processing-profile-media-type" value={mediaType} onChange={(e) => setMediaType(e.target.value)} /></Field>
+            <Field><FieldLabel htmlFor="processing-profile-base-parser">{t("plugins.baseParser")}</FieldLabel><OptionSelect id="processing-profile-base-parser" value={baseId} onValueChange={setBaseId} options={baseParsers.map((item) => ({ value: pluginKey(item), label: `${item.plugin_id} ${item.plugin_version}` }))} /></Field>
             <div className="md:col-span-2"><div className="mb-2 text-sm font-medium">{t("plugins.processorsPriority")}</div><div className="grid gap-2">
               {processors.map((plugin) => { const key = pluginKey(plugin); const selected = eligible.includes(key); return <div key={key} className="flex items-center gap-3 rounded-md border p-3">
                 <Checkbox checked={selected} onCheckedChange={(value) => toggleEligible(key, value === true)} aria-label={`${t("plugins.eligible")} ${plugin.plugin_id} ${plugin.plugin_version}`} />

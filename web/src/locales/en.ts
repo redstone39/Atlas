@@ -1309,7 +1309,7 @@ export const en = {
 "plugins.maxModulesPerRegion": "Maximum modules per region",
 "plugins.maxTotalInvocations": "Maximum total plugin invocations",
 "plugins.createProfile": "Create profile and draft revision",
-"plugins.profileRequired": "Profile ID, name, and base parser are required.",
+"plugins.profileRequired": "Profile name and base parser are required.",
 "plugins.profileCreated": "Profile draft created.",
 "plugins.createRevision": "New revision",
 "plugins.revisionCreated": "Profile revision created.",

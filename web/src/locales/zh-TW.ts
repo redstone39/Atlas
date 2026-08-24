@@ -1286,7 +1286,7 @@ export const zhTW = {
 "plugins.maxModulesPerRegion": "每個區域的模組上限",
 "plugins.maxTotalInvocations": "插件呼叫總數上限",
 "plugins.createProfile": "建立設定檔與草稿修訂版",
-"plugins.profileRequired": "必須填寫設定檔識別碼、名稱並選擇基礎解析器。",
+"plugins.profileRequired": "必須填寫設定檔名稱並選擇基礎解析器。",
 "plugins.profileCreated": "設定檔草稿已建立。",
 "plugins.createRevision": "新增修訂版",
 "plugins.revisionCreated": "設定檔修訂版已建立。",

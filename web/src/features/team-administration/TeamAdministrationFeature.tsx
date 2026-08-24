@@ -28,6 +28,10 @@ import {
 } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Spinner } from "../../components/ui/spinner";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { useIsMobile } from "../../hooks/use-mobile";
 import {
   Table,
@@ -37,7 +41,6 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table";
-import { generatedId } from "../../shared/ids";
 import {
   AdminBreadcrumb,
   AdminResourceHeader,
@@ -144,6 +147,7 @@ export function TeamAdministrationFeature({
   const [memberDirectoryLoadError, setMemberDirectoryLoadError] = useState("");
   const [teamName, setTeamName] = useState("");
   const [parentTeamId, setParentTeamId] = useState("");
+  const createTeamOperation = useRef<ClientOperationKey | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [editTeamName, setEditTeamName] = useState("");
   const [editParentTeamId, setEditParentTeamId] = useState("");
@@ -434,6 +438,7 @@ export function TeamAdministrationFeature({
   }
 
   function closeCreateTeamDialog() {
+    createTeamOperation.current = null;
     resetCreateTeamDraft();
     setShowCreateTeam(false);
   }
@@ -931,13 +936,25 @@ export function TeamAdministrationFeature({
               onClick={() =>
                 runAction(
                   "create-team",
-                  () =>
-                    teamAdministrationApi.createTeam(
-                      generatedId("team", teamName),
-                      teamName,
-                      parentTeamId || null,
-                    ),
-                  closeCreateTeamDialog,
+                  () => {
+                    const name = teamName.trim();
+                    const parentId = parentTeamId || null;
+                    const operation = retainClientRequestId(
+                      createTeamOperation.current,
+                      "team-create",
+                      JSON.stringify([name, parentId]),
+                    );
+                    createTeamOperation.current = operation;
+                    return teamAdministrationApi.createTeam(
+                      name,
+                      parentId,
+                      operation.idempotencyKey,
+                    );
+                  },
+                  () => {
+                    createTeamOperation.current = null;
+                    closeCreateTeamDialog();
+                  },
                 )
               }
               disabled={pendingAction === "create-team" || !canCreateTeam}

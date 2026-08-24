@@ -5,7 +5,6 @@ import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
-import { generatedId } from "../../shared/ids";
 import { ApiError, type MessageReference } from "../../shared/user-messages";
 import {
   LoadErrorState,
@@ -13,6 +12,10 @@ import {
   PageHeader,
   serverMessage,
 } from "../../shared/product-ui";
+import {
+  retainClientRequestId,
+  type ClientOperationKey,
+} from "../../shared/ids";
 import { modelRoutingApi } from "./api";
 import { AnswerBehaviorTab } from "./AnswerBehaviorTab";
 import { ConnectionDialog } from "./ConnectionDialog";
@@ -26,6 +29,10 @@ import {
   runtimePolicyDraft,
   type RuntimePolicyDraft,
 } from "./runtimePolicy";
+import {
+  providerConnectionFieldsValid,
+  providerEndpointDefaults,
+} from "./provider-connection-fields";
 import type {
   AnswerBehaviorStatus,
   ModelRouteStatus,
@@ -37,11 +44,6 @@ import type {
 type SafeAction = MessageReference;
 type ModelManagementTab = "connections" | "models" | "answer-behavior";
 
-const providerDefaults: Record<ProviderType, string> = {
-  openai_compatible: "https://api.openai.com/v1",
-  azure_openai: "https://example.openai.azure.com",
-  anthropic: "https://api.anthropic.com",
-};
 
 export function ModelRoutingFeature({
   onNotice,
@@ -74,10 +76,13 @@ export function ModelRoutingFeature({
   const [connectionName, setConnectionName] = useState("");
   const [providerType, setProviderType] =
     useState<ProviderType>("openai_compatible");
-  const [endpointUrl, setEndpointUrl] = useState(providerDefaults.openai_compatible);
+  const [endpointUrl, setEndpointUrl] = useState(
+    providerEndpointDefaults.openai_compatible,
+  );
   const [apiVersion, setApiVersion] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [connectionEnabled, setConnectionEnabled] = useState(true);
+  const createConnectionOperation = useRef<ClientOperationKey | null>(null);
 
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [editingRoute, setEditingRoute] = useState<ModelRouteStatus | null>(null);
@@ -96,6 +101,7 @@ export function ModelRoutingFeature({
     useState<"idle" | "loading" | "available" | "unavailable">("idle");
   const [discoveryMessage, setDiscoveryMessage] = useState("");
   const discoveryRequest = useRef<AbortController | null>(null);
+  const createRouteOperation = useRef<ClientOperationKey | null>(null);
 
   useEffect(() => {
     void refreshConnections();
@@ -249,7 +255,7 @@ export function ModelRoutingFeature({
     setEditingConnection(null);
     setConnectionName("");
     setProviderType("openai_compatible");
-    setEndpointUrl(providerDefaults.openai_compatible);
+    setEndpointUrl(providerEndpointDefaults.openai_compatible);
     setApiVersion("");
     setApiKey("");
     setConnectionEnabled(true);
@@ -268,6 +274,7 @@ export function ModelRoutingFeature({
   }
 
   function closeConnectionDialog() {
+    createConnectionOperation.current = null;
     setApiKey("");
     setApiVersion("");
     setConnectionDialogOpen(false);
@@ -308,6 +315,7 @@ export function ModelRoutingFeature({
   }
 
   function closeModelDialog() {
+    createRouteOperation.current = null;
     discoveryRequest.current?.abort();
     setModelDialogOpen(false);
     setEditingRoute(null);
@@ -351,16 +359,15 @@ export function ModelRoutingFeature({
   }
 
   function submitConnection() {
-    const connectionId = editingConnection?.connection_id ??
-      generatedId("connection", connectionName);
     const displayName = connectionName.trim();
     const normalizedEndpointUrl = endpointUrl.trim();
     const normalizedApiVersion = apiVersion.trim();
     void runAction(
       "save-connection",
-      () => editingConnection
-        ? modelRoutingApi.updateProviderConnection({
-            connectionId,
+      () => {
+        if (editingConnection) {
+          return modelRoutingApi.updateProviderConnection({
+            connectionId: editingConnection.connection_id,
             displayName: displayName !== editingConnection.display_name
               ? displayName
               : undefined,
@@ -376,28 +383,44 @@ export function ModelRoutingFeature({
               ? connectionEnabled
               : undefined,
             expectedRevision: editingConnection.revision,
-          })
-        : modelRoutingApi.createProviderConnection({
-            connectionId,
-            displayName: connectionName.trim(),
-            providerType,
-            endpointUrl: endpointUrl.trim(),
-            apiVersion: providerType === "azure_openai" ? apiVersion.trim() : undefined,
-            apiKey: apiKey.trim(),
-          }),
-      closeConnectionDialog,
+          });
+        }
+        const input = {
+          displayName,
+          providerType,
+          endpointUrl: normalizedEndpointUrl,
+          apiVersion: providerType === "azure_openai"
+            ? normalizedApiVersion
+            : undefined,
+          apiKey: apiKey.trim(),
+        };
+        const operation = retainClientRequestId(
+          createConnectionOperation.current,
+          "provider-connection-create",
+          JSON.stringify(input),
+        );
+        createConnectionOperation.current = operation;
+        return modelRoutingApi.createProviderConnection(
+          input,
+          operation.idempotencyKey,
+        );
+      },
+      () => {
+        createConnectionOperation.current = null;
+        closeConnectionDialog();
+      },
     );
   }
 
   function submitModel() {
     const parsedPolicy = parseRuntimePolicy(runtimePolicy);
     if (!parsedPolicy) return;
-    const routeId = editingRoute?.route_id ?? generatedId("route", routeName || modelName);
     void runAction(
       "save-model",
-      () => editingRoute
-        ? modelRoutingApi.updateModelRoute({
-            routeId,
+      () => {
+        if (editingRoute) {
+          return modelRoutingApi.updateModelRoute({
+            routeId: editingRoute.route_id,
             displayName: routeName.trim(),
             modelName: modelName.trim(),
             connectionId: modelConnectionId,
@@ -405,25 +428,43 @@ export function ModelRoutingFeature({
             supportsVision: modelSupportsVision,
             runtimePolicy: parsedPolicy,
             expectedRevision: editingRoute.revision,
-          })
-        : modelRoutingApi.configureModelRoute({
-            routeId,
-            displayName: routeName.trim(),
-            modelName: modelName.trim(),
-            connectionId: modelConnectionId,
-            enabled: modelEnabled,
-            supportsVision: modelSupportsVision,
-            runtimePolicy: parsedPolicy,
-          }),
-      closeModelDialog,
+          });
+        }
+        const input = {
+          displayName: routeName.trim(),
+          modelName: modelName.trim(),
+          connectionId: modelConnectionId,
+          enabled: modelEnabled,
+          supportsVision: modelSupportsVision,
+          runtimePolicy: parsedPolicy,
+        };
+        const operation = retainClientRequestId(
+          createRouteOperation.current,
+          "model-route-create",
+          JSON.stringify(input),
+        );
+        createRouteOperation.current = operation;
+        return modelRoutingApi.configureModelRoute(
+          input,
+          operation.idempotencyKey,
+        );
+      },
+      () => {
+        createRouteOperation.current = null;
+        closeModelDialog();
+      },
     );
   }
 
-  const canSaveConnection = Boolean(
-    connectionName.trim() &&
-      endpointUrl.trim() &&
-      (providerType !== "azure_openai" || apiVersion.trim()) &&
-      (editingConnection || apiKey.trim()),
+  const canSaveConnection = providerConnectionFieldsValid(
+    {
+      displayName: connectionName,
+      providerType,
+      endpointUrl,
+      apiVersion,
+      apiKey,
+    },
+    Boolean(editingConnection),
   );
   const parsedRuntimePolicy = parseRuntimePolicy(runtimePolicy);
   const runtimePolicyComplete = Object.values(runtimePolicy).every((value) => value.trim());

@@ -1,4 +1,5 @@
 import { requestJson } from "../../shared/api-client";
+import { clientRequestId } from "../../shared/ids";
 import type {
   BodyRestoreResult,
   CollaborationTicket,
@@ -15,35 +16,21 @@ import type {
   NotesSettings,
 } from "./types";
 
-function clientId(prefix: string) {
-  if (
-    typeof globalThis.crypto !== "undefined"
-    && typeof globalThis.crypto.randomUUID === "function"
-  ) {
-    return globalThis.crypto.randomUUID();
-  }
-  if (
-    typeof globalThis.crypto !== "undefined"
-    && typeof globalThis.crypto.getRandomValues === "function"
-  ) {
-    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
-    return `${prefix}-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-  }
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
-const idempotencyKey = (kind: string) =>
-  `${kind}-${clientId("request")}`;
-
-function mutation<T>(path: string, method: "POST" | "PATCH", body: object, revision?: number) {
-  const key = idempotencyKey(method.toLowerCase());
+function mutation<T>(
+  path: string,
+  method: "POST" | "PATCH",
+  body: object,
+  revision?: number,
+  idempotencyKey = clientRequestId(`notes-${method.toLowerCase()}`),
+) {
   return requestJson<T>(path, {
     method,
     headers: {
-      "Idempotency-Key": key,
+      "Idempotency-Key": idempotencyKey,
       ...(revision === undefined ? {} : { "If-Match": String(revision) }),
     },
-    body: JSON.stringify({ ...body, idempotency_key: key }),
+    body: JSON.stringify({ ...body, idempotency_key: idempotencyKey }),
   });
 }
 
@@ -71,15 +58,14 @@ export const notesApi = {
     scopeId: string;
     title: string;
     categoryId: string | null;
+    idempotencyKey: string;
   }) => {
-    const noteId = clientId("note");
     return mutation<NoteDetail>("/api/v1/notes", "POST", {
-      note_id: noteId,
       scope_type: input.scopeType,
       scope_id: input.scopeId,
       title: input.title,
       category_id: input.categoryId,
-    });
+    }, undefined, input.idempotencyKey);
   },
   updateNote: (
     noteId: string,
@@ -112,13 +98,17 @@ export const notesApi = {
     });
     return requestJson<{ items: NoteCategory[] }>(`/api/v1/note-categories?${params}`);
   },
-  createCategory: (scopeType: NoteScopeType, scopeId: string, name: string) =>
+  createCategory: (
+    scopeType: NoteScopeType,
+    scopeId: string,
+    name: string,
+    idempotencyKey: string,
+  ) =>
     mutation<NoteCategory>("/api/v1/note-categories", "POST", {
-      category_id: clientId("category"),
       scope_type: scopeType,
       scope_id: scopeId,
       name,
-    }),
+    }, undefined, idempotencyKey),
   updateCategory: (category: NoteCategory, name: string) =>
     mutation<NoteCategory>(
       `/api/v1/note-categories/${encodeURIComponent(category.category_id)}`,
@@ -145,7 +135,7 @@ export const notesApi = {
       `/api/v1/notes/${encodeURIComponent(noteId)}/collaboration-ticket`,
       { method: "POST" },
     ),
-  uploadAttachment: (note: NoteDetail, file: File, key = idempotencyKey("note-image")) => {
+  uploadAttachment: (note: NoteDetail, file: File, key = clientRequestId("note-image")) => {
     const form = new FormData();
     form.set("file", file);
     form.set("expected_collaboration_epoch", String(note.collaboration_epoch));

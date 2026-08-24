@@ -12,10 +12,16 @@ import type {
 export const directoryAdministrationApi = {
   listConnections: () =>
     requestJson<DirectoryConnectionListResult>("/api/v1/admin/directory-connections"),
-  createConnection: (input: DirectoryConnectionCreateInput) =>
+  createConnection: (
+    input: DirectoryConnectionCreateInput,
+    idempotencyKey: string,
+  ) =>
     requestJson<DirectoryConnectionStatus>("/api/v1/admin/directory-connections", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        ...input,
+        idempotency_key: idempotencyKey,
+      }),
     }),
   updateConnection: (input: DirectoryConnectionUpdateInput) => {
     const body: Record<string, unknown> = { ...input.config };
