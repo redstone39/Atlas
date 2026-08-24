@@ -5,12 +5,32 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
-from atlas_production.modules.identity_access.api_models import TeamUpdateRequest
+from atlas_production.modules.identity_access.api_models import (
+    TeamCreateRequest,
+    TeamUpdateRequest,
+)
 from atlas_production.modules.identity_access.records import TeamRecord, UserRecord
 from atlas_production.modules.identity_access.team_contracts import TeamAccessError
 from atlas_production.modules.identity_access.team_service import TeamAccessService
 from atlas_production.shared.public import AuditEventRecord
+
+
+def test_team_create_request_leaves_identifier_allocation_to_owner() -> None:
+    request = TeamCreateRequest(
+        name="Owner allocated",
+        parent_team_id=None,
+        idempotency_key="team-create-owner",
+    )
+    assert "team_id" not in request.model_dump()
+    with pytest.raises(ValidationError):
+        TeamCreateRequest(
+            team_id="caller-team",
+            name="Caller allocated",
+            parent_team_id=None,
+            idempotency_key="team-create-caller",
+        )
 
 
 NOW = "2026-08-18T00:00:00+00:00"

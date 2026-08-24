@@ -84,13 +84,12 @@ describe("provider connection and model routing API boundary", () => {
     const fetchMock = successfulFetch();
     await modelRoutingApi.listProviderConnections();
     await modelRoutingApi.createProviderConnection({
-      connectionId: "connection-a",
       displayName: "Connection A",
       providerType: "azure_openai",
       endpointUrl: "https://example.openai.azure.com",
       apiVersion: "2024-10-21",
       apiKey: "secret-canary",
-    });
+    }, "provider-create-a");
     await modelRoutingApi.updateProviderConnection({
       connectionId: "connection-a",
       displayName: "Connection A updated",
@@ -102,14 +101,13 @@ describe("provider connection and model routing API boundary", () => {
     await modelRoutingApi.listAvailableModels("connection-a");
     await modelRoutingApi.listModelRoutes();
     await modelRoutingApi.configureModelRoute({
-      routeId: "route-a",
       displayName: "Route A",
       modelName: "deployment-a",
       connectionId: "connection-a",
       enabled: true,
       supportsVision: true,
       runtimePolicy,
-    });
+    }, "route-create-a");
     await modelRoutingApi.updateModelRoute({
       routeId: "route-a",
       displayName: "Route A updated",
@@ -132,13 +130,12 @@ describe("provider connection and model routing API boundary", () => {
         path: "/api/v1/admin/config/provider-connections",
         method: "POST",
         body: {
-          connection_id: "connection-a",
           display_name: "Connection A",
           provider_type: "azure_openai",
           endpoint_url: "https://example.openai.azure.com",
           api_version: "2024-10-21",
           api_key: "secret-canary",
-          idempotency_key: expect.stringMatching(/^provider-connection-connection-a-/),
+          idempotency_key: "provider-create-a",
         },
       },
       {
@@ -148,7 +145,7 @@ describe("provider connection and model routing API boundary", () => {
           display_name: "Connection A updated",
           api_version: "2024-12-01-preview",
           expected_revision: 3,
-          idempotency_key: expect.stringMatching(/^provider-connection-connection-a-/),
+          idempotency_key: expect.stringMatching(/^provider-connection-update-connection-a-/),
         },
       },
       {
@@ -169,14 +166,13 @@ describe("provider connection and model routing API boundary", () => {
         path: "/api/v1/admin/config/model-routes",
         method: "POST",
         body: {
-          route_id: "route-a",
           display_name: "Route A",
           model_name: "deployment-a",
           connection_id: "connection-a",
           enabled: true,
           supports_vision: true,
           runtime_policy: runtimePolicy,
-          idempotency_key: expect.stringMatching(/^model-route-route-a-/),
+          idempotency_key: "route-create-a",
         },
       },
       {
@@ -187,7 +183,7 @@ describe("provider connection and model routing API boundary", () => {
           supports_vision: false,
           runtime_policy: { ...runtimePolicy, max_total_tokens_per_conversation: 24000 },
           expected_revision: 2,
-          idempotency_key: expect.stringMatching(/^model-route-route-a-/),
+          idempotency_key: expect.stringMatching(/^model-route-update-route-a-/),
         },
       },
       {
@@ -227,23 +223,19 @@ describe("provider connection and model routing API boundary", () => {
     const fetchMock = successfulFetch();
 
     await modelRoutingApi.createProviderConnection({
-      connectionId: "connection-anthropic",
       displayName: "Anthropic",
       providerType: "anthropic",
       endpointUrl: "https://api.anthropic.com",
       apiKey: "secret-canary",
-    });
+    }, "provider-create-anthropic");
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
     expect(body).toEqual({
-      connection_id: "connection-anthropic",
       display_name: "Anthropic",
       provider_type: "anthropic",
       endpoint_url: "https://api.anthropic.com",
       api_key: "secret-canary",
-      idempotency_key: expect.stringMatching(
-        /^provider-connection-connection-anthropic-/,
-      ),
+      idempotency_key: "provider-create-anthropic",
     });
     expect(body).not.toHaveProperty("api_version");
   });

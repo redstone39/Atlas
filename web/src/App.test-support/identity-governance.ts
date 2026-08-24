@@ -378,7 +378,7 @@ export function createIdentityGovernanceHandler(
     if (url.pathname === "/api/v1/admin/directory-connections" && method === "POST") {
       const body = JSON.parse(String(init?.body ?? "{}"));
       const connection: DirectoryConnectionStatus = {
-        connection_id: body.connection_id,
+        connection_id: `directory-connection-${directoryConnections.length + 1}`,
         display_name: body.display_name,
         priority: body.priority,
         provider_type: body.provider_type,

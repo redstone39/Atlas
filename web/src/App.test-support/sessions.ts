@@ -174,6 +174,8 @@ export const readyReadiness: ReadinessState = {
   evidence_ready_projects: ["proj-signal-integrity-alpha"],
   message_code: "workspace.is_ready", message_params: {},
 };
+const claimedFirstAdmin = { claim_available: false } as const;
+
 
 export function createSessionHandler(
   initialSession: SessionState,
@@ -186,6 +188,9 @@ export function createSessionHandler(
   const handler: MockApiHandler = ({ url, method }) => {
     if (url.pathname === "/api/v1/auth/session" && method === "GET") {
       return jsonResponse(session);
+    }
+    if (url.pathname === "/api/v1/auth/first-admin" && method === "GET") {
+      return jsonResponse(claimedFirstAdmin);
     }
     if (url.pathname === "/api/v1/auth/sessions" && method === "POST") {
       session = adminSession;

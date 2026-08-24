@@ -38,6 +38,23 @@ Use the first form while preparing a commit and the second against a committed
 tree. The audit verifies the repository's encoded publication boundary; it does
 not inspect external services or certify a deployment.
 
+## Public first-run smoke
+
+With the public Compose stack running on its default loopback ports, exercise
+the empty-deployment setup journey:
+
+```sh
+infra/scripts/smoke_public_first_run
+docker compose -f infra/docker-compose.p1.yml restart
+infra/scripts/smoke_public_first_run --verify-restart
+```
+
+The fresh pass claims the first System Admin concurrently, configures owner-
+allocated resources, uploads one document, and records state for the restart
+pass. The restart pass confirms that the first-admin gate stays closed and the
+created state remains available. Use only a disposable Compose project and
+remove its volumes after the check.
+
 ## Conversation-evolution smoke
 
 The conversation-evolution smoke requires `ATLAS_TEST_POSTGRES_URL` to name a

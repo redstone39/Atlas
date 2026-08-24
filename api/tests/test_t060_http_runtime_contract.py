@@ -7,7 +7,10 @@ from fastapi.testclient import TestClient
 from atlas_production.app import create_app
 from atlas_production.infrastructure.composition import ApiComposition
 from atlas_production.modules.identity_access.contracts import LoginOutcome
-from atlas_production.modules.identity_access.public import SessionState
+from atlas_production.modules.identity_access.public import (
+    FirstAdminStatus,
+    SessionState,
+)
 from atlas_production.modules.identity_access.records import UserRecord
 
 
@@ -42,6 +45,9 @@ class _Identity:
         available_projects=[],
         system_role="user",
     )
+    def first_admin_status(self):
+        return FirstAdminStatus(claim_available=False)
+
 
     def login(self, _payload):
         return LoginOutcome(self.session, "opaque-session-token")
@@ -100,6 +106,15 @@ class _OriginalBytes:
             return SimpleNamespace(status_code=206, headers=headers, body=(b"bcd",))
         headers["Content-Length"] = "6"
         return SimpleNamespace(status_code=200, headers=headers, body=(b"abcdef",))
+
+
+def test_runtime_exposes_stateless_first_admin_status() -> None:
+    client = TestClient(create_app(_composition(identity_access=_Identity())))
+
+    response = client.get("/api/v1/auth/first-admin")
+
+    assert response.status_code == 200
+    assert response.json() == {"claim_available": False}
 
 
 def test_runtime_app_preserves_auth_cookie_and_correlation_header() -> None:

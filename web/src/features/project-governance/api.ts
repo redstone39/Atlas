@@ -14,8 +14,13 @@ import type {
 } from "./types";
 
 export const projectGovernanceApi = {
-  listProjects: () => requestJson<ProjectAdminListResult>("/api/v1/admin/projects"),
-  createProject: (name: string, idempotencyKey: string) =>
+  listProjects: (signal?: AbortSignal) =>
+    requestJson<ProjectAdminListResult>("/api/v1/admin/projects", { signal }),
+  createProject: (
+    name: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) =>
     requestJson<AdminActionResult>("/api/v1/admin/projects", {
       method: "POST",
       body: JSON.stringify({
@@ -23,6 +28,7 @@ export const projectGovernanceApi = {
         policy_profile_id: "policy-default-governed",
         idempotency_key: idempotencyKey,
       }),
+      signal,
     }),
   updateProject: (
     projectId: string,

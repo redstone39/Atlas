@@ -25,6 +25,7 @@ describe("requestJson", () => {
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("Idempotency-Key")).toBe("post-request-key");
     expect(headers.get("If-Match")).toBe("7");
+    expect(request).toEqual(expect.objectContaining({ credentials: "include" }));
   });
 
   it("preserves an explicit content type", async () => {

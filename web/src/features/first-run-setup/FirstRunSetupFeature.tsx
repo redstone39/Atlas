@@ -115,6 +115,7 @@ export function FirstRunSetupFeature({
   const createRouteOperation = useRef<ClientOperationKey | null>(null);
   const createProjectOperation = useRef<ClientOperationKey | null>(null);
   const uploadDocumentOperation = useRef<ClientOperationKey | null>(null);
+  const activeMutation = useRef<AbortController | null>(null);
   const displayNameRef = useRef<HTMLInputElement>(null);
   const emailRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
@@ -206,7 +207,27 @@ export function FirstRunSetupFeature({
     [router, searchParams],
   );
 
+  function beginMutation(): AbortController {
+    activeMutation.current?.abort();
+    const controller = new AbortController();
+    activeMutation.current = controller;
+    return controller;
+  }
+
+  function finishMutation(controller: AbortController) {
+    if (activeMutation.current !== controller) return false;
+    activeMutation.current = null;
+    return true;
+  }
+
+  function cancelMutation() {
+    activeMutation.current?.abort();
+    activeMutation.current = null;
+    setPending(false);
+  }
+
   function resetStepAttempt(cancelledStep: SetupStep) {
+    cancelMutation();
     if (cancelledStep === "provider") {
       createConnectionOperation.current = null;
       createRouteOperation.current = null;
@@ -229,6 +250,18 @@ export function FirstRunSetupFeature({
     resetStepAttempt(step);
     router.back();
   }
+
+  useEffect(
+    () => () => {
+      activeMutation.current?.abort();
+      activeMutation.current = null;
+      createConnectionOperation.current = null;
+      createRouteOperation.current = null;
+      createProjectOperation.current = null;
+      uploadDocumentOperation.current = null;
+    },
+    [pathname, step],
+  );
 
   useEffect(() => {
     if (
@@ -512,26 +545,34 @@ export function FirstRunSetupFeature({
       passwordConfirmationRef.current?.focus();
       return;
     }
+    const controller = beginMutation();
     setPending(true);
     setError("");
     try {
-      const nextSession = await firstRunSetupApi.claimFirstAdmin({
-        displayName: displayName.trim(),
-        email: email.trim(),
-        password,
-      });
+      const nextSession = await firstRunSetupApi.claimFirstAdmin(
+        {
+          displayName: displayName.trim(),
+          email: email.trim(),
+          password,
+        },
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
       beginSession(nextSession);
       router.replace("/setup?step=provider");
     } catch (caught) {
+      if (controller.signal.aborted) return;
       if (caught instanceof ApiError && caught.status === 409) {
         router.replace("/login?setup=claimed");
         return;
       }
       setError(t("firstRun.admin.claimFailed"));
     } finally {
-      setPending(false);
-      setPassword("");
-      setConfirmPassword("");
+      if (finishMutation(controller)) {
+        setPending(false);
+        setPassword("");
+        setConfirmPassword("");
+      }
     }
   }
 
@@ -539,12 +580,13 @@ export function FirstRunSetupFeature({
     event.preventDefault();
     const fields = { displayName: connectionName, providerType, endpointUrl, apiVersion, apiKey };
     if (!providerConnectionFieldsValid(fields, Boolean(existingConnection))) return;
+    const controller = beginMutation();
     setPending(true);
     setError("");
     try {
       let current = providerConnection ?? existingConnection;
       if (connectionId) {
-        const listed = await modelRoutingApi.listProviderConnections();
+        const listed = await modelRoutingApi.listProviderConnections(controller.signal);
         current =
           listed.connections.find(
             (item) => item.connection_id === connectionId,
@@ -568,6 +610,7 @@ export function FirstRunSetupFeature({
         current = await modelRoutingApi.createProviderConnection(
           input,
           operation.idempotencyKey,
+          controller.signal,
         );
         createConnectionOperation.current = null;
         navigate(
@@ -586,25 +629,32 @@ export function FirstRunSetupFeature({
           current.api_version !== nextApiVersion ||
           Boolean(apiKey.trim())
         ) {
-          current = await modelRoutingApi.updateProviderConnection({
-            connectionId: current.connection_id,
-            displayName: connectionName.trim(),
-            endpointUrl: endpointUrl.trim(),
-            apiVersion: apiVersion.trim(),
-            apiKey: apiKey.trim() || undefined,
-            expectedRevision: current.revision,
-          });
+          current = await modelRoutingApi.updateProviderConnection(
+            {
+              connectionId: current.connection_id,
+              displayName: connectionName.trim(),
+              endpointUrl: endpointUrl.trim(),
+              apiVersion: apiVersion.trim(),
+              apiKey: apiKey.trim() || undefined,
+              expectedRevision: current.revision,
+            },
+            controller.signal,
+          );
           setExistingConnection(current);
         }
       }
       const tested = await modelRoutingApi.testProviderConnection(
         current.connection_id,
         current.revision,
+        controller.signal,
       );
       if (tested.validation_status !== "passed") throw new Error("provider.test_failed");
       setProviderConnection(tested.connection);
       try {
-        const available = await modelRoutingApi.listAvailableModels(current.connection_id);
+        const available = await modelRoutingApi.listAvailableModels(
+          current.connection_id,
+          controller.signal,
+        );
         if (available.discovery_status === "available" && available.models.length > 0) {
           setModels(available.models);
           setModelName((value) => value || available.models[0]);
@@ -613,19 +663,22 @@ export function FirstRunSetupFeature({
           setDiscoveryUnavailable(true);
         }
       } catch {
+        if (controller.signal.aborted) return;
         setDiscoveryUnavailable(true);
       }
       setApiKey("");
     } catch {
+      if (controller.signal.aborted) return;
       setError(t("firstRun.provider.connectionFailed"));
     } finally {
-      setPending(false);
+      if (finishMutation(controller)) setPending(false);
     }
   }
 
   async function saveTextModel(event: FormEvent) {
     event.preventDefault();
     if (!providerConnection || !modelName.trim()) return;
+    const controller = beginMutation();
     setPending(true);
     setError("");
     try {
@@ -633,7 +686,7 @@ export function FirstRunSetupFeature({
       if (!runtimePolicy) throw new Error("provider.invalid_runtime_policy");
       let route: ModelRouteStatus | undefined;
       if (routeId) {
-        const existing = await modelRoutingApi.listModelRoutes();
+        const existing = await modelRoutingApi.listModelRoutes(controller.signal);
         route = existing.routes.find(
           (item) => item.route_id === routeId,
         );
@@ -656,6 +709,7 @@ export function FirstRunSetupFeature({
         route = await modelRoutingApi.configureModelRoute(
           input,
           operation.idempotencyKey,
+          controller.signal,
         );
         createRouteOperation.current = null;
         navigate("provider", { route_id: route.route_id }, "replace");
@@ -671,28 +725,42 @@ export function FirstRunSetupFeature({
           JSON.stringify(currentRuntimePolicy) !==
             JSON.stringify(runtimePolicy)
         ) {
-          route = await modelRoutingApi.updateModelRoute({
-            routeId: route.route_id,
-            displayName: modelName.trim(),
-            modelName: modelName.trim(),
-            connectionId: providerConnection.connection_id,
-            enabled: true,
-            supportsVision: false,
-            runtimePolicy,
-            expectedRevision: route.revision,
-          });
+          route = await modelRoutingApi.updateModelRoute(
+            {
+              routeId: route.route_id,
+              displayName: modelName.trim(),
+              modelName: modelName.trim(),
+              connectionId: providerConnection.connection_id,
+              enabled: true,
+              supportsVision: false,
+              runtimePolicy,
+              expectedRevision: route.revision,
+            },
+            controller.signal,
+          );
         }
       }
       const tested = route.status === "test_passed"
         ? route
-        : await modelRoutingApi.testModelRoute(route.route_id, route.revision);
+        : await modelRoutingApi.testModelRoute(
+            route.route_id,
+            route.revision,
+            controller.signal,
+          );
       if (tested.status !== "test_passed") throw new Error("provider.route_test_failed");
-      await modelRoutingApi.setDefaultModelRoute(tested.route_id, "text", tested.revision);
+      await modelRoutingApi.setDefaultModelRoute(
+        tested.route_id,
+        "text",
+        tested.revision,
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
       navigate("project", { route_id: tested.route_id });
     } catch {
+      if (controller.signal.aborted) return;
       setError(t("firstRun.provider.routeFailed"));
     } finally {
-      setPending(false);
+      if (finishMutation(controller)) setPending(false);
     }
   }
 
@@ -700,6 +768,7 @@ export function FirstRunSetupFeature({
     event.preventDefault();
     const name = projectName.trim();
     if (!name) return;
+    const controller = beginMutation();
     setPending(true);
     setError("");
     try {
@@ -712,6 +781,7 @@ export function FirstRunSetupFeature({
       const result = await projectGovernanceApi.createProject(
         name,
         operation.idempotencyKey,
+        controller.signal,
       );
       const projectId = projectIdFromTargetRef(result.target_ref);
       createProjectOperation.current = null;
@@ -733,37 +803,44 @@ export function FirstRunSetupFeature({
       setProjectNeedsRefresh(true);
       try {
         await refreshSession();
+        controller.signal.throwIfAborted();
         setProjectNeedsRefresh(false);
         navigate("document", { project_id: projectId });
       } catch {
+        if (controller.signal.aborted) return;
         setError(t("firstRun.project.refreshFailed"));
       }
     } catch {
+      if (controller.signal.aborted) return;
       setError(t("firstRun.project.createFailed"));
     } finally {
-      setPending(false);
+      if (finishMutation(controller)) setPending(false);
     }
   }
 
   async function useSelectedProject() {
     if (!selectedProjectId) return;
+    const controller = beginMutation();
     setPending(true);
     setError("");
     try {
       await refreshSession();
+      controller.signal.throwIfAborted();
       setProjectNeedsRefresh(false);
       navigate("document", { project_id: selectedProjectId });
     } catch {
+      if (controller.signal.aborted) return;
       setProjectNeedsRefresh(true);
       setError(t("firstRun.project.refreshFailed"));
     } finally {
-      setPending(false);
+      if (finishMutation(controller)) setPending(false);
     }
   }
 
   async function uploadDocument(event: FormEvent) {
     event.preventDefault();
     if (!file || !selectedProjectId || file.size === 0) return;
+    const controller = beginMutation();
     const operation = retainClientRequestId(
       uploadDocumentOperation.current,
       "document-upload",
@@ -778,24 +855,29 @@ export function FirstRunSetupFeature({
     setPending(true);
     setError("");
     try {
-      const result = await documentLibraryApi.uploadDocumentLibraryFile({
-        clientKey: operation.idempotencyKey,
-        scopeType: "project",
-        scopeId: selectedProjectId,
-        tagRefs: [{ tag_type: "project", tag_id: selectedProjectId }],
-        file,
-        description: "",
-        allowMemberDownload: false,
-      });
+      const result = await documentLibraryApi.uploadDocumentLibraryFile(
+        {
+          clientKey: operation.idempotencyKey,
+          scopeType: "project",
+          scopeId: selectedProjectId,
+          tagRefs: [{ tag_type: "project", tag_id: selectedProjectId }],
+          file,
+          description: "",
+          allowMemberDownload: false,
+        },
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
       const accepted = result.document ?? undefined;
       if (!accepted) throw new Error("document.not_accepted");
       uploadDocumentOperation.current = null;
       setAcceptedDocument(accepted);
       navigate("review");
     } catch {
+      if (controller.signal.aborted) return;
       setError(t("firstRun.document.uploadFailed"));
     } finally {
-      setPending(false);
+      if (finishMutation(controller)) setPending(false);
     }
   }
 

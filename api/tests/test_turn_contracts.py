@@ -437,7 +437,6 @@ def test_conversation_scope_tags_are_create_only_canonical_and_unique() -> None:
 
 def test_model_route_policy_v4_api_requires_and_round_trips_execution_limits() -> None:
     payload = {
-        "route_id": "route-v4",
         "display_name": "Route V4",
         "model_name": "gpt-test",
         "connection_id": "connection-1",

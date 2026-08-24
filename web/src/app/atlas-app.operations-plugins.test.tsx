@@ -38,9 +38,11 @@ it("does not request Ops readiness before entering Ops", async () => {
     mockApi(adminSession, readyReadiness);
     const normalFetch = global.fetch;
     let readinessRequests = 0;
+    let firstAdminRequests = 0;
     global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       if (url.pathname === "/api/v1/ops/readiness") readinessRequests += 1;
+      if (url.pathname === "/api/v1/auth/first-admin") firstAdminRequests += 1;
       return normalFetch(input, init);
     });
 
@@ -48,6 +50,7 @@ it("does not request Ops readiness before entering Ops", async () => {
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(readinessRequests).toBe(0);
+    expect(firstAdminRequests).toBe(0);
   });
 
 it("operator settings expose only System Status and direct ops remains protected", async () => {

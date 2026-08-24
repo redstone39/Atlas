@@ -483,13 +483,14 @@ def test_postgres_runtime_has_only_engine_session_factory_and_bootstrap(monkeypa
     with pytest.raises(ValueError, match="PostgreSQL"):
         PostgresRuntime.from_url("sqlite+pysqlite:///:memory:")
 
-    for repository_type in (
-        AuditRepository,
-        IdentityRepository,
-        TeamRepository,
-        ProjectAclRepository,
-    ):
-        assert [field.name for field in fields(repository_type)] == ["session_factory"]
+    expected_fields = {
+        AuditRepository: ["session_factory"],
+        IdentityRepository: ["session_factory", "id_allocator"],
+        TeamRepository: ["session_factory", "id_allocator"],
+        ProjectAclRepository: ["session_factory", "id_allocator"],
+    }
+    for repository_type, names in expected_fields.items():
+        assert [field.name for field in fields(repository_type)] == names
 
 
 def test_retrieval_currentness_uses_target_owner_keys_without_reverse_dependency() -> None:

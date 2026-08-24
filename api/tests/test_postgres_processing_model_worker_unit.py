@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import nullcontext
 
 from dataclasses import asdict, fields, replace
 import inspect
@@ -182,17 +183,27 @@ def test_processing_route_provider_has_no_detached_aggregate_or_generic_uow() ->
 
 
 def test_profile_create_dispatches_one_typed_finalize_input(monkeypatch) -> None:
-    adapter = PostgresProcessingAdapter(lambda: None)  # type: ignore[arg-type]
+    adapter = PostgresProcessingAdapter(
+        lambda: None,  # type: ignore[arg-type]
+        operation_lock_factory=lambda _owner_key: nullcontext(),
+    )
     monkeypatch.setattr(
         "atlas_production.infrastructure.postgres_processing_adapter.BeginProcessingProfileIntentCommand.execute",
-        lambda *_args: SimpleNamespace(replay=None, profile=None, revisions=()),
+        lambda *_args: SimpleNamespace(
+            replay=None,
+            allocated_profile_id="profile-1",
+        ),
     )
     finalized: list[FinalizeProcessingProfileInput] = []
     monkeypatch.setattr(FinalizeProcessingProfileCommand, "execute", lambda _self, request: finalized.append(request))
     actor = SimpleNamespace(actor_id="admin-1", system_role="admin")
     request = SimpleNamespace(
-        idempotency_key="profile-key", profile_id="profile-1", display_name="Profile",
-        model_dump=lambda: {"profile_id": "profile-1", "display_name": "Profile", "idempotency_key": "profile-key"},
+        idempotency_key="profile-key",
+        display_name="Profile",
+        model_dump=lambda: {
+            "display_name": "Profile",
+            "idempotency_key": "profile-key",
+        },
     )
 
     result, status = adapter.create_profile(actor, request)

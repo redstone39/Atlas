@@ -133,6 +133,7 @@ def _command() -> NewDocumentUploadInput:
         document_id="document-1",
     )
     return NewDocumentUploadInput(
+        request_fingerprint="f" * 64,
         media_type="application/pdf",
         document=document,
         version=version,
@@ -1017,6 +1018,12 @@ def test_upload_terminal_rejects_retired_owner_before_publication(
             return None
 
         def get(self, row_type, _key, **_kwargs):
+            if row_type.__name__ == "AtlasDocumentUploadIntentRow":
+                return SimpleNamespace(
+                    status="allocated",
+                    request_fingerprint=command.request_fingerprint,
+                    document_id=command.document.document_id,
+                )
             assert row_type.__name__ == f"Atlas{scope_type.title()}Row"
             return SimpleNamespace(status="retired")
 

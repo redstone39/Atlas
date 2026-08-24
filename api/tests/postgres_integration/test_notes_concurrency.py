@@ -80,13 +80,10 @@ def test_update_vs_trash_same_metadata_revision_has_one_winner(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     created = owner.create_note(
         actor_id="user-notes-race",
-        command=NoteCreateRequestV1(
-            note_id="note-update-trash-race",
-            scope_type="project",
-            scope_id="project-notes-race",
-            title="Before race",
-            idempotency_key="create-update-trash-race",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-race",
+        title="Before race",
+        idempotency_key="create-update-trash-race",),
     )
 
     def update() -> object:
@@ -153,13 +150,10 @@ def test_two_content_updates_on_same_head_have_one_winner(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-race",
-        command=NoteCreateRequestV1(
-            note_id="note-content-race",
-            scope_type="project",
-            scope_id="project-notes-race",
-            title="Content race",
-            idempotency_key="create-content-race",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-race",
+        title="Content race",
+        idempotency_key="create-content-race",),
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
@@ -194,13 +188,10 @@ def test_content_update_and_trash_are_linearized_without_post_trash_append(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-race",
-        command=NoteCreateRequestV1(
-            note_id="note-content-trash-race",
-            scope_type="project",
-            scope_id="project-notes-race",
-            title="Content trash race",
-            idempotency_key="create-content-trash-race",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-race",
+        title="Content trash race",
+        idempotency_key="create-content-trash-race",),
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
         update_future = executor.submit(
@@ -254,13 +245,10 @@ def test_body_restore_and_content_update_on_same_head_have_one_winner(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-race",
-        command=NoteCreateRequestV1(
-            note_id="note-restore-content-race",
-            scope_type="project",
-            scope_id="project-notes-race",
-            title="Restore race",
-            idempotency_key="create-restore-content-race",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-race",
+        title="Restore race",
+        idempotency_key="create-restore-content-race",),
     )
     source = owner.list_savepoints(
         actor_id="user-notes-race", note_id=note.note_id

@@ -44,6 +44,7 @@ describe("Notes REST consumer", () => {
       scopeId: "team-1",
       title: "Fallback identity note",
       categoryId: null,
+      idempotencyKey: "public-synthetic-note-create",
     });
 
     const [, request] = vi.mocked(fetch).mock.calls[0];
@@ -51,14 +52,13 @@ describe("Notes REST consumer", () => {
     const headers = new Headers(request?.headers);
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("Idempotency-Key"))
-      .toBe("post-request-0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a");
+      .toBe("public-synthetic-note-create");
     expect(JSON.parse(String(request?.body))).toEqual({
-      note_id: "note-0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
       scope_type: "team",
       scope_id: "team-1",
       title: "Fallback identity note",
       category_id: null,
-      idempotency_key: "post-request-0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      idempotency_key: "public-synthetic-note-create",
     });
   });
 
@@ -76,13 +76,13 @@ describe("Notes REST consumer", () => {
     expect(request).toEqual(expect.objectContaining({ method: "POST" }));
     const headers = new Headers(request?.headers);
     expect(headers.get("Content-Type")).toBe("application/json");
-    expect(headers.get("Idempotency-Key")).toBe("post-request-key");
+    expect(headers.get("Idempotency-Key")).toBe("notes-post-requestkey");
     expect(headers.get("If-Match")).toBe("7");
     expect(JSON.parse(String(request?.body))).toEqual({
       savepoint_id: "savepoint-1",
       expected_revision_head: 7,
       expected_collaboration_epoch: 4,
-      idempotency_key: "post-request-key",
+      idempotency_key: "notes-post-requestkey",
     });
   });
 

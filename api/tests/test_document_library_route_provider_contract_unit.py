@@ -99,7 +99,6 @@ def test_public_owner_ports_and_dtos_have_explicit_contract_shapes() -> None:
         "scope_type",
         "scope_id",
         "tag_refs",
-        "document_id",
         "allow_member_download",
         "description",
         "filename",

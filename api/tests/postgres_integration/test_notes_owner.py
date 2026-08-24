@@ -218,7 +218,6 @@ def test_notes_owner_lists_nonempty_project_and_team_scopes_as_closed_summaries(
     category = owner.create_category(
         actor_id="user-notes-owner",
         command=NoteCategoryCreateRequestV1(
-            category_id="category-notes-list",
             scope_type="project",
             scope_id="project-notes-owner",
             name="List category",
@@ -229,7 +228,6 @@ def test_notes_owner_lists_nonempty_project_and_team_scopes_as_closed_summaries(
         owner.create_note(
             actor_id="user-notes-owner",
             command=NoteCreateRequestV1(
-                note_id=f"note-project-list-{suffix}",
                 scope_type="project",
                 scope_id="project-notes-owner",
                 category_id=category.category_id if suffix == "categorized" else None,
@@ -242,7 +240,6 @@ def test_notes_owner_lists_nonempty_project_and_team_scopes_as_closed_summaries(
     team_note = owner.create_note(
         actor_id="user-notes-team-list",
         command=NoteCreateRequestV1(
-            note_id="note-team-list",
             scope_type="team",
             scope_id="team-notes-list",
             title="Team list note",
@@ -317,13 +314,10 @@ def test_team_notes_inheritance_flag_updates_scope_list_and_exact_reads(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     parent_note = owner.create_note(
         actor_id="user-notes-inherited-team",
-        command=NoteCreateRequestV1(
-            note_id="note-inherited-parent",
-            scope_type="team",
-            scope_id="team-notes-parent",
-            title="Inherited parent note",
-            idempotency_key="create-inherited-parent-note",
-        ),
+        command=NoteCreateRequestV1(scope_type="team",
+        scope_id="team-notes-parent",
+        title="Inherited parent note",
+        idempotency_key="create-inherited-parent-note",),
     )
 
     flag_on_scopes = {
@@ -375,13 +369,10 @@ def test_notes_owner_persists_replay_and_fences_trashed_updates(
 ) -> None:
     _seed_project_member(postgres_runtime)
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
-    create = NoteCreateRequestV1(
-        note_id="note-owner-behavior",
-        scope_type="project",
-        scope_id="project-notes-owner",
-        title="Owner behavior",
-        idempotency_key="create-owner-behavior",
-    )
+    create = NoteCreateRequestV1(scope_type="project",
+    scope_id="project-notes-owner",
+    title="Owner behavior",
+    idempotency_key="create-owner-behavior",)
 
     created = owner.create_note(actor_id="user-notes-owner", command=create)
     replay = owner.create_note(actor_id="user-notes-owner", command=create)
@@ -446,13 +437,10 @@ def test_notes_owner_denies_removed_project_member_before_protected_read(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     created = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-owner-revoked",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Protected title",
-            idempotency_key="create-owner-revoked",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Protected title",
+        idempotency_key="create-owner-revoked",),
     )
     with postgres_runtime.session_factory() as session:
         session.get(AtlasPermissionGrantRow, "grant-notes-owner").status = "revoked"
@@ -480,24 +468,20 @@ def test_notes_owner_rolls_back_when_required_audit_fails(
     with pytest.raises(NotesError) as rejected:
         owner.create_note(
             actor_id="user-notes-owner",
-            command=NoteCreateRequestV1(
-                note_id="note-owner-audit-rollback",
-                scope_type="project",
-                scope_id="project-notes-owner",
-                title="Must roll back",
-                idempotency_key="create-owner-audit-rollback",
-            ),
+            command=NoteCreateRequestV1(scope_type="project",
+            scope_id="project-notes-owner",
+            title="Must roll back",
+            idempotency_key="create-owner-audit-rollback",),
         )
     assert rejected.value.code == "audit_failure"
 
     with postgres_runtime.session_factory() as session:
-        assert session.get(AtlasNoteRow, "note-owner-audit-rollback") is None
-        assert session.query(AtlasNoteRevisionRow).filter_by(
-            note_id="note-owner-audit-rollback"
-        ).count() == 0
-        assert session.query(AtlasNoteSavepointRow).filter_by(
-            note_id="note-owner-audit-rollback"
-        ).count() == 0
+        assert (
+            session.query(AtlasNoteRow)
+            .filter_by(title="Must roll back")
+            .one_or_none()
+            is None
+        )
 
 
 def test_notes_owner_binds_idempotency_to_target_and_fences_trashed_metadata(
@@ -508,13 +492,10 @@ def test_notes_owner_binds_idempotency_to_target_and_fences_trashed_metadata(
     notes = [
         owner.create_note(
             actor_id="user-notes-owner",
-            command=NoteCreateRequestV1(
-                note_id=f"note-target-{suffix}",
-                scope_type="project",
-                scope_id="project-notes-owner",
-                title="Original",
-                idempotency_key=f"create-target-{suffix}",
-            ),
+            command=NoteCreateRequestV1(scope_type="project",
+            scope_id="project-notes-owner",
+            title="Original",
+            idempotency_key=f"create-target-{suffix}",),
         )
         for suffix in ("a", "b")
     ]
@@ -557,13 +538,10 @@ def test_notes_owner_commits_body_restore_revision_and_savepoint_atomically(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-atomic-restore",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Metadata remains",
-            idempotency_key="create-atomic-restore",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Metadata remains",
+        idempotency_key="create-atomic-restore",),
     )
     source = owner.list_savepoints(
         actor_id="user-notes-owner", note_id=note.note_id
@@ -655,13 +633,10 @@ def test_notes_owner_rolls_back_atomic_restore_when_second_audit_fails(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-restore-audit-rollback",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Restore audit rollback",
-            idempotency_key="create-restore-audit-rollback",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Restore audit rollback",
+        idempotency_key="create-restore-audit-rollback",),
     )
     source = owner.list_savepoints(
         actor_id="user-notes-owner", note_id=note.note_id
@@ -717,13 +692,10 @@ def test_notes_owner_derives_savepoint_contributors_from_revision_journal(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-contributor-attribution",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Contributor attribution",
-            idempotency_key="create-contributor-attribution",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Contributor attribution",
+        idempotency_key="create-contributor-attribution",),
     )
     for head, actor in ((1, "user-notes-owner"), (2, "user-notes-contributor")):
         owner.accept_revision(
@@ -770,13 +742,10 @@ def test_notes_owner_rejects_oversize_savepoint_contributors_without_mutation(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     note = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-oversize-savepoint-contributors",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Oversize contributor attribution",
-            idempotency_key="create-oversize-contributor-attribution",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Oversize contributor attribution",
+        idempotency_key="create-oversize-contributor-attribution",),
     )
     for head, actor in ((1, "user-notes-owner"), (2, "user-notes-contributor")):
         owner.accept_revision(
@@ -875,23 +844,17 @@ def test_notes_owner_binds_finalized_attachment_and_rejects_cross_note_body(
     owner = PostgresNotesOwner(postgres_runtime.session_factory)
     first = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-attachment-owner",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Attachment owner",
-            idempotency_key="create-attachment-owner",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Attachment owner",
+        idempotency_key="create-attachment-owner",),
     )
     second = owner.create_note(
         actor_id="user-notes-owner",
-        command=NoteCreateRequestV1(
-            note_id="note-attachment-other",
-            scope_type="project",
-            scope_id="project-notes-owner",
-            title="Attachment other",
-            idempotency_key="create-attachment-other",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-owner",
+        title="Attachment other",
+        idempotency_key="create-attachment-other",),
     )
     fingerprint = hashlib.sha256(b"request").hexdigest()
     assert owner.prepare_attachment_upload(

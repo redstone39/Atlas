@@ -22,31 +22,36 @@ initializer.
 
 ## User journey
 
-1. A local or imported directory user authenticates; Atlas remains authoritative
+1. On an empty deployment, the stateless setup page checks the Identity owner
+   and claims exactly one first System Admin. The claim is serialized in
+   PostgreSQL and remains unavailable after restart because any existing user
+   closes the gate.
+2. A local or imported directory user authenticates; Atlas remains authoritative
    for account activity, roles, grants, ACLs, and sessions.
-2. An authorized Project or Team uploader assigns a scope and uploads one or
-   more documents.
-3. Document intake and processing create a current, traceable generation; the
+3. An authorized Project or Team uploader assigns a scope and uploads one or
+   more documents. Create requests carry operation keys; PostgreSQL owners
+   allocate opaque resource identifiers and return stable replay results.
+4. Document intake and processing create a current, traceable generation; the
    Web consumer refreshes active jobs until terminal state.
-4. A scope-authorized member enters the canonical Project/Team Knowledge or
+5. A scope-authorized member enters the canonical Project/Team Knowledge or
    Notes route. Direct routes check current server scope before content fetch.
-5. Notes clients obtain a short-lived API ticket and connect to the collaboration
+6. Notes clients obtain a short-lived API ticket and connect to the collaboration
    carrier. The carrier revalidates access and persists every accepted revision,
    savepoint, restore, and attachment decision through the API/PostgreSQL owner.
-6. A user creates a Workspace conversation with default-all knowledge or an
+7. A user creates a Workspace conversation with default-all knowledge or an
    immutable Team/Project scope selection, then submits a `standard` or `deep`
    turn.
-7. The runtime intersects the frozen selection with current authorization,
+8. The runtime intersects the frozen selection with current authorization,
    builds immutable context references, and invokes retrieval and answer tools
    under bounded budgets. Deep turns additionally run bounded planning,
    evaluation, and revision.
-8. A terminal transaction publishes the answer, runtime events, safe reasoning
+9. A terminal transaction publishes the answer, runtime events, safe reasoning
    progress, evidence review status, and protected evidence references.
-9. The conversation owner may set or change `helpful|not_helpful` feedback for
-   an eligible completed, nonblank assistant answer. The Workspace shows the
-   server-confirmed current value; System Admin sees that value and its
-   last-modified time through the read-only audit transcript.
-10. Every later protected read recomputes current authorization and checks exact
+10. The conversation owner may set or change `helpful|not_helpful` feedback for
+    an eligible completed, nonblank assistant answer. The Workspace shows the
+    server-confirmed current value; System Admin sees that value and its
+    last-modified time through the read-only audit transcript.
+11. Every later protected read recomputes current authorization and checks exact
     artifact lineage.
 
 ## Authority

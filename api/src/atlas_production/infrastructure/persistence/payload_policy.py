@@ -111,6 +111,11 @@ JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
     "atlas_model_invocations.runtime_policy_snapshot": ("routing_policy", RUNTIME_POLICY_MAX_BYTES, "model_runtime_policy"),
     "atlas_model_routes.runtime_policy": ("routing_policy", RUNTIME_POLICY_MAX_BYTES, "model_runtime_policy"),
     "atlas_model_routing_idempotency.response_payload": ("idempotency_response", RUNTIME_POLICY_MAX_BYTES, "model_routing_replay"),
+    "atlas_note_create_receipts.canonical_response": (
+        "idempotency_response",
+        GENERAL_METADATA_MAX_BYTES,
+        "note_create_replay_v1",
+    ),
     "atlas_note_revisions.change_set": ("notes_change_set", 1_048_576, "note_change_set_v1"),
     "atlas_note_savepoints.aggregate_change_set": ("notes_change_set", 1_048_576, "note_change_set_v1"),
     "atlas_note_savepoints.canonical_body": ("notes_canonical_body", 1_048_576, "tiptap-prosemirror-v2"),

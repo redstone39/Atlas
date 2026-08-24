@@ -40,7 +40,6 @@ def _constraint_names(table_name: str, constraint_type: type[object]) -> set[str
 
 def test_notes_mutation_contracts_are_closed_and_require_conflict_keys() -> None:
     command = NoteCreateRequestV1(
-        note_id="note-1",
         scope_type="project",
         scope_id="project-1",
         title="Shared note",

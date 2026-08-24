@@ -20,6 +20,7 @@ def test_empty_optional_keyring_uses_current_master_key(monkeypatch) -> None:
         plaintext="secret",
     )
 
+    assert encrypted.key_id == "current"
     assert cipher.decrypt(
         encrypted,
         domain="provider-credential",

@@ -49,7 +49,7 @@ class _Owner:
             width=int(self.bound["width"]),
             height=int(self.bound["height"]),
         )
-        return attachment, "artifact-1"
+        return attachment, "artifact-1", "lease-read-1"
 
 
 class _Writer:
@@ -57,6 +57,7 @@ class _Writer:
         self.content: bytes | None = None
         self.write_args: dict[str, object] | None = None
         self.read_args: dict[str, object] | None = None
+        self.completed_read_leases: list[str] = []
 
     def write(self, **kwargs: object):
         self.write_args = kwargs
@@ -68,6 +69,9 @@ class _Writer:
         self.read_args = kwargs
         assert self.content is not None
         return self.content
+
+    def complete_read_lease(self, read_lease_id: str) -> None:
+        self.completed_read_leases.append(read_lease_id)
 
 
 
@@ -100,7 +104,9 @@ def test_upload_finalizes_artifact_before_binding_and_open_rechecks_integrity() 
     )
 
     assert opened.content == content
+    assert writer.completed_read_leases == ["lease-read-1"]
     assert writer.read_args == {
+        "read_lease_id": "lease-read-1",
         "expected_artifact_class": "note_image",
         "expected_parent_resource_id": "note-1",
         "expected_content_type": "image/png",
@@ -131,3 +137,4 @@ def test_open_maps_storage_unavailable_separately_from_integrity_failure() -> No
     with pytest.raises(NotesError) as caught:
         provider.open(actor_id="user-1", note_id="note-1", attachment_ref="natt-any")
     assert caught.value.code == "storage_unavailable"
+    assert writer.completed_read_leases == ["lease-read-1"]

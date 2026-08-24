@@ -271,7 +271,7 @@ export function createDocumentsHandler(
           status: "applied",
           target_ref: "document:doc-uploaded-test",
           message_code: "document.upload_is_accepted_for_asynchronous_processing", message_params: {},
-          audit_event_ref: "audit-doclib-upload-test",
+          audit_event_ref: "audit-document-owner-upload-test",
           document: null,
         },
         201,

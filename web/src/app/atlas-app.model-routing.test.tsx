@@ -224,6 +224,8 @@ it("/admin/models manages provider connections, encrypted-key entry, and models"
         }),
       }),
     );
+    expect(JSON.parse(String(manualModelCreate![1]!.body)))
+      .not.toHaveProperty("route_id");
 
     let secondaryRow = screen.getByText("Secondary provider").closest("tr")!;
     expect(
@@ -463,6 +465,10 @@ it("/admin/models creates Anthropic and versioned Azure connections", async () =
       }),
     ]);
     expect(createBodies[1]).not.toHaveProperty("api_version");
+    for (const body of createBodies) {
+      expect(body).not.toHaveProperty("connection_id");
+      expect(body.idempotency_key).toEqual(expect.any(String));
+    }
     expect(await screen.findByText("Anthropic production")).toBeInTheDocument();
     const azureCard = (await screen.findByText("Azure versioned")).closest<HTMLElement>(
       '[data-slot="card"]',

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections import deque
 from dataclasses import replace
-from threading import Event
+from threading import Event, get_ident
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, func, select
@@ -15,6 +17,7 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasDirectoryConnectionRow,
     AtlasDirectoryConnectionSecretRow,
     AtlasExternalIdentityRow,
+    AtlasIdentityCreateReceiptRow,
     AtlasPermissionGrantRow,
     AtlasSessionRow,
     AtlasTeamMembershipRow,
@@ -31,6 +34,7 @@ from atlas_production.infrastructure.postgres_project_adapter import (
 )
 from atlas_production.infrastructure.postgres_team_adapter import build_postgres_team_access
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
+from atlas_production.infrastructure.postgres_owner import identity as identity_owner
 from atlas_production.infrastructure.postgres_owner.identity import IdentityRepository
 from atlas_production.modules.identity_access.api_models import (
     DirectoryConnectionCreateRequest,
@@ -162,8 +166,8 @@ class FakeDirectoryGateway:
 
 def connection_payload(connection_id: str, priority: int):
     return DirectoryConnectionCreateRequest(
-        connection_id=connection_id,
         display_name=connection_id.title(),
+        idempotency_key=f"directory-create-{connection_id}",
         priority=priority,
         provider_type="ldap",
         host="ldap.example.test",
@@ -191,6 +195,7 @@ def connection_payload(connection_id: str, priority: int):
 def reset_identity_rows(runtime: PostgresRuntime) -> UserRecord:
     with runtime.session_factory() as session:
         for row_type in (
+            AtlasIdentityCreateReceiptRow,
             AtlasAuditEventRow,
             AtlasUserInviteRow,
             AtlasSessionRow,
@@ -229,8 +234,19 @@ def reset_identity_rows(runtime: PostgresRuntime) -> UserRecord:
     )
 
 
-def build_service(runtime: PostgresRuntime):
-    repository = PostgresIdentityAccessRepository(runtime.session_factory)
+def build_service(
+    runtime: PostgresRuntime,
+    directory_ids: tuple[str, ...] = ("directory-main",),
+):
+    allocated_directory_ids = deque(directory_ids)
+    repository = PostgresIdentityAccessRepository(
+        runtime.session_factory,
+        id_allocator=lambda: (
+            allocated_directory_ids.popleft().removeprefix("directory-")
+            if allocated_directory_ids
+            else uuid4().hex
+        ),
+    )
     gateway = FakeDirectoryGateway()
     cipher = AesGcmEnvelopeCipher(key=b"k" * 32, key_id="test-key")
     return (
@@ -250,7 +266,10 @@ def test_fresh_baseline_accepts_ldap_and_active_directory_plain(
     postgres_runtime: PostgresRuntime,
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
-    service, _repository, _gateway, _cipher = build_service(postgres_runtime)
+    service, _repository, _gateway, _cipher = build_service(
+        postgres_runtime,
+        ("plain",),
+    )
     status = service.create_connection(
         admin,
         connection_payload("plain", 10).model_copy(
@@ -304,7 +323,7 @@ def test_directory_owner_persists_encrypted_secrets_and_atomic_import(
     admin = reset_identity_rows(postgres_runtime)
     service, repository, _gateway, cipher = build_service(postgres_runtime)
 
-    status = service.create_connection(admin, connection_payload("main", 10))
+    status = service.create_connection(admin, connection_payload("directory-main", 10))
     assert status.bind_password_configured is True
     assert status.custom_ca_configured is True
 
@@ -318,26 +337,26 @@ def test_directory_owner_persists_encrypted_secrets_and_atomic_import(
         assert all("bind-secret" not in row.ciphertext for row in secrets)
         assert all("test-ca" not in row.ciphertext for row in secrets)
 
-    bind_secret = repository.get_directory_secret("main", "bind_password")
-    ca_secret = repository.get_directory_secret("main", "custom_ca")
+    bind_secret = repository.get_directory_secret("directory-main", "bind_password")
+    ca_secret = repository.get_directory_secret("directory-main", "custom_ca")
     assert bind_secret is not None
     assert ca_secret is not None
     assert cipher.decrypt(
         bind_secret,
         domain="identity_directory_bind_password",
-        owner_id="main",
+        owner_id="directory-main",
         owner_kind="directory_connection",
     ) == "bind-secret"
     assert cipher.decrypt(
         ca_secret,
         domain="identity_directory_custom_ca",
-        owner_id="main",
+        owner_id="directory-main",
         owner_kind="directory_connection",
     ) == "-----BEGIN CERTIFICATE-----\ntest-ca"
 
     imported = service.import_users(
         admin,
-        "main",
+        "directory-main",
         DirectoryUserImportRequest(
             external_subjects=["subject-ada", "subject-grace"]
         ),
@@ -355,7 +374,7 @@ def test_directory_owner_persists_encrypted_secrets_and_atomic_import(
     with pytest.raises(IdentityAccessError) as conflict:
         service.import_users(
             admin,
-            "main",
+            "directory-main",
             DirectoryUserImportRequest(
                 external_subjects=["subject-ada", "subject-grace"]
             ),
@@ -378,7 +397,7 @@ def test_directory_owner_persists_encrypted_secrets_and_atomic_import(
     with pytest.raises(IdentityAccessError) as alias_conflict:
         service.import_users(
             admin,
-            "main",
+            "directory-main",
             DirectoryUserImportRequest(external_subjects=["subject-grace"]),
         )
     assert alias_conflict.value.status_code == 409
@@ -394,12 +413,15 @@ def test_distinct_directory_sources_may_share_email(
     postgres_runtime: PostgresRuntime,
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
-    service, _repository, gateway, _cipher = build_service(postgres_runtime)
-    service.create_connection(admin, connection_payload("secondary", 20))
-    service.create_connection(admin, connection_payload("primary", 5))
+    service, _repository, gateway, _cipher = build_service(
+        postgres_runtime,
+        ("directory-secondary", "directory-primary"),
+    )
+    service.create_connection(admin, connection_payload("directory-secondary", 20))
+    service.create_connection(admin, connection_payload("directory-primary", 5))
     first = service.import_users(
         admin,
-        "secondary",
+        "directory-secondary",
         DirectoryUserImportRequest(external_subjects=["subject-ada"]),
     )
     gateway.principals["subject-grace"] = replace(
@@ -409,7 +431,7 @@ def test_distinct_directory_sources_may_share_email(
     )
     second = service.import_users(
         admin,
-        "primary",
+        "directory-primary",
         DirectoryUserImportRequest(external_subjects=["subject-grace"]),
     )
     assert first.imported_actor_ids != second.imported_actor_ids
@@ -424,12 +446,15 @@ def test_directory_login_and_refresh_commit_current_state_without_authority_drif
     postgres_runtime: PostgresRuntime,
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
-    service, repository, gateway, _cipher = build_service(postgres_runtime)
-    service.create_connection(admin, connection_payload("secondary", 20))
-    service.create_connection(admin, connection_payload("primary", 5))
+    service, repository, gateway, _cipher = build_service(
+        postgres_runtime,
+        ("directory-secondary", "directory-primary"),
+    )
+    service.create_connection(admin, connection_payload("directory-secondary", 20))
+    service.create_connection(admin, connection_payload("directory-primary", 5))
     imported = service.import_users(
         admin,
-        "primary",
+        "directory-primary",
         DirectoryUserImportRequest(external_subjects=["subject-ada"]),
     )
     actor_id = imported.imported_actor_ids[0]
@@ -441,7 +466,7 @@ def test_directory_login_and_refresh_commit_current_state_without_authority_drif
     assert outcome.session.authenticated is True
     assert outcome.session.actor is not None
     assert outcome.session.actor.actor_id == actor_id
-    assert gateway.authentication_calls == [("primary", "directory-password")]
+    assert gateway.authentication_calls == [("directory-primary", "directory-password")]
 
     with postgres_runtime.session_factory() as session:
         identity = session.get(AtlasExternalIdentityRow, actor_id)
@@ -470,7 +495,7 @@ def test_directory_login_and_refresh_commit_current_state_without_authority_drif
     assert current.system_role == original.system_role == "user"
     assert current.active is original.active is True
 
-    gateway.outages.add("primary")
+    gateway.outages.add("directory-primary")
     with pytest.raises(IdentityAccessError) as unavailable:
         service.refresh_profile(admin, actor_id)
     assert unavailable.value.status_code == 503
@@ -489,10 +514,10 @@ def test_directory_login_cannot_overwrite_concurrent_atlas_deactivation(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     service, repository, gateway, _cipher = build_service(postgres_runtime)
-    service.create_connection(admin, connection_payload("main", 1))
+    service.create_connection(admin, connection_payload("directory-main", 1))
     imported = service.import_users(
         admin,
-        "main",
+        "directory-main",
         DirectoryUserImportRequest(external_subjects=["subject-ada"]),
     )
     actor_id = imported.imported_actor_ids[0]
@@ -536,7 +561,7 @@ def test_scoped_team_import_commits_atomically_and_retry_converges(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, _gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     with postgres_runtime.session_factory() as session:
         session.add(
             AtlasTeamRow(
@@ -560,8 +585,8 @@ def test_scoped_team_import_commits_atomically_and_retry_converges(
         idempotency_key="team-directory-response-loss",
     )
 
-    first = team.import_directory_members(admin, "team-directory", "main", payload)
-    replay = team.import_directory_members(admin, "team-directory", "main", payload)
+    first = team.import_directory_members(admin, "team-directory", "directory-main", payload)
+    replay = team.import_directory_members(admin, "team-directory", "directory-main", payload)
     assert replay.actor_ids == first.actor_ids
     with postgres_runtime.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AtlasUserRow)) == 3
@@ -600,7 +625,7 @@ def test_scoped_team_import_commits_atomically_and_retry_converges(
         team.import_directory_members(
             admin,
             "team-directory",
-            "main",
+            "directory-main",
             TeamDirectoryMemberImportRequest(
                 external_subjects=["subject-katherine", "subject-linus"],
                 role="member",
@@ -629,7 +654,7 @@ def test_scoped_import_serializes_with_global_alias_producer(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     gateway.principals["subject-grace"] = replace(
         gateway.principals["subject-ada"],
         external_subject="subject-grace",
@@ -670,7 +695,7 @@ def test_scoped_import_serializes_with_global_alias_producer(
         global_import = pool.submit(
             directory.import_users,
             admin,
-            "main",
+            "directory-main",
             DirectoryUserImportRequest(external_subjects=["subject-grace"]),
         )
         assert writer_held.wait(5)
@@ -678,7 +703,7 @@ def test_scoped_import_serializes_with_global_alias_producer(
             team.import_directory_members,
             admin,
             "team-directory",
-            "main",
+            "directory-main",
             TeamDirectoryMemberImportRequest(
                 external_subjects=["subject-ada"],
                 role="member",
@@ -708,7 +733,7 @@ def test_global_import_rechecks_stable_subject_after_owner_lock(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     winner, _repository, _gateway, _cipher = build_service(postgres_runtime)
-    winner.create_connection(admin, connection_payload("main", 1))
+    winner.create_connection(admin, connection_payload("directory-main", 1))
     loser, _repository, loser_gateway, _cipher = build_service(postgres_runtime)
     loser_gateway.principals["subject-ada"] = replace(
         loser_gateway.principals["subject-ada"],
@@ -734,14 +759,14 @@ def test_global_import_rechecks_stable_subject_after_owner_lock(
         winning_import = pool.submit(
             winner.import_users,
             admin,
-            "main",
+            "directory-main",
             DirectoryUserImportRequest(external_subjects=["subject-ada"]),
         )
         assert writer_held.wait(5)
         losing_import = pool.submit(
             loser.import_users,
             admin,
-            "main",
+            "directory-main",
             DirectoryUserImportRequest(external_subjects=["subject-ada"]),
         )
         with pytest.raises(FutureTimeoutError):
@@ -767,7 +792,7 @@ def test_canonical_unicode_email_conflicts_sequentially(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     if alias_field == "username":
         gateway.principals["subject-ada"] = replace(
             gateway.principals["subject-ada"],
@@ -793,9 +818,9 @@ def test_canonical_unicode_email_conflicts_sequentially(
     if winner == "local":
         identity.create_invite(admin, invite_payload)
         with pytest.raises(IdentityAccessError) as rejected:
-            directory.import_users(admin, "main", import_payload)
+            directory.import_users(admin, "directory-main", import_payload)
     else:
-        directory.import_users(admin, "main", import_payload)
+        directory.import_users(admin, "directory-main", import_payload)
         with pytest.raises(IdentityAccessError) as rejected:
             identity.create_invite(admin, invite_payload)
     assert rejected.value.status_code == 409
@@ -822,7 +847,7 @@ def test_scoped_import_serializes_with_local_email_producer(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     if alias_field == "username":
         gateway.principals["subject-ada"] = replace(
             gateway.principals["subject-ada"],
@@ -884,7 +909,7 @@ def test_scoped_import_serializes_with_local_email_producer(
             team.import_directory_members,
             admin,
             "team-directory",
-            "main",
+            "directory-main",
             TeamDirectoryMemberImportRequest(
                 external_subjects=["subject-ada"],
                 role="member",
@@ -924,7 +949,7 @@ def test_local_email_producer_revalidates_after_scoped_import_wins(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     if alias_field == "username":
         gateway.principals["subject-ada"] = replace(
             gateway.principals["subject-ada"],
@@ -955,22 +980,50 @@ def test_local_email_producer_revalidates_after_scoped_import_wins(
             return None
 
     identity = IdentityAccessService(repository, ScopeGrants(), directory)
-    invite_staged = Event()
-    release_invite = Event()
-    identity_session = IdentityRepository.identity_session
+    import_domain_held = Event()
+    release_import = Event()
+    import_thread_id: list[int] = []
+    acquire_owner_locks = identity_owner.acquire_owner_locks
 
-    def hold_invite_before_owner_lock(self, change_set):
-        if change_set.invite_transitions:
-            invite_staged.set()
-            assert release_invite.wait(5)
-        return identity_session(self, change_set)
+    def hold_import_between_domain_and_identity(
+        session,
+        *,
+        domain_keys=(),
+        identity_keys=(),
+    ):
+        if import_thread_id and get_ident() == import_thread_id[0] and domain_keys:
+            acquire_owner_locks(session, domain_keys=domain_keys)
+            import_domain_held.set()
+            assert release_import.wait(5)
+            return acquire_owner_locks(session, identity_keys=identity_keys)
+        return acquire_owner_locks(
+            session,
+            domain_keys=domain_keys,
+            identity_keys=identity_keys,
+        )
 
     monkeypatch.setattr(
-        IdentityRepository,
-        "identity_session",
-        hold_invite_before_owner_lock,
+        identity_owner,
+        "acquire_owner_locks",
+        hold_import_between_domain_and_identity,
     )
+
+    def import_members():
+        import_thread_id.append(get_ident())
+        return team.import_directory_members(
+            admin,
+            "team-directory",
+            "directory-main",
+            TeamDirectoryMemberImportRequest(
+                external_subjects=["subject-ada"],
+                role="member",
+                idempotency_key="directory-wins-local-email-race",
+            ),
+        )
+
     with ThreadPoolExecutor(max_workers=2) as pool:
+        scoped_import = pool.submit(import_members)
+        assert import_domain_held.wait(5), scoped_import.exception(timeout=1)
         invite = pool.submit(
             identity.create_invite,
             admin,
@@ -981,18 +1034,10 @@ def test_local_email_producer_revalidates_after_scoped_import_wins(
                 idempotency_key="directory-local-email-race",
             ),
         )
-        assert invite_staged.wait(5)
-        team.import_directory_members(
-            admin,
-            "team-directory",
-            "main",
-            TeamDirectoryMemberImportRequest(
-                external_subjects=["subject-ada"],
-                role="member",
-                idempotency_key="directory-wins-local-email-race",
-            ),
-        )
-        release_invite.set()
+        with pytest.raises(FutureTimeoutError):
+            invite.result(timeout=0.2)
+        release_import.set()
+        scoped_import.result(timeout=5)
         with pytest.raises(IdentityAccessError) as rejected:
             invite.result(timeout=5)
     assert rejected.value.status_code == 409
@@ -1013,7 +1058,7 @@ def test_scoped_project_import_commits_atomically_and_retry_converges(
 ) -> None:
     admin = reset_identity_rows(postgres_runtime)
     directory, repository, _gateway, _cipher = build_service(postgres_runtime)
-    directory.create_connection(admin, connection_payload("main", 1))
+    directory.create_connection(admin, connection_payload("directory-main", 1))
     with postgres_runtime.session_factory() as session:
         session.add(
             AtlasProjectRow(
@@ -1038,13 +1083,13 @@ def test_scoped_project_import_commits_atomically_and_retry_converges(
     first = project.import_directory_members(
         admin,
         "project-directory",
-        "main",
+        "directory-main",
         payload,
     )
     replay = project.import_directory_members(
         admin,
         "project-directory",
-        "main",
+        "directory-main",
         payload,
     )
     assert replay.actor_ids == first.actor_ids
@@ -1083,7 +1128,7 @@ def test_scoped_project_import_commits_atomically_and_retry_converges(
         project.import_directory_members(
             admin,
             "project-directory",
-            "main",
+            "directory-main",
             ProjectDirectoryMemberImportRequest(
                 external_subjects=["subject-katherine", "subject-linus"],
                 role="viewer",

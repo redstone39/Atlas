@@ -58,6 +58,9 @@ class ConnectionRepository:
         self.failed_route_ids: set[str] = set()
         self.mutation_scopes: list[list[str]] = []
 
+    def next_connection_id(self) -> str:
+        return "connection-azure_openai"
+
     def mutation_scope(self, connection_ids: list[str]):
         self.mutation_scopes.append(connection_ids)
         return nullcontext()
@@ -191,13 +194,12 @@ def _create_payload(
     api_version: str | None,
 ) -> ProviderConnectionCreateRequest:
     return ProviderConnectionCreateRequest(
-        connection_id=f"connection-{provider_type}",
+        idempotency_key=f"create-{provider_type}",
         display_name=provider_type,
         provider_type=provider_type,
         endpoint_url=endpoint_url,
         api_version=api_version,
         api_key="secret",
-        idempotency_key=f"create-{provider_type}",
     )
 
 

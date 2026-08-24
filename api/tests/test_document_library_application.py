@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
@@ -185,13 +185,18 @@ class _Uploads:
         if self.replay_conflict:
             raise _UploadReplayConflict()
         list(kwargs["chunks"])
-        document = kwargs["document"]
+        document = replace(
+            kwargs["document"],
+            document_id=f"doc-public-synthetic-{len(self.calls)}",
+        )
         self.intake.items = (*self.intake.items, _item(document))
         if self.order is not None:
             self.order.append("accepted")
         return SimpleNamespace(
             artifact=SimpleNamespace(artifact_id="artifact-upload"),
+            replayed=False,
             publication=SimpleNamespace(
+                version=SimpleNamespace(document_id=document.document_id),
                 job=SimpleNamespace(job_id="job-upload"),
                 audit=SimpleNamespace(event_id="audit-upload"),
             ),
@@ -359,7 +364,7 @@ def test_document_library_http_upload_preserves_acceptance_and_dispatch() -> Non
     ("data", "files", "status_code", "message_code"),
     [
         (
-            {"scope_type": "invalid", "scope_id": "project-1"},
+            {"scope_type": "invalid", "scope_id": "project-1", "idempotency_key": "invalid-scope"},
             None,
             422,
             "project.choose_a_team_or_project_before_uploading",
@@ -369,19 +374,20 @@ def test_document_library_http_upload_preserves_acceptance_and_dispatch() -> Non
                 "scope_type": "project",
                 "scope_id": "project-1",
                 "tag_refs": "not-json",
+                "idempotency_key": "invalid-tags",
             },
             None,
             422,
             "document.tags_were_not_valid",
         ),
         (
-            {"scope_type": "project", "scope_id": "project-1"},
+            {"scope_type": "project", "scope_id": "project-1", "idempotency_key": "missing-file"},
             None,
             422,
             "document.file_upload_requires_a_file",
         ),
         (
-            {"scope_type": "project", "scope_id": "project-1"},
+            {"scope_type": "project", "scope_id": "project-1", "idempotency_key": "broken-file"},
             {"file": ("broken.pdf", b"%PDF-broken", "application/pdf")},
             422,
             "document.file_is_corrupt_or_incomplete",
@@ -405,7 +411,7 @@ def test_document_library_http_upload_acl_denial_preserves_audit_ref() -> None:
     intake.can_upload = False
     denied = _http_client(application).post(
         "/api/v1/admin/document-library",
-        data={"scope_type": "project", "scope_id": "project-1"},
+        data={"scope_type": "project", "scope_id": "project-1", "idempotency_key": "denied-upload"},
         files={"file": ("manual.pdf", _pdf_bytes(), "application/pdf")},
     )
     assert denied.status_code == 403
@@ -727,7 +733,11 @@ def test_document_library_dispatch_occurs_only_after_durable_acceptance() -> Non
     upload, _intake, _processing, _dispatches = _application(order=upload_order)
     response = _http_client(upload).post(
         "/api/v1/admin/document-library",
-        data={"scope_type": "project", "scope_id": "project-1"},
+        data={
+            "scope_type": "project",
+            "scope_id": "project-1",
+            "idempotency_key": "ordered-upload",
+        },
         files={"file": ("manual.pdf", _pdf_bytes(), "application/pdf")},
     )
     assert response.status_code == 202

@@ -182,7 +182,9 @@ def test_current_hit_upload_contract_preserves_optional_job_fields_as_null() -> 
 def test_upload_dispatches_only_when_a_shared_job_is_returned() -> None:
     source = inspect.getsource(DocumentLibraryApplication.upload)
 
-    guard = source.index("if result.publication.job is not None:")
+    guard = source.index(
+        "if result.publication.job is not None and not result.replayed:"
+    )
     dispatch = source.index("self.dispatch()", guard)
     job_id = source.index("job_id = (", dispatch)
     assert guard < dispatch < job_id

@@ -4,22 +4,21 @@ Atlas reads process configuration at startup and stores Provider/model routing
 and LDAP/Active Directory connection metadata through System Admin. Environment
 variables are deployment inputs, not a mutable global configuration database.
 
-## Bootstrap administrator
+## First System Admin
 
-| Variable | Required | Meaning |
-|---|---:|---|
-| `ATLAS_BOOTSTRAP_ADMIN_EMAIL` | Empty Identity only | Initial System Admin login email |
-| `ATLAS_BOOTSTRAP_ADMIN_PASSWORD` | Empty Identity only | Initial password, minimum 12 characters |
+Atlas does not seed an administrator from environment variables. While Identity
+contains no users, `GET /api/v1/auth/first-admin` reports that the one-time claim
+is available. The browser redirects from `/login` to `/setup`, where the
+operator supplies a display name, email, and password. The Identity owner
+serializes concurrent claims; exactly one request creates the first System
+Admin and session. After any user exists, the claim endpoint remains
+unavailable. Restarting services does not reopen it.
 
-The Identity owner checks whether any user already exists while holding the
-bootstrap lock. If Identity is empty, missing or invalid values reject
-initialization. If any user exists, bootstrap is a no-op and the variables are
-not required. Changing them never rotates, revives, or overwrites an account.
-
-Bootstrap values are passed only to the one-shot initializer. They are not
-returned in JSON or written to application tables as plaintext. Docker
-administrators can inspect container configuration, so use unique temporary
-values and remove them from `.env` after the first successful initialization.
+The public Compose stack initializes credential-encryption and Notes
+collaboration secrets into dedicated persistent volumes when explicit
+environment overrides are absent. Existing secret files are reused across
+restart. Environment values remain supported as deliberate operator overrides;
+they are deployment inputs and must not be committed.
 
 ## Notes collaboration
 
@@ -104,6 +103,14 @@ model advertises vision capability. Disabling a connection or route fails
 closed until the affected default is changed explicitly; Atlas does not choose
 another eligible route automatically.
 
+## Conversation learning admission
+
+Conversation learning is enabled at the fresh development baseline. Disabling
+it affects new Review and Learner reconciliation work only; it does not
+retroactively admit earlier conversations. Concurrent edits use the displayed
+revision. A conflict reloads the current persisted value before the operator
+retries.
+
 ## Reasoning route policy
 
 The UI labels `standard` as **General** and `deep` as **In-depth**. Stored route
@@ -186,6 +193,9 @@ raw Provider payloads.
 
 ## Local files
 
-Copy `infra/.env.example` to `infra/.env`. The real `.env` is ignored by Git.
-Never commit `.env`, private keys, Provider keys, SMB credentials, database
-dumps, uploaded documents, or generated offline bundles.
+A fresh local Compose evaluation needs no `.env` file. Use
+`infra/.env.example` only as a reference when deliberately supplying deployment
+overrides. The generated credential and Notes secrets remain in dedicated
+Compose volumes across normal restarts. Never commit `.env`, private keys,
+Provider keys, SMB credentials, database dumps, uploaded documents, or
+generated offline bundles.

@@ -28,13 +28,15 @@ export const modelRoutingApi = {
         idempotency_key: clientRequestId("answer-behavior"),
       }),
     }),
-  listProviderConnections: () =>
+  listProviderConnections: (signal?: AbortSignal) =>
     requestJson<ProviderConnectionListResult>(
       "/api/v1/admin/config/provider-connections",
+      { signal },
     ),
   createProviderConnection: (
     input: ProviderConnectionCreateInput,
     idempotencyKey: string,
+    signal?: AbortSignal,
   ) =>
     requestJson<ProviderConnectionStatus>(
       "/api/v1/admin/config/provider-connections",
@@ -48,9 +50,13 @@ export const modelRoutingApi = {
           api_key: input.apiKey,
           idempotency_key: idempotencyKey,
         }),
+        signal,
       },
     ),
-  updateProviderConnection: (input: ProviderConnectionUpdateInput) => {
+  updateProviderConnection: (
+    input: ProviderConnectionUpdateInput,
+    signal?: AbortSignal,
+  ) => {
     const body: Record<string, unknown> = {
       expected_revision: input.expectedRevision,
       idempotency_key: clientRequestId(`provider-connection-update-${input.connectionId}`),
@@ -62,10 +68,14 @@ export const modelRoutingApi = {
     if (input.enabled !== undefined) body.enabled = input.enabled;
     return requestJson<ProviderConnectionStatus>(
       `/api/v1/admin/config/provider-connections/${input.connectionId}`,
-      { method: "PATCH", body: JSON.stringify(body) },
+      { method: "PATCH", body: JSON.stringify(body), signal },
     );
   },
-  testProviderConnection: (connectionId: string, expectedRevision: number) =>
+  testProviderConnection: (
+    connectionId: string,
+    expectedRevision: number,
+    signal?: AbortSignal,
+  ) =>
     requestJson<ProviderConnectionTestResult>(
       `/api/v1/admin/config/provider-connections/${connectionId}/test`,
       {
@@ -74,6 +84,7 @@ export const modelRoutingApi = {
           expected_revision: expectedRevision,
           idempotency_key: clientRequestId(`provider-connection-test-${connectionId}`),
         }),
+        signal,
       },
     ),
   listAvailableModels: (connectionId: string, signal?: AbortSignal) =>
@@ -81,11 +92,12 @@ export const modelRoutingApi = {
       `/api/v1/admin/config/provider-connections/${connectionId}/available-models`,
       { signal },
     ),
-  listModelRoutes: () =>
-    requestJson<ModelRouteListResult>("/api/v1/admin/config/model-routes"),
+  listModelRoutes: (signal?: AbortSignal) =>
+    requestJson<ModelRouteListResult>("/api/v1/admin/config/model-routes", { signal }),
   configureModelRoute: (
     config: ModelRouteConfigInput,
     idempotencyKey: string,
+    signal?: AbortSignal,
   ) =>
     requestJson<ModelRouteStatus>("/api/v1/admin/config/model-routes", {
       method: "POST",
@@ -98,8 +110,12 @@ export const modelRoutingApi = {
         runtime_policy: config.runtimePolicy,
         idempotency_key: idempotencyKey,
       }),
+      signal,
     }),
-  updateModelRoute: (input: ModelRouteUpdateInput) => {
+  updateModelRoute: (
+    input: ModelRouteUpdateInput,
+    signal?: AbortSignal,
+  ) => {
     const body: Record<string, unknown> = {
       expected_revision: input.expectedRevision,
       idempotency_key: clientRequestId(`model-route-update-${input.routeId}`),
@@ -112,10 +128,14 @@ export const modelRoutingApi = {
     body.runtime_policy = input.runtimePolicy;
     return requestJson<ModelRouteStatus>(
       `/api/v1/admin/config/model-routes/${input.routeId}`,
-      { method: "PATCH", body: JSON.stringify(body) },
+      { method: "PATCH", body: JSON.stringify(body), signal },
     );
   },
-  testModelRoute: (routeId: string, expectedRevision: number) =>
+  testModelRoute: (
+    routeId: string,
+    expectedRevision: number,
+    signal?: AbortSignal,
+  ) =>
     requestJson<ModelRouteStatus>(
       `/api/v1/admin/config/model-routes/${routeId}/test`,
       {
@@ -124,12 +144,14 @@ export const modelRoutingApi = {
           expected_revision: expectedRevision,
           idempotency_key: clientRequestId(`model-test-${routeId}`),
         }),
+        signal,
       },
     ),
   setDefaultModelRoute: (
     routeId: string,
     purpose: "text" | "vision",
     expectedRevision: number,
+    signal?: AbortSignal,
   ) =>
     requestJson<ModelRouteStatus>(
       `/api/v1/admin/config/model-routes/${routeId}/defaults/${purpose}`,
@@ -139,6 +161,7 @@ export const modelRoutingApi = {
           expected_revision: expectedRevision,
           idempotency_key: clientRequestId(`model-default-${purpose}-${routeId}`),
         }),
+        signal,
       },
     ),
 };

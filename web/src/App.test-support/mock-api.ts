@@ -8,7 +8,7 @@ import { createDocumentsHandler } from "./documents";
 import { createIdentityGovernanceHandler } from "./identity-governance";
 import { createModelRoutingHandler } from "./model-routing";
 import { createNotesHandler } from "./notes";
-import { dispatchMockApi } from "./protocol";
+import { dispatchMockApi, jsonResponse } from "./protocol";
 import { createSessionHandler } from "./sessions";
 import { createWorkspaceHandler } from "./workspace";
 
@@ -28,14 +28,18 @@ export function mockApi(
     createWorkspaceHandler(),
   ];
 
-  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
-    dispatchMockApi(
-      {
-        url: new URL(String(input), "http://localhost"),
-        method: init?.method ?? "GET",
-        init,
-      },
-      handlers,
-    ),
-  );
+  global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const request = {
+      url: new URL(String(input), "http://localhost"),
+      method: init?.method ?? "GET",
+      init,
+    };
+    if (
+      request.url.pathname === "/api/v1/auth/first-admin"
+      && request.method === "GET"
+    ) {
+      return jsonResponse({ claim_available: false });
+    }
+    return dispatchMockApi(request, handlers);
+  });
 }

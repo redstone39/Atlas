@@ -41,11 +41,12 @@ describe("directory administration API boundary", () => {
     const fetchMock = successfulFetch();
 
     await directoryAdministrationApi.listConnections();
+    const { connection_id: _createdConnectionId, ...createConfig } = config;
     await directoryAdministrationApi.createConnection({
-      ...config,
+      ...createConfig,
       bind_password: "create-secret",
       custom_ca_pem: "create-ca",
-    });
+    }, "directory-create-main");
     const { connection_id: _connectionId, ...updateConfig } = config;
     await directoryAdministrationApi.updateConnection({
       connectionId: config.connection_id,
@@ -74,6 +75,11 @@ describe("directory administration API boundary", () => {
       bind_password: "create-secret",
       custom_ca_pem: "create-ca",
     });
+    expect(requests[1].body).not.toHaveProperty("connection_id");
+    expect(requests[1].body).toHaveProperty(
+      "idempotency_key",
+      "directory-create-main",
+    );
     expect(requests[2].body).toMatchObject({
       bind_password: "replacement-secret",
       custom_ca_pem: "replacement-ca",

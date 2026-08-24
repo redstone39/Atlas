@@ -4,12 +4,14 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from atlas_production.modules.identity_access.records import (
     AccessDecisionRecord,
     UserRecord,
 )
 from atlas_production.modules.project_governance.api_models import (
+    ProjectCreateRequest,
     ProjectUpdateRequest,
 )
 from atlas_production.modules.project_governance.contracts import (
@@ -21,6 +23,22 @@ from atlas_production.modules.project_governance.service import (
 )
 from atlas_production.rbac import authorized_project_tag_ids, resolve_access
 from atlas_production.shared.public import AuditEventRecord
+
+
+def test_project_create_request_leaves_identifier_allocation_to_owner() -> None:
+    request = ProjectCreateRequest(
+        name="Owner allocated",
+        policy_profile_id="default",
+        idempotency_key="project-create-owner",
+    )
+    assert "project_id" not in request.model_dump()
+    with pytest.raises(ValidationError):
+        ProjectCreateRequest(
+            project_id="caller-project",
+            name="Caller allocated",
+            policy_profile_id="default",
+            idempotency_key="project-create-caller",
+        )
 
 
 class ProjectRepository:

@@ -112,6 +112,14 @@ class _FenceSession:
         )
 
 
+class _IntentCommand:
+    def __init__(self, intent) -> None:
+        self.intent = intent
+
+    def execute(self, **_kwargs):
+        return self.intent
+
+
 class _JourneyCommand:
     def __init__(self, events: list[str], *, replay: bool = False):
         self.events = events
@@ -136,6 +144,14 @@ class _JourneyCommand:
             job=SimpleNamespace(job_id="job-1"),
             audit_event_id="audit-canonical",
         )
+    def canonical_intent_result(self, intent):
+        return SimpleNamespace(
+            artifact_id=intent.artifact_id,
+            document_version_id=intent.document_version_id,
+            audit_event_id=intent.audit_event_id,
+            job=SimpleNamespace(job_id=intent.job_id),
+        )
+
 
 
 def _document() -> DocumentRecord:
@@ -159,7 +175,6 @@ def _upload(provider, chunks):
         chunks=chunks,
         request_fingerprint="a" * 64,
         artifact_class="original_document",
-        logical_identity="document:document-1:original:key-1",
         content_type="application/pdf",
         document=_document(),
         tag_refs=[DocumentTagRef(tag_type="project", tag_id="project-1")],
@@ -181,10 +196,14 @@ def test_upload_provider_builds_boundary_facts_before_consuming_bytes() -> None:
     def chunks():
         events.append("bytes")
         yield b"abc"
-
     command = _JourneyCommand(events)
+
     provider = PostgresDocumentUploadJourneyProvider(
-        lambda: _FenceSession(), command  # type: ignore[arg-type]
+        lambda: _FenceSession(),
+        command,  # type: ignore[arg-type]
+        intent_command=_IntentCommand(
+            SimpleNamespace(replayed=False, document_id="document-1")
+        ),  # type: ignore[arg-type]
     )
     result = _upload(provider, chunks())
 
@@ -217,7 +236,11 @@ def test_upload_provider_builds_boundary_facts_before_consuming_bytes() -> None:
 def test_upload_provider_canonical_replay_does_not_consume_bytes_and_keeps_identity() -> None:
     first_command = _JourneyCommand([])
     first = PostgresDocumentUploadJourneyProvider(
-        lambda: _FenceSession(), first_command  # type: ignore[arg-type]
+        lambda: _FenceSession(),
+        first_command,  # type: ignore[arg-type]
+        intent_command=_IntentCommand(
+            SimpleNamespace(replayed=False, document_id="document-1")
+        ),  # type: ignore[arg-type]
     )
     first_result = _upload(first, (b"abc",))
     events: list[str] = []
@@ -228,11 +251,21 @@ def test_upload_provider_canonical_replay_does_not_consume_bytes_and_keeps_ident
 
     replay_command = _JourneyCommand(events, replay=True)
     replay = PostgresDocumentUploadJourneyProvider(
-        lambda: _FenceSession(), replay_command  # type: ignore[arg-type]
+        lambda: _FenceSession(),
+        replay_command,  # type: ignore[arg-type]
+        intent_command=_IntentCommand(
+            SimpleNamespace(
+                replayed=True,
+                artifact_id=first_result.artifact.artifact_id,
+                document_version_id=first_result.publication.version.document_version_id,
+                audit_event_id="audit-canonical",
+                job_id="job-1",
+            )
+        ),  # type: ignore[arg-type]
     )
     replay_result = _upload(replay, forbidden_chunks())
 
-    assert events == ["boundary", "terminal"]
+    assert events == []
     assert replay_result.artifact.artifact_id == first_result.artifact.artifact_id
     assert replay_result.artifact.checksum_value == hashlib.sha256(b"abc").hexdigest()
     assert replay_result.artifact.byte_size == 3
@@ -258,7 +291,6 @@ def test_upload_provider_rejects_scope_currentness_before_bytes_or_sql() -> None
             chunks=chunks(),
             request_fingerprint="a" * 64,
             artifact_class="original_document",
-            logical_identity="logical",
             content_type="application/pdf",
             document=_document(),
             tag_refs=[DocumentTagRef(tag_type="team", tag_id="team-2")],

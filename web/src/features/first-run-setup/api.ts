@@ -5,7 +5,7 @@ import type { FirstAdminClaimInput, FirstAdminStatus } from "./types";
 export const firstRunSetupApi = {
   firstAdminStatus: (signal?: AbortSignal) =>
     requestJson<FirstAdminStatus>("/api/v1/auth/first-admin", { signal }),
-  claimFirstAdmin: (input: FirstAdminClaimInput) =>
+  claimFirstAdmin: (input: FirstAdminClaimInput, signal?: AbortSignal) =>
     requestJson<SessionState>("/api/v1/auth/first-admin", {
       method: "POST",
       body: JSON.stringify({
@@ -13,5 +13,6 @@ export const firstRunSetupApi = {
         email: input.email,
         password: input.password,
       }),
+      signal,
     }),
 };

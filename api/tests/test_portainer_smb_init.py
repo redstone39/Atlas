@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import secrets
 from collections.abc import Mapping
 from types import SimpleNamespace
 
@@ -15,9 +14,6 @@ from atlas_production.infrastructure.portainer_smb_init import (
 )
 from atlas_production.modules.artifact_storage.records import (
     UNVERIFIED_TARGET_RISK_ACKNOWLEDGEMENT,
-)
-from atlas_production.modules.identity_access.local_pilot import (
-    AdminBootstrapConfigurationError,
 )
 
 
@@ -124,7 +120,6 @@ def test_main_success_preserves_json_contract(monkeypatch, capsys) -> None:
     runtime = SimpleNamespace(session_factory=object())
     composition = Composition()
     events: list[str] = []
-    admin_calls: list[dict[str, str]] = []
 
     def configure_portainer_target(**facts):
         events.append("storage")
@@ -137,11 +132,6 @@ def test_main_success_preserves_json_contract(monkeypatch, capsys) -> None:
             plugin_count=12,
             processing_profile_count=9,
         )
-
-    def seed_admin(**facts):
-        events.append("identity")
-        admin_calls.append(facts)
-        return SimpleNamespace(actor_id=facts["actor_id"], created=True)
 
     monkeypatch.setattr(
         portainer_smb_init.PostgresRuntime,
@@ -162,26 +152,11 @@ def test_main_success_preserves_json_contract(monkeypatch, capsys) -> None:
             execute=seed_processing_defaults,
         ),
     )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedLocalPilotAdminCommand",
-        lambda session_factory: SimpleNamespace(
-            execute=seed_admin,
-        ),
-    )
     environment = _valid_environment()
     exit_code = main(environment)
 
     assert exit_code == 0
-    assert events == ["processing", "identity", "storage"]
-    assert admin_calls == [
-        {
-            "actor_id": "user-admin-001",
-            "display_name": "Atlas Admin",
-            "email": "operator@example.test",
-            "password": environment["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"],
-        }
-    ]
+    assert events == ["processing", "storage"]
     assert json.loads(capsys.readouterr().out) == {
         "committed_blob_count": 2,
         "evidence_claim": "OPERATOR_ACCEPTED_UNVERIFIED_TARGET",
@@ -195,100 +170,6 @@ def test_main_success_preserves_json_contract(monkeypatch, capsys) -> None:
     }
 
 
-def test_main_fails_closed_when_admin_seed_fails_without_leaking_secret(
-    monkeypatch,
-    capsys,
-) -> None:
-    runtime = SimpleNamespace(session_factory=object())
-    monkeypatch.setattr(
-        portainer_smb_init.PostgresRuntime,
-        "from_environment",
-        lambda: runtime,
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "build_artifact_storage_composition",
-        lambda selected: Composition(),
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedProcessingRegistryDefaultsCommand",
-        lambda session_factory: SimpleNamespace(
-            execute=lambda: SimpleNamespace(
-                created=False,
-                plugin_count=12,
-                processing_profile_count=9,
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedLocalPilotAdminCommand",
-        lambda session_factory: SimpleNamespace(
-            execute=lambda **facts: (_ for _ in ()).throw(
-                RuntimeError(facts["password"])
-            )
-        ),
-    )
-
-    environment = _valid_environment()
-    assert main(environment) == 1
-    output = capsys.readouterr().out
-    assert json.loads(output) == {
-        "error_code": "portainer_smb_initialization_failed",
-        "status": "failed",
-    }
-    assert environment["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"] not in output
-
-
-def test_main_maps_bootstrap_configuration_error_without_leaking_secret(
-    monkeypatch,
-    capsys,
-) -> None:
-    secret = "too-short"
-    runtime = SimpleNamespace(session_factory=object())
-    monkeypatch.setattr(
-        portainer_smb_init.PostgresRuntime,
-        "from_environment",
-        lambda: runtime,
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "build_artifact_storage_composition",
-        lambda _selected: Composition(),
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedProcessingRegistryDefaultsCommand",
-        lambda _session_factory: SimpleNamespace(
-            execute=lambda: SimpleNamespace(
-                created=False,
-                plugin_count=12,
-                processing_profile_count=9,
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedLocalPilotAdminCommand",
-        lambda _session_factory: SimpleNamespace(
-            execute=lambda **_facts: (_ for _ in ()).throw(
-                AdminBootstrapConfigurationError(
-                    "identity_admin_bootstrap_configuration_invalid"
-                )
-            )
-        ),
-    )
-    environment = _valid_environment()
-    environment["ATLAS_BOOTSTRAP_ADMIN_PASSWORD"] = secret
-
-    assert main(environment) == 1
-    output = capsys.readouterr().out
-    assert json.loads(output) == {
-        "error_code": "identity_admin_bootstrap_configuration_invalid",
-        "status": "rejected",
-    }
-    assert secret not in output
 
 
 def test_main_rejection_output_does_not_echo_smb_material(capsys) -> None:
@@ -319,8 +200,6 @@ def _valid_environment() -> dict[str, str]:
         "ATLAS_SMB_GENERATION": "1",
         "ATLAS_ARTIFACT_SWITCH_MODE": SWITCH_MODE,
         "ATLAS_ARTIFACT_SWITCH_ACK": UNVERIFIED_TARGET_RISK_ACKNOWLEDGEMENT,
-        "ATLAS_BOOTSTRAP_ADMIN_EMAIL": "operator@example.test",
-        "ATLAS_BOOTSTRAP_ADMIN_PASSWORD": secrets.token_urlsafe(18),
     }
 
 

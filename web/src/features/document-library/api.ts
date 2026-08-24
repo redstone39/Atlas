@@ -6,7 +6,10 @@ import type { AuditEventList } from "../conversation-audit/index";
 import type { DocumentLibraryListResult, DocumentLibraryMutationResult } from "./types";
 
 export const documentLibraryApi = {
-  listDocumentLibrary: (scope?: DocumentTagRef) =>
+  listDocumentLibrary: (
+    scope?: DocumentTagRef,
+    signal?: AbortSignal,
+  ) =>
     requestJson<DocumentLibraryListResult>(
       scope
         ? `/api/v1/admin/document-library?${new URLSearchParams({
@@ -14,16 +17,20 @@ export const documentLibraryApi = {
             scope_id: scope.tag_id,
           }).toString()}`
         : "/api/v1/admin/document-library",
+      { signal },
     ),
-  uploadDocumentLibraryFile: (input: {
-    clientKey: string;
-    scopeType: "team" | "project";
-    scopeId: string;
-    tagRefs: DocumentTagRef[];
-    file: File;
-    description: string;
-    allowMemberDownload: boolean;
-  }) => {
+  uploadDocumentLibraryFile: (
+    input: {
+      clientKey: string;
+      scopeType: "team" | "project";
+      scopeId: string;
+      tagRefs: DocumentTagRef[];
+      file: File;
+      description: string;
+      allowMemberDownload: boolean;
+    },
+    signal?: AbortSignal,
+  ) => {
     const form = new FormData();
     form.set("scope_type", input.scopeType);
     form.set("scope_id", input.scopeId);
@@ -35,6 +42,7 @@ export const documentLibraryApi = {
     return requestJson<DocumentLibraryMutationResult>("/api/v1/admin/document-library", {
       method: "POST",
       body: form,
+      signal,
     });
   },
   updateDocumentLibrary: (

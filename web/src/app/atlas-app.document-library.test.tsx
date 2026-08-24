@@ -185,13 +185,15 @@ it("Document Library uploads selected files sequentially and retries only remain
 
     const firstForm = uploadCalls[0]!.body as FormData;
     const secondForm = uploadCalls[1]!.body as FormData;
-    const firstDocumentId = String(firstForm.get("document_id"));
-    const secondDocumentId = String(secondForm.get("document_id"));
+    const firstOperationKey = String(firstForm.get("idempotency_key"));
+    const secondOperationKey = String(secondForm.get("idempotency_key"));
     expect(firstForm.get("file")).toBe(firstFile);
     expect(secondForm.get("file")).toBe(secondFile);
-    expect(firstDocumentId).not.toBe(secondDocumentId);
-    expect(firstForm.get("idempotency_key")).toBe(`doclib-${firstDocumentId}`);
-    expect(secondForm.get("idempotency_key")).toBe(`doclib-${secondDocumentId}`);
+    expect(firstForm.has("document_id")).toBe(false);
+    expect(secondForm.has("document_id")).toBe(false);
+    expect(firstOperationKey).toMatch(/^document-upload-/);
+    expect(secondOperationKey).toMatch(/^document-upload-/);
+    expect(firstOperationKey).not.toBe(secondOperationKey);
     for (const form of [firstForm, secondForm]) {
       expect(form.get("scope_type")).toBe("team");
       expect(form.get("scope_id")).toBe("team-si");
@@ -231,8 +233,8 @@ it("Document Library uploads selected files sequentially and retries only remain
     await waitFor(() => expect(uploadCalls).toHaveLength(3));
     const retryForm = uploadCalls[2]!.body as FormData;
     expect(retryForm.get("file")).toBe(secondFile);
-    expect(retryForm.get("document_id")).toBe(secondDocumentId);
-    expect(retryForm.get("idempotency_key")).toBe(`doclib-${secondDocumentId}`);
+    expect(retryForm.has("document_id")).toBe(false);
+    expect(retryForm.get("idempotency_key")).toBe(secondOperationKey);
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );

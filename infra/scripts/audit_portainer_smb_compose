@@ -194,8 +194,11 @@ health_test = " ".join(carrier.get("healthcheck", {}).get("test", []))
 if (
     "/ready" not in health_test
     or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test
+    or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET_FILE" not in health_test
+    or "readFileSync" not in health_test
+    or "trim()" not in health_test
 ):
-    fail("Notes carrier healthcheck does not exercise authenticated readiness")
+    fail("Notes carrier healthcheck does not resolve nonblank overrides and authenticated readiness")
 
 secret_gated = {
     name

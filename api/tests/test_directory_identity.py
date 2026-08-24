@@ -226,6 +226,32 @@ class FakeRepository:
                 key=lambda item: (item.priority, item.connection_id),
             )
         )
+    def create_directory_connection_once(self, actor, payload, prepare_material):
+        connection_id = payload.idempotency_key.removeprefix("directory-create-")
+        connection, secrets, status = prepare_material(connection_id)
+        with self.directory_mutation(
+            f"identity:directory-connection:{connection_id}",
+            actor_ids=(actor.actor_id,),
+            authorization_actor_ids=(actor.actor_id,),
+            connection_ids=(connection_id,),
+        ):
+            self.put_directory_connection(connection)
+            for secret in secrets:
+                self.put_directory_secret(secret)
+            self.append_audit(
+                SimpleNamespace(
+                    event_type="directory_connection_created",
+                    actor_id=actor.actor_id,
+                    target_ref=f"directory-connection:{connection_id}",
+                    message_code="directory.connection_created",
+                    metadata={"connection_id": connection_id, "status": "created"},
+                    message_params={},
+                    scope_type=None,
+                    scope_id=None,
+                )
+            )
+        return status
+
 
     def get_directory_connection(self, connection_id):
         return deepcopy(self.connections.get(connection_id))
@@ -360,7 +386,7 @@ class FakeGateway:
 
 def create_payload(connection_id="main", priority=10):
     return DirectoryConnectionCreateRequest(
-        connection_id=connection_id,
+        idempotency_key=f"directory-create-{connection_id}",
         display_name=connection_id.title(),
         priority=priority,
         provider_type="ldap",
@@ -960,7 +986,7 @@ def test_directory_admin_http_journey_and_safe_responses() -> None:
     payload.update(port=389, tls_mode="plain", bind_password="bind-secret")
     ad_plain_payload = {
         **payload,
-        "connection_id": "ad-plain",
+        "idempotency_key": "directory-create-ad-plain",
         "display_name": "AD Plain",
         "provider_type": "active_directory",
         "user_object_filter": "(&(objectCategory=person)(objectClass=user))",

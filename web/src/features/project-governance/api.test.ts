@@ -21,7 +21,7 @@ function successfulFetch() {
 describe("project governance API contract", () => {
   it("preserves Project and Project Member request generators", async () => {
     const fetchMock = successfulFetch();
-    await projectGovernanceApi.createProject("project-a", "Project A");
+    await projectGovernanceApi.createProject("Project A", "project-create-a");
     await projectGovernanceApi.updateProject("project-a", {
       name: "Project A2",
       policy_profile_id: "policy-a",
@@ -47,10 +47,9 @@ describe("project governance API contract", () => {
         path: "/api/v1/admin/projects",
         method: "POST",
         body: {
-          project_id: "project-a",
           name: "Project A",
           policy_profile_id: "policy-default-governed",
-          idempotency_key: "project-project-a",
+          idempotency_key: "project-create-a",
         },
       },
       {

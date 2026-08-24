@@ -51,6 +51,12 @@ describe("frontend compatibility convergence", () => {
     ]) {
       expect(existsSync(resolve(webRoot, relative)), relative).toBe(false);
     }
+    for (const firstRunSurface of [
+      "src/app/(public)/setup/page.tsx",
+      "src/features/first-run-setup/FirstRunSetupFeature.tsx",
+    ]) {
+      expect(existsSync(resolve(webRoot, firstRunSurface)), firstRunSurface).toBe(true);
+    }
     expect(
       readFileSync(resolve(webRoot, "src/components/pages/SettingsPage.tsx"), "utf8"),
     ).not.toContain('from "../../app/');

@@ -115,6 +115,10 @@ it("/workspace presents pure chat and keeps management out of the default shell"
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/v1/auth/first-admin",
+      expect.anything(),
+    );
     expect(screen.queryByText(
       "Atlas selects and retrieves relevant sources in multiple steps from the documents you can currently access.",
     )).not.toBeInTheDocument();

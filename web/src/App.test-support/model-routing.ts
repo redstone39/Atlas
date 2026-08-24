@@ -189,7 +189,7 @@ export function createModelRoutingHandler(
     ) {
       const payload = JSON.parse(String(init?.body ?? "{}"));
       const connection: ProviderConnectionStatus = {
-        connection_id: payload.connection_id,
+        connection_id: `provider-connection-${providerConnections.length + 1}`,
         display_name: payload.display_name,
         provider_type: payload.provider_type,
         endpoint_url: payload.endpoint_url,
@@ -295,7 +295,7 @@ export function createModelRoutingHandler(
     if (url.pathname === "/api/v1/admin/config/model-routes" && method === "POST") {
       const payload = JSON.parse(String(init?.body ?? "{}"));
       const route: ModelRouteStatus = {
-        route_id: payload.route_id,
+        route_id: `model-route-${modelRoutes.length + 1}`,
         display_name: payload.display_name,
         provider_type:
           providerConnections.find(

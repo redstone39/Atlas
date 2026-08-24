@@ -146,23 +146,17 @@ def test_notes_attachment_upload_replay_open_trash_and_exact_note_binding(
     owner = provider.owner
     first = owner.create_note(
         actor_id="user-notes-attachment",
-        command=NoteCreateRequestV1(
-            note_id="note-attachment-storage",
-            scope_type="project",
-            scope_id="project-notes-attachment",
-            title="Attachment storage",
-            idempotency_key="create-attachment-storage",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-attachment",
+        title="Attachment storage",
+        idempotency_key="create-attachment-storage",),
     )
-    owner.create_note(
+    second = owner.create_note(
         actor_id="user-notes-attachment",
-        command=NoteCreateRequestV1(
-            note_id="note-attachment-storage-other",
-            scope_type="project",
-            scope_id="project-notes-attachment",
-            title="Other note",
-            idempotency_key="create-attachment-storage-other",
-        ),
+        command=NoteCreateRequestV1(scope_type="project",
+        scope_id="project-notes-attachment",
+        title="Other note",
+        idempotency_key="create-attachment-storage-other",),
     )
     content = _png()
     attachment = provider.upload(
@@ -193,7 +187,7 @@ def test_notes_attachment_upload_replay_open_trash_and_exact_note_binding(
     with pytest.raises(NotesError) as cross_note:
         provider.open(
             actor_id="user-notes-attachment",
-            note_id="note-attachment-storage-other",
+            note_id=second.note_id,
             attachment_ref=attachment.attachment_ref,
         )
     assert cross_note.value.code == "note_not_found"

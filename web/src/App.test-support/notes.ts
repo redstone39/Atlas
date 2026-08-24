@@ -64,7 +64,7 @@ export function createNotesHandler(
       const body = JSON.parse(String(init?.body ?? "{}"));
       return jsonResponse({
         ...notesDetail,
-        note_id: body.note_id,
+        note_id: "note-owner-created",
         title: body.title,
         category_id: body.category_id,
       }, 201);

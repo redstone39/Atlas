@@ -142,6 +142,13 @@ it("project admins manage only their own project members from Projects", async (
         method: "POST",
       }),
     );
+    const memberCreate = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === "/api/v1/admin/projects/proj-admin-live/members"
+        && init?.method === "POST",
+    );
+    expect(JSON.parse(String(memberCreate?.[1]?.body)))
+      .not.toHaveProperty("grant_id");
 
     fireEvent.click(screen.getByRole("button", { name: "Invite new user" }));
     const inviteDialog = await screen.findByRole("dialog", { name: "Invite new user" });

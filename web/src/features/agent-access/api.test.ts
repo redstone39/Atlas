@@ -23,7 +23,7 @@ describe("agent access API contract", () => {
     const fetchMock = successfulFetch();
 
     await agentAccessApi.listAgents();
-    await agentAccessApi.createAgent("agent-a", "Agent A");
+    await agentAccessApi.createAgent("Agent A", "agent-create-a");
     await agentAccessApi.updateAgent("agent-a", { displayName: "Agent A2" });
     await agentAccessApi.updateAgent("agent-a", { active: false });
     await agentAccessApi.issueAgentToken("agent-a");
@@ -44,9 +44,8 @@ describe("agent access API contract", () => {
         path: "/api/v1/admin/agent-users",
         method: "POST",
         body: {
-          actor_id: "agent-a",
           display_name: "Agent A",
-          idempotency_key: "agent-agent-a",
+          idempotency_key: "agent-create-a",
         },
       },
       {

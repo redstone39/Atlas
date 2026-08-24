@@ -24,6 +24,7 @@ from atlas_production.infrastructure.persistence.conversation_review import (
     AtlasConversationReviewRow,
     AtlasConversationReviewSnapshotTurnRow,
 )
+from atlas_production.infrastructure.persistence.identity_access import AtlasUserRow
 from atlas_production.infrastructure.postgres_audit_adapter import build_audit_event
 from atlas_production.modules.conversation_review.public import (
     MAX_CANONICAL_CASE_BYTES,
@@ -413,6 +414,22 @@ class PostgresConversationReviewOwner:
         event_id = _learning_settings_receipt(actor_id, payload.idempotency_key)
         try:
             with self._session_factory() as session, session.begin():
+                actor = session.scalar(
+                    select(AtlasUserRow)
+                    .where(AtlasUserRow.actor_id == actor_id)
+                    .with_for_update()
+                )
+                if (
+                    actor is None
+                    or actor.actor_type != "user"
+                    or not actor.active
+                    or actor.system_role != "admin"
+                ):
+                    raise _learning_settings_error(
+                        "access_denied",
+                        "permission.admin_permission_is_required",
+                        403,
+                    )
                 row = session.scalar(
                     select(AtlasConversationLearningSettingsRow)
                     .where(AtlasConversationLearningSettingsRow.settings_key == "global")

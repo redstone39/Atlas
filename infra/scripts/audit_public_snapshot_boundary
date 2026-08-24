@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -49,9 +50,7 @@ BASELINE_PUBLIC_FIXTURES = {
     "plugin-sdk/examples/atlas-docling-pdf/fixtures/smoke-input.json",
     "plugin-sdk/examples/atlas-pypdf/fixtures/smoke-input.json",
 }
-PRIVATE_PATH = re.compile(
-    rb"/(?:Users|home)/[^/\s]+/(?:Library/Mobile Documents|\.ssh|\.aws|\.config)/"
-)
+PRIVATE_PATH = re.compile(rb"/(?:Users|home)/[^/\s]+/")
 SECRET_LITERAL = re.compile(
     rb"(?:sk-[A-Za-z0-9_-]{20,}|gh[opusr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
 )
@@ -60,11 +59,17 @@ DIRECT_PAYLOAD_PATH = re.compile(
     re.IGNORECASE,
 )
 DIRECT_PAYLOAD_LITERAL = re.compile(
-    rb"""(?ix)
+    rb"""(?ixs)
     ["']?\b(?:conversation|turn|provider|model)[_-]?(?:payload|content|text|response)
     \b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
     |
     (?<![a-z0-9_.])["']?\btranscript\b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    |
+    ["']role["']\s*:\s*["'](?:user|assistant|system|developer|tool|function|provider|model)["'].{0,4096}?
+    ["'](?:content|message|text)["']\s*:\s*["'][^"'\r\n]+["']
+    |
+    ["'](?:content|message|text)["']\s*:\s*["'][^"'\r\n]+["'].{0,4096}?
+    ["']role["']\s*:\s*["'](?:user|assistant|system|developer|tool|function|provider|model)["']
     """
 )
 SAFE_DIRECT_PAYLOAD_MARKER = re.compile(
@@ -154,6 +159,42 @@ def _is_decodable_text(path: str, blob: bytes) -> bool:
         return False
     return True
 
+def _contains_direct_json_payload(blob: bytes) -> bool:
+    try:
+        value = json.loads(blob)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+    def visit(item: object) -> bool:
+        if isinstance(item, dict):
+            role = item.get("role")
+            if isinstance(role, str) and role.lower() in {
+                "user",
+                "assistant",
+                "system",
+                "developer",
+                "tool",
+                "function",
+                "provider",
+                "model",
+            }:
+                for key in ("content", "message", "text"):
+                    payload = item.get(key)
+                    if payload not in (None, "", [], {}):
+                        encoded = json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode()
+                        if SAFE_DIRECT_PAYLOAD_MARKER.search(encoded) is None:
+                            return True
+            return any(visit(child) for child in item.values())
+        if isinstance(item, list):
+            return any(visit(child) for child in item)
+        return False
+
+    return visit(value)
+
 
 def _load_allowed_paths(source: str) -> set[str]:
     path = Path(source)
@@ -229,9 +270,12 @@ def _scan(path: str, blob: bytes, sensitive_hashes: set[str]) -> list[str]:
         for match in SECRET_ASSIGNMENT.finditer(blob)
     ):
         findings.append("hard-coded credential assignment")
-    if _is_decodable_text(path, blob) and any(
-        SAFE_DIRECT_PAYLOAD_MARKER.search(match.group(0)) is None
-        for match in DIRECT_PAYLOAD_LITERAL.finditer(blob)
+    if _is_decodable_text(path, blob) and (
+        _contains_direct_json_payload(blob)
+        or any(
+            SAFE_DIRECT_PAYLOAD_MARKER.search(match.group(0)) is None
+            for match in DIRECT_PAYLOAD_LITERAL.finditer(blob)
+        )
     ):
         findings.append("direct conversation or Provider payload literal")
     if sensitive_hashes and hashlib.sha256(blob).hexdigest() in sensitive_hashes:
@@ -258,6 +302,18 @@ def _self_test() -> None:
         (
             "src/example.txt",
             b"/" + b"Users/example/" + b"Library/Mobile Documents/private/file",
+            set(),
+            "absolute private workstation path",
+        ),
+        (
+            "src/example.txt",
+            b"/" + b"Users/example/workspace/private-repository/source.py",
+            set(),
+            "absolute private workstation path",
+        ),
+        (
+            "src/example.txt",
+            b"/" + b"home/alice/private-repository.txt",
             set(),
             "absolute private workstation path",
         ),
@@ -304,6 +360,49 @@ def _self_test() -> None:
             "direct conversation or Provider payload literal",
         ),
         (
+            "config/ordinary.json",
+            b'{"mes' + b'sages":[{"ro' + b'le":"user","con' + b'tent":"customer private message"}]}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/long-transcript.json",
+            b'{"mes'
+            + b'sages":[{"ro'
+            + b'le":"system","con'
+            + b'tent":"'
+            + b"x" * 600
+            + b'"},{"ro'
+            + b'le":"user","con'
+            + b'tent":"customer private message"}]}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/assistant-output.json",
+            b'{"ro' + b'le":"assistant","mes' + b'sage":"customer answer"}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/provider-output.json",
+            b'{"ro' + b'le":"provider","te' + b'xt":"customer completion"}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/system-prompt.json",
+            b'{"ro' + b'le":"system","con' + b'tent":"customer policy prompt"}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/tool-output.json",
+            b'{"ro' + b'le":"tool","con' + b'tent":"customer tool result"}',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
             "src/example.py",
             b"to"
             + b'ken = "public-synthetic-token"\ncre'
@@ -334,6 +433,10 @@ def _self_test() -> None:
         (
             "contracts/user-messages.json",
             b'{"message_code":"conversation_payload_required","default_message":"example"}',
+        ),
+        (
+            "api/tests/test_public_messages.py",
+            b'{"mes' + b'sages":[{"ro' + b'le":"user","con' + b'tent":"public-synthetic example"}]}',
         ),
     )
     for path, blob in safe_cases:

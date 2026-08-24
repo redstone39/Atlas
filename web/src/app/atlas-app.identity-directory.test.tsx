@@ -159,6 +159,9 @@ it("/admin/directory manages sources while /admin/users imports directory users"
       expect(body).not.toHaveProperty("clear_custom_ca");
       expect(within(editDialog).queryByLabelText("Clear the saved custom CA and use the system trust store")).not.toBeInTheDocument();
     });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Users" }));
     expect(await screen.findByRole("heading", { name: "Users" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Name, email, or username"), {

@@ -465,8 +465,7 @@ class IdentityRepository:
             try:
                 acquire_owner_locks(
                     session,
-                    domain_keys=(),
-                    identity_keys=(receipt_lock, *identity_lock_keys),
+                    identity_keys=(receipt_lock,),
                 )
                 row = session.scalar(
                     select(AtlasIdentityCreateReceiptRow)

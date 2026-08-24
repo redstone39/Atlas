@@ -144,16 +144,6 @@ def test_portainer_operator_preserves_environment_and_json_contract(
             )
         ),
     )
-    monkeypatch.setattr(
-        portainer_smb_init,
-        "SeedLocalPilotAdminCommand",
-        lambda session_factory: SimpleNamespace(
-            execute=lambda **facts: SimpleNamespace(
-                actor_id=facts["actor_id"],
-                created=False,
-            )
-        ),
-    )
     environment = {
         "ATLAS_SMB_GENERATION": "7",
         "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
@@ -165,7 +155,7 @@ def test_portainer_operator_preserves_environment_and_json_contract(
     }
 
     assert portainer_smb_init.main(environment) == 0
-    assert json.loads(capsys.readouterr().out) == {
+    expected_status = {
         "committed_blob_count": 2,
         "evidence_claim": "OPERATOR_ACCEPTED_UNVERIFIED_TARGET",
         "generation": 7,
@@ -176,6 +166,7 @@ def test_portainer_operator_preserves_environment_and_json_contract(
         "storage_epoch": 4,
         "verification_mode": "operator_accepted_unverified",
     }
+    assert json.loads(capsys.readouterr().out) == expected_status
     source = inspect.getsource(portainer_smb_init)
     assert "default_" + "store" not in source
     assert "build_artifact_storage_service" not in source

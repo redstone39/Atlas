@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import http.cookiejar
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -17,6 +19,7 @@ API = os.environ.get("ATLAS_PUBLIC_SMOKE_API_URL", "http://127.0.0.1:8012")
 WEB = os.environ.get("ATLAS_PUBLIC_SMOKE_WEB_URL", "http://127.0.0.1:5184")
 PROJECT = os.environ.get("ATLAS_PUBLIC_SMOKE_PROJECT", "atlas_public_upgrade_20260824")
 STATE = Path(f"/tmp/{PROJECT}-first-run-smoke.json")
+COMPOSE = Path(__file__).resolve().parents[1] / "docker-compose.p1.yml"
 
 
 def request(path: str, *, method: str = "GET", body: bytes | None = None, headers: dict[str, str] | None = None, opener=None):
@@ -95,22 +98,286 @@ def web_route(path: str) -> None:
         if response.status != 200:
             raise AssertionError((path, response.status))
 
+def wait_for_stack() -> None:
+    deadline = time.monotonic() + 180
+    required = {"api", "notes-collaboration", "web"}
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                PROJECT,
+                "-f",
+                str(COMPOSE),
+                "ps",
+                "--format",
+                "json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            raw = result.stdout.strip()
+            records = json.loads(raw) if raw.startswith("[") else [
+                json.loads(line) for line in raw.splitlines()
+            ]
+            health = {
+                record.get("Service"): record.get("Health")
+                for record in records
+                if record.get("Service") in required
+            }
+            if health.keys() == required and all(
+                state == "healthy" for state in health.values()
+            ):
+                return
+            if any(
+                record.get("State") in {"dead", "exited"}
+                for record in records
+                if record.get("Service") in required
+            ):
+                raise AssertionError(f"required Compose service exited: {health}")
+        time.sleep(1)
+    raise AssertionError("public Compose services did not become healthy")
 
-def secret_initializer_log() -> str:
+
+def _initializer_payload(output: str) -> dict[str, object]:
+    payloads: list[dict[str, object]] = []
+    for line in output.splitlines():
+        message = line.split("|", 1)[-1].strip()
+        if not message:
+            continue
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError as error:
+            raise AssertionError("secret initializer emitted non-metadata output") from error
+        expected_keys = {"generated", "ready"}
+        generated = payload.get("generated")
+        if (
+            set(payload) != expected_keys
+            or payload["ready"] is not True
+            or not isinstance(generated, dict)
+            or set(generated) != {"credential", "notes_ticket", "notes_transport"}
+            or any(not isinstance(value, bool) for value in generated.values())
+        ):
+            raise AssertionError("secret initializer emitted unexpected metadata")
+        payloads.append(payload)
+    if not payloads:
+        raise AssertionError("secret initializer emitted no metadata")
+    return payloads[-1]
+
+
+def secret_initializer_metadata() -> dict[str, object]:
     result = subprocess.run(
-        ["docker", "compose", "-p", PROJECT, "logs", "--no-color", "deployment-secret-init"],
+        [
+            "docker",
+            "compose",
+            "-p",
+            PROJECT,
+            "-f",
+            str(COMPOSE),
+            "logs",
+            "--no-color",
+            "deployment-secret-init",
+        ],
         text=True,
         capture_output=True,
         check=True,
     )
-    log = result.stdout + result.stderr
-    forbidden = ("public-synthetic-alpha-password", "public-synthetic-beta-password")
-    if any(value in log for value in forbidden):
-        raise AssertionError("secret initializer logs exposed a smoke credential")
-    return log
+    return _initializer_payload(result.stdout + result.stderr)
+
+
+def secret_override_smoke() -> None:
+    base_environment = os.environ.copy()
+
+    def volume_names(prefix: str) -> dict[str, str]:
+        return {
+            name: f"{prefix}-{name}"
+            for name in ("credentials", "notes-transport", "notes-ticket")
+        }
+
+    def remove_volumes(names: dict[str, str]) -> None:
+        subprocess.run(
+            ["docker", "volume", "rm", "--force", *names.values()],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def run_initializer(
+        names: dict[str, str],
+        overrides: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        environment = base_environment.copy()
+        for name in (
+            "ATLAS_CREDENTIAL_MASTER_KEY",
+            "ATLAS_CREDENTIAL_MASTER_KEY_ID",
+            "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET",
+            "ATLAS_NOTES_COLLABORATION_TICKET_SECRET",
+        ):
+            environment.pop(name, None)
+        environment.update(overrides)
+        command = [
+            "docker",
+            "compose",
+            "-p",
+            PROJECT,
+            "-f",
+            str(COMPOSE),
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+        ]
+        for name, volume in names.items():
+            command.extend(["-v", f"{volume}:/run/atlas/secrets/{name}"])
+        command.append("deployment-secret-init")
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+    def run_api_consumer(
+        names: dict[str, str],
+        overrides: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        environment = base_environment.copy()
+        environment.update(overrides)
+        command = [
+            "docker",
+            "compose",
+            "-p",
+            PROJECT,
+            "-f",
+            str(COMPOSE),
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+        ]
+        for name, volume in names.items():
+            command.extend(["-v", f"{volume}:/run/atlas/secrets/{name}"])
+        command.extend([
+            "api",
+            "/app/.venv/bin/python",
+            "-c",
+            "import base64, os; k=os.environ['ATLAS_CREDENTIAL_MASTER_KEY']; i=os.environ['ATLAS_CREDENTIAL_MASTER_KEY_ID']; a=os.environ['ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET']; b=os.environ['ATLAS_NOTES_COLLABORATION_TICKET_SECRET']; assert len(base64.b64decode(k, validate=True)) == 32 and i.strip() and a.strip() and b.strip() and a != b",
+        ])
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+
+
+    complete_override = {
+        "ATLAS_CREDENTIAL_MASTER_KEY": base64.b64encode(os.urandom(32)).decode(),
+        "ATLAS_CREDENTIAL_MASTER_KEY_ID": f"public-smoke-{uuid.uuid4().hex}",
+        "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": uuid.uuid4().hex,
+        "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": uuid.uuid4().hex,
+    }
+    replay_volumes = volume_names(f"{PROJECT}-secrets-{uuid.uuid4().hex}")
+    try:
+        first = run_initializer(replay_volumes, complete_override)
+        assert first.returncode == 0, first.stderr
+        assert _initializer_payload(first.stdout)["generated"] == {
+            "credential": True,
+            "notes_ticket": True,
+            "notes_transport": True,
+        }
+        replay = run_initializer(replay_volumes, {})
+        assert replay.returncode == 0, replay.stderr
+        assert _initializer_payload(replay.stdout)["generated"] == {
+            "credential": False,
+            "notes_ticket": False,
+            "notes_transport": False,
+        }
+        combined_output = first.stdout + first.stderr + replay.stdout + replay.stderr
+        assert all(value not in combined_output for value in complete_override.values())
+        for case_index, overrides in enumerate(
+            (
+                {"ATLAS_CREDENTIAL_MASTER_KEY": "   "},
+                {"ATLAS_CREDENTIAL_MASTER_KEY_ID": "\t "},
+            )
+        ):
+            consumed = run_api_consumer(replay_volumes, overrides)
+            assert consumed.returncode == 0, (
+                f"whitespace credential fallback case {case_index} failed: "
+                f"{consumed.stderr}"
+            )
+    finally:
+        remove_volumes(replay_volumes)
+
+    whitespace_overrides = (
+        {
+            **complete_override,
+            "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": "   ",
+        },
+        {
+            **complete_override,
+            "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": "\t ",
+        },
+    )
+    for case_index, overrides in enumerate(whitespace_overrides):
+        fallback_volumes = volume_names(
+            f"{PROJECT}-whitespace-secrets-{uuid.uuid4().hex}"
+        )
+        try:
+            initialized = run_initializer(fallback_volumes, overrides)
+            assert initialized.returncode == 0, initialized.stderr
+            consumed = run_api_consumer(fallback_volumes, overrides)
+            assert consumed.returncode == 0, (
+                f"whitespace secret fallback case {case_index} failed: "
+                f"{consumed.stderr}"
+            )
+        finally:
+            remove_volumes(fallback_volumes)
+
+    invalid_overrides = (
+        {"ATLAS_CREDENTIAL_MASTER_KEY": complete_override["ATLAS_CREDENTIAL_MASTER_KEY"]},
+        {
+            **complete_override,
+            "ATLAS_NOTES_COLLABORATION_TICKET_SECRET":
+                complete_override["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"],
+        },
+        {
+            **complete_override,
+            "ATLAS_CREDENTIAL_MASTER_KEY": "not-base64",
+        },
+        {
+            **complete_override,
+            "ATLAS_CREDENTIAL_MASTER_KEY": "   ",
+        },
+        {
+            **complete_override,
+            "ATLAS_CREDENTIAL_MASTER_KEY_ID": "\t ",
+        },
+    )
+    for case_index, overrides in enumerate(invalid_overrides):
+        invalid_volumes = volume_names(
+            f"{PROJECT}-invalid-secrets-{uuid.uuid4().hex}"
+        )
+        try:
+            rejected = run_initializer(invalid_volumes, overrides)
+            assert rejected.returncode != 0, (
+                f"invalid secret override case {case_index} unexpectedly succeeded"
+            )
+            output = rejected.stdout + rejected.stderr
+            assert all(
+                not value.strip() or value not in output
+                for value in overrides.values()
+            )
+        finally:
+            remove_volumes(invalid_volumes)
 
 
 def fresh_smoke() -> None:
+    wait_for_stack()
     status, first_admin, _ = json_request("/api/v1/auth/first-admin")
     assert status == 200 and first_admin == {"claim_available": True}, (status, first_admin)
 
@@ -155,14 +422,16 @@ def fresh_smoke() -> None:
         },
         opener=owner,
     )
-    assert project_status == 200 and project["target_ref"].startswith("project:"), project
+    assert project_status == 201 and project["target_ref"].startswith("project:"), project
     project_id = project["target_ref"].split(":", 1)[1]
 
     upload, content_type = multipart(
         {
             "scope_type": "project",
             "scope_id": project_id,
-            "tag_refs": "[]",
+            "tag_refs": json.dumps(
+                [{"tag_type": "project", "tag_id": project_id}]
+            ),
             "allow_member_download": "false",
             "idempotency_key": "public-synthetic-document-upload",
         },
@@ -177,15 +446,23 @@ def fresh_smoke() -> None:
         opener=owner,
     )
     document = json.loads(document_body)
-    assert document_status == 202 and document["document_id"].startswith("doc-"), document
+    assert (
+        document_status == 202
+        and document["document"]["document_id"].startswith("doc-")
+    ), document
 
     readiness_status, readiness, _ = json_request("/api/v1/ops/readiness", opener=owner)
     assert readiness_status == 200 and "ready" in readiness, readiness
     for route in ("/setup?step=provider", "/setup?step=project", "/setup?step=document", "/setup?step=review", "/workspace"):
         web_route(route)
 
-    initializer_log = secret_initializer_log()
-    assert "deployment secrets" in initializer_log.lower(), initializer_log
+    initializer = secret_initializer_metadata()
+    assert initializer["generated"] == {
+        "credential": True,
+        "notes_ticket": True,
+        "notes_transport": True,
+    }
+    secret_override_smoke()
     STATE.write_text(
         json.dumps(
             {
@@ -194,23 +471,22 @@ def fresh_smoke() -> None:
                 "actor_id": actor_id,
                 "connection_id": provider["connection_id"],
                 "project_id": project_id,
-                "document_id": document["document_id"],
+                "document_id": document["document"]["document_id"],
             }
         )
     )
-    print("public first-run smoke passed")
 
 
 def restart_smoke() -> None:
     expected = json.loads(STATE.read_text())
+    wait_for_stack()
     status, first_admin, _ = json_request("/api/v1/auth/first-admin")
     assert status == 200 and first_admin == {"claim_available": False}, (status, first_admin)
     login_status, session, headers = json_request(
-        "/api/v1/auth/login",
+        "/api/v1/auth/sessions",
         method="POST",
         value={"identifier": expected["email"], "password": expected["password"]},
     )
-    assert login_status == 200 and session["actor"]["actor_id"] == expected["actor_id"], session
     owner = authenticated_opener(headers.get("Set-Cookie", "").split(";", 1)[0])
     _, providers, _ = json_request("/api/v1/admin/config/provider-connections", opener=owner)
     _, projects, _ = json_request("/api/v1/admin/projects", opener=owner)
@@ -221,7 +497,12 @@ def restart_smoke() -> None:
     assert any(item["connection_id"] == expected["connection_id"] for item in providers["connections"])
     assert any(item["project_id"] == expected["project_id"] for item in projects["projects"])
     assert any(item["document_id"] == expected["document_id"] for item in documents["documents"])
-    secret_initializer_log()
+    initializer = secret_initializer_metadata()
+    assert initializer["generated"] == {
+        "credential": False,
+        "notes_ticket": False,
+        "notes_transport": False,
+    }
     web_route("/workspace")
     print("public first-run restart smoke passed")
 

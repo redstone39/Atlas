@@ -135,6 +135,11 @@ it("/admin/teams can create nested teams and add a member", async () => {
         method: "POST",
       }),
     );
+    const teamCreate = vi.mocked(global.fetch).mock.calls.find(
+      ([input, init]) =>
+        String(input) === "/api/v1/admin/teams" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(teamCreate?.[1]?.body))).not.toHaveProperty("team_id");
     fireEvent.click(screen.getByRole("button", { name: /create team/i }));
     dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("Team name")).toHaveValue("");

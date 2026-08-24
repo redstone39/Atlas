@@ -85,50 +85,44 @@ evaluation environment.
 
 ### Milestone 1 — Confirm Atlas is ready
 
-Clone Atlas and create the local configuration:
+Clone Atlas. No `.env` file is required for a fresh local evaluation: when
+explicit overrides are absent, Compose creates persistent deployment secrets
+for credential encryption and Notes collaboration.
 
 ```sh
 git clone https://github.com/redstone39/atlas-public.git
 cd atlas-public
-cp infra/.env.example infra/.env
 ```
 
-Set these four values in `infra/.env`:
+The public stack does not seed a user from environment variables.
 
-```dotenv
-ATLAS_BOOTSTRAP_ADMIN_EMAIL=you@example.com
-ATLAS_BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-unique-password
-ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET=replace-with-random-value-one
-ATLAS_NOTES_COLLABORATION_TICKET_SECRET=replace-with-random-value-two
-```
-
-Generate the two Notes secrets independently with `openssl rand -base64 32`;
-they must be non-empty and different. Start the stack:
+Start the stack:
 
 ```sh
-cd infra
-docker compose -f docker-compose.p1.yml up --build -d
-docker compose -f docker-compose.p1.yml ps
+docker compose -f infra/docker-compose.p1.yml up --build -d
+docker compose -f infra/docker-compose.p1.yml ps
 curl -fsS http://127.0.0.1:8012/api/v1/ops/health
 curl -fsS http://127.0.0.1:8012/api/v1/ops/readiness
 ```
 
-Open <http://127.0.0.1:5184/login> and sign in with the bootstrap credentials.
+Open <http://127.0.0.1:5184/login>. An empty deployment redirects to
+<http://127.0.0.1:5184/setup>; claim the first System Admin there with a unique
+email and password. The claim is available only while Identity has no users.
 
 Read [Local Docker Compose deployment](docs/deployment/local.md) before restart,
 replacement, recovery, or reset. Its `down -v` path permanently deletes the
 Compose project's local application data and is only for the documented
 `resettable_development` lifecycle. [Configuration](docs/configuration.md) owns
-the exact bootstrap, secret, Provider, and runtime input rules.
+the exact first-admin, secret, Provider, and runtime input rules.
 
 ### Milestone 2 — Ask your first governed question
 
-Signing in confirms that the local application is running. The first product
-journey continues through one authorized document and its evidence:
+Claiming the first System Admin and signing in confirms that the local
+application is running. The first product journey continues through one
+authorized document and its evidence:
 
-1. Configure the credential master key, then add and test a Provider connection
-   and model route under **Models**. Provider credentials are required for model
-   answers and are not bundled.
+1. Add and test a Provider connection and model route under **Models**.
+   Provider credentials are required for model answers and are not bundled.
 2. Create a Project or Team and add a non-sensitive document with a clear fact
    that you are authorized to use for evaluation.
 3. Wait until the Document Library shows the document as **Searchable**. A

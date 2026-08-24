@@ -244,8 +244,11 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     if (
         "/ready" not in health_test
         or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test
+        or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET_FILE" not in health_test
+        or "readFileSync" not in health_test
+        or "trim()" not in health_test
     ):
-        fail("offline Notes carrier readiness healthcheck drifted")
+        fail("offline Notes carrier readiness healthcheck does not resolve nonblank overrides")
     for name, service in services.items():
         service_environment = service.get("environment", {})
         if LEGACY_PROXY_ENVIRONMENT in service_environment:

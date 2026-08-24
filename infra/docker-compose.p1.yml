@@ -221,7 +221,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:8015/ready',{headers:{'X-Atlas-Notes-Internal-Secret':process.env.ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+          "const fs=require('node:fs');const env=process.env.ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET;const secret=env&&env.trim()?env:fs.readFileSync(process.env.ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET_FILE,'utf8');fetch('http://127.0.0.1:8015/ready',{headers:{'X-Atlas-Notes-Internal-Secret':secret}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 5s
       timeout: 3s

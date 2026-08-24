@@ -83,6 +83,14 @@ describe("Notes mutation route isolation", () => {
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Late note" } });
     fireEvent.click(screen.getByRole("button", { name: "Create note" }));
     await waitFor(() => expect(notesApi.createNote).toHaveBeenCalledTimes(1));
+    expect(notesApi.createNote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: expect.stringMatching(/^note-create-/),
+      }),
+    );
+    expect(notesApi.createNote).not.toHaveBeenCalledWith(
+      expect.objectContaining({ noteId: expect.anything() }),
+    );
     view.unmount();
 
     await act(async () => creation.resolve(note));

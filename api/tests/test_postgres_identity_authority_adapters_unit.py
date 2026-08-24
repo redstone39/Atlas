@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 import inspect
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,7 +25,6 @@ from atlas_production.infrastructure.postgres_owner.identity import (
     IdentityRepository,
     IdentitySessionChangeSet,
     RevokeBrowserSessionCommand,
-    SeedLocalPilotAdminCommand,
 )
 from atlas_production.infrastructure.postgres_owner.project import (
     ActionAwareAclAuthority,
@@ -49,9 +47,6 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasTeamMembershipRow,
     AtlasTeamRow,
     AtlasUserRow,
-)
-from atlas_production.infrastructure.persistence.audit_events import (
-    AtlasAuditEventRow,
 )
 from atlas_production.infrastructure.persistence.project_governance import (
     AtlasProjectRow,
@@ -88,13 +83,7 @@ from atlas_production.modules.identity_access.records import (
     UserInviteRecord,
     UserRecord,
 )
-from atlas_production.modules.identity_access.security import (
-    agent_token_digest,
-    verify_password,
-)
-from atlas_production.modules.identity_access.local_pilot import (
-    AdminBootstrapConfigurationError,
-)
+from atlas_production.modules.identity_access.security import agent_token_digest
 from atlas_production.modules.identity_access.team_contracts import TeamAuditCommand
 from atlas_production.modules.identity_access.team_ports import TeamAccessRepository
 from atlas_production.modules.project_governance.contracts import ProjectAuditCommand
@@ -105,113 +94,6 @@ from atlas_production.modules.project_governance.records import ProjectRecord
 
 
 NOW = "2026-07-18T00:00:00+00:00"
-VALID_TEST_PASSWORD = secrets.token_urlsafe(18)
-
-
-class _SeedSession:
-    def __init__(self, existing_actor_id: str | None = None) -> None:
-        self.existing_actor_id = existing_actor_id
-        self.added: list[object] = []
-        self.executed: list[tuple[object, object]] = []
-        self.commits = 0
-        self.rollbacks = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args) -> None:
-        return None
-
-    def execute(self, statement, parameters=None):
-        self.executed.append((statement, parameters))
-
-    def scalar(self, _statement):
-        return self.existing_actor_id
-
-    def add(self, row) -> None:
-        self.added.append(row)
-
-    def commit(self) -> None:
-        self.commits += 1
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
-
-
-def test_local_pilot_seed_creates_admin_and_audit_for_empty_identity_owner() -> None:
-    session = _SeedSession()
-    password = secrets.token_urlsafe(18)
-
-    receipt = SeedLocalPilotAdminCommand(lambda: session).execute(
-        actor_id="user-admin-001",
-        display_name="Atlas Admin",
-        email=" ADMIN@EXAMPLE.TEST ",
-        password=password,
-    )
-
-    assert receipt.actor_id == "user-admin-001"
-    assert receipt.created is True
-    assert session.commits == 1
-    assert session.rollbacks == 0
-    assert len(session.executed) == 2
-    user = next(row for row in session.added if isinstance(row, AtlasUserRow))
-    audit = next(row for row in session.added if isinstance(row, AtlasAuditEventRow))
-    assert user.email == "admin@example.test"
-    assert user.system_role == "admin"
-    assert user.active is True
-    assert user.actor_type == "user"
-    assert verify_password(password, user.password_digest)
-    assert audit.event_type == "local_pilot_admin_seeded"
-    assert audit.target_ref == "user:user-admin-001"
-    assert audit.event_metadata == {
-        "email": "admin@example.test",
-        "system_role": "admin",
-    }
-
-
-def test_local_pilot_seed_replay_never_mutates_nonempty_identity_owner() -> None:
-    session = _SeedSession(existing_actor_id="some-existing-user")
-
-    receipt = SeedLocalPilotAdminCommand(lambda: session).execute(
-        actor_id="user-admin-001",
-        display_name="Atlas Admin",
-        email=None,
-        password=None,
-    )
-
-    assert receipt.created is False
-    assert session.added == []
-    assert session.commits == 0
-    assert session.rollbacks == 1
-
-
-@pytest.mark.parametrize(
-    ("email", "password", "error_code"),
-    (
-        (None, None, "identity_admin_bootstrap_configuration_required"),
-        ("", VALID_TEST_PASSWORD, "identity_admin_bootstrap_configuration_required"),
-        ("admin@example.test", "too-short", "identity_admin_bootstrap_configuration_invalid"),
-    ),
-)
-def test_local_pilot_seed_requires_valid_configuration_only_for_empty_identity(
-    email: str | None,
-    password: str | None,
-    error_code: str,
-) -> None:
-    session = _SeedSession()
-
-    with pytest.raises(AdminBootstrapConfigurationError) as exc_info:
-        SeedLocalPilotAdminCommand(lambda: session).execute(
-            actor_id="user-admin-001",
-            display_name="Atlas Admin",
-            email=email,
-            password=password,
-        )
-
-    assert exc_info.value.error_code == error_code
-    assert session.added == []
-    assert session.commits == 0
-    assert session.rollbacks == 1
 
 
 def _parameter_shape(owner: type[object], name: str) -> tuple[tuple[object, ...], ...]:
@@ -253,7 +135,7 @@ def test_route_facing_adapters_cover_every_public_port_signature(
     }
     assert contract_methods
     if contract is ProjectGovernanceRepository:
-        assert len(contract_methods) == 14
+        assert len(contract_methods) == 15
     implementation_methods = {
         name
         for name, value in implementation.__dict__.items()

@@ -70,11 +70,15 @@ it("uses the login response without repeating session or readiness requests", as
     const normalFetch = global.fetch;
     let sessionReads = 0;
     let readinessReads = 0;
+    let firstAdminReads = 0;
     global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");
       const method = init?.method ?? "GET";
       if (url.pathname === "/api/v1/auth/session" && method === "GET") sessionReads += 1;
       if (url.pathname === "/api/v1/ops/readiness" && method === "GET") readinessReads += 1;
+      if (url.pathname === "/api/v1/auth/first-admin" && method === "GET") {
+        firstAdminReads += 1;
+      }
       return normalFetch(input, init);
     });
     render(<App />);
@@ -90,6 +94,7 @@ it("uses the login response without repeating session or readiness requests", as
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(sessionReads).toBe(1);
     expect(readinessReads).toBe(0);
+    expect(firstAdminReads).toBe(1);
   });
 
 it("/login shows unauthenticated state and can sign in through local/dev adapter", async () => {
@@ -901,7 +906,7 @@ it("scoped Team candidate failure preserves current members and local Retry", as
 
     render(<App />);
     expect((await screen.findAllByText("Team Admin")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "Add member" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add member" }));
     expect(await screen.findByRole("button", { name: /^retry$/i })).toBeInTheDocument();
   });
 

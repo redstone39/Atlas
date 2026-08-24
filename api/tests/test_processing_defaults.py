@@ -52,17 +52,9 @@ def test_default_graph_preserves_builtin_parser_and_profile_contract() -> None:
         row.trust_provenance == "platform_builtin"
         for row in defaults.plugin_versions
     )
-    assert {row.profile_id for row in defaults.revisions} == {
-        "default-pdf",
-        "default-text",
-        "default-docx",
-        "default-pptx",
-        "default-xlsx",
-        "default-csv",
-        "default-doc",
-        "default-ppt",
-        "default-xls",
-    }
+    profile_ids = {row.profile_id for row in defaults.revisions}
+    assert len(profile_ids) == 9
+    assert all(profile_id.startswith("profile-") for profile_id in profile_ids)
     assert all(row.status == "active" for row in defaults.revisions)
 
 

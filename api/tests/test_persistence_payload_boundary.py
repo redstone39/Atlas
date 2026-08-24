@@ -24,6 +24,7 @@ from atlas_production.infrastructure.persistence.processing_pipeline import (
 )
 from atlas_production.infrastructure.persistence.payload_policy import (
     JSONB_PAYLOAD_REGISTRY,
+    GENERAL_METADATA_MAX_BYTES,
     PersistedPayloadPolicyError,
     serialize_typed_dataclass,
     validate_typed_payload,
@@ -451,12 +452,18 @@ def test_notes_jsonb_payload_policies_match_owner_boundaries() -> None:
     assert {
         key: JSONB_PAYLOAD_REGISTRY[key]
         for key in (
+            "atlas_note_create_receipts.canonical_response",
             "atlas_note_revisions.change_set",
             "atlas_note_savepoints.aggregate_change_set",
             "atlas_note_savepoints.canonical_body",
             "atlas_note_savepoints.contributor_actor_ids",
         )
     } == {
+        "atlas_note_create_receipts.canonical_response": (
+            "idempotency_response",
+            GENERAL_METADATA_MAX_BYTES,
+            "note_create_replay_v1",
+        ),
         "atlas_note_revisions.change_set": (
             "notes_change_set",
             notes_owner_module.MAX_JSON_BYTES,
