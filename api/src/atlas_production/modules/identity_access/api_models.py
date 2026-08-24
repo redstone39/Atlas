@@ -50,6 +50,25 @@ class LoginRequest(StrictIdentityModel):
     identifier: str = Field(min_length=1, max_length=320)
     password: str
 
+class FirstAdminStatus(StrictIdentityModel):
+    claim_available: bool
+
+
+class FirstAdminClaimRequest(StrictIdentityModel):
+    display_name: str = Field(min_length=1, max_length=200)
+    email: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=12)
+
+    @field_validator("display_name", "email")
+    @classmethod
+    def reject_blank_identity_fields(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("first administrator identity field must not be blank")
+        return normalized
+
+
+
 
 class DirectoryConnectionConfig(StrictIdentityModel):
     connection_id: str = Field(min_length=1, max_length=200)
@@ -249,14 +268,6 @@ class DirectoryProfileSummary(StrictIdentityModel):
     status: Literal["current", "stale", "missing", "disabled"]
     last_refreshed_at: str
 
-
-class AccountCreateRequest(BaseModel):
-    actor_id: str
-    display_name: str
-    email: str
-    system_role: Literal["user", "admin", "operator"]
-    initial_password: str
-    idempotency_key: str
 
 
 class UserInviteCreateRequest(BaseModel):

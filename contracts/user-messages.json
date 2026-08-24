@@ -394,7 +394,10 @@
     "identity.system_admin_access_is_updated": {
       "params": {}
     },
-    "identity.local_pilot_admin_was_seeded": {
+    "identity.first_admin_has_already_been_claimed": {
+      "params": {}
+    },
+    "identity.first_admin_was_claimed": {
       "params": {}
     },
     "identity.user_has_been_reactivated": {

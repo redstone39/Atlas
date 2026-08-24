@@ -19,8 +19,12 @@ REQUIRED = {
     "ATLAS_SMB_GENERATION": "7",
     "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
     "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
-    "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": "audit-notes-transport-secret",
-    "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": "audit-distinct-ticket-sealing-secret",
+}
+SECRET_OVERRIDE_NAMES = {
+    "ATLAS_CREDENTIAL_MASTER_KEY",
+    "ATLAS_CREDENTIAL_MASTER_KEY_ID",
+    "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET",
+    "ATLAS_NOTES_COLLABORATION_TICKET_SECRET",
 }
 OPERATOR_PROXY_INPUTS = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
 LOWERCASE_PROXY_INPUTS = {"http_proxy", "https_proxy", "no_proxy"}
@@ -58,7 +62,7 @@ def fail(message: str) -> None:
 
 
 environment = dict(os.environ)
-for name in ALL_PROXY_INPUTS:
+for name in ALL_PROXY_INPUTS | SECRET_OVERRIDE_NAMES:
     environment.pop(name, None)
 environment.update(REQUIRED)
 resolved = resolve(environment)
@@ -70,31 +74,96 @@ if model.get("name") != "atlas-production-p1":
 services = model["services"]
 api = services.get("api", {})
 carrier = services.get("notes-collaboration", {})
+initializer = services.get("deployment-secret-init", {})
 if not carrier:
     fail("Notes collaboration carrier service is missing")
+if not initializer:
+    fail("deployment secret initializer service is missing")
+if initializer.get("restart") not in (None, "no"):
+    fail("deployment secret initializer is restartable")
+if not initializer.get("read_only"):
+    fail("deployment secret initializer root filesystem is writable")
+if initializer.get("security_opt") != ["no-new-privileges:true"]:
+    fail("deployment secret initializer lacks no-new-privileges")
+
 api_environment = api.get("environment", {})
 carrier_environment = carrier.get("environment", {})
-transport_consumers = {
-    name
-    for name, service in services.items()
-    if "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"
-    in service.get("environment", {})
+for name in SECRET_OVERRIDE_NAMES:
+    if initializer.get("environment", {}).get(name) != "":
+        fail(f"no-env fallback did not resolve for {name}")
+
+direct_environment_consumers = {
+    name: {
+        service_name
+        for service_name, service in services.items()
+        if name in service.get("environment", {})
+    }
+    for name in SECRET_OVERRIDE_NAMES
 }
-if transport_consumers != {"api", "notes-collaboration"}:
-    fail("Notes collaboration transport secret reachability drifted")
-ticket_secret_consumers = {
-    name
-    for name, service in services.items()
-    if "ATLAS_NOTES_COLLABORATION_TICKET_SECRET"
-    in service.get("environment", {})
+if direct_environment_consumers["ATLAS_CREDENTIAL_MASTER_KEY"] != {
+    "deployment-secret-init",
+    "api",
+    "celery-processing",
+}:
+    fail("credential key environment reachability drifted")
+if direct_environment_consumers[
+    "ATLAS_CREDENTIAL_MASTER_KEY_ID"
+] != direct_environment_consumers["ATLAS_CREDENTIAL_MASTER_KEY"]:
+    fail("credential key pair environment reachability differs")
+if direct_environment_consumers["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"] != {
+    "deployment-secret-init",
+    "api",
+    "notes-collaboration",
+}:
+    fail("Notes transport environment reachability drifted")
+if direct_environment_consumers["ATLAS_NOTES_COLLABORATION_TICKET_SECRET"] != {
+    "deployment-secret-init",
+    "api",
+}:
+    fail("Notes ticket environment reachability drifted")
+
+secret_volume_consumers = {
+    volume: {
+        name
+        for name, service in services.items()
+        if any(
+            mount.get("source") == volume
+            for mount in service.get("volumes", [])
+        )
+    }
+    for volume in (
+        "atlas-production-credential-secrets",
+        "atlas-production-notes-transport-secret",
+        "atlas-production-notes-ticket-secret",
+    )
 }
-if ticket_secret_consumers != {"api"}:
-    fail("API-only Notes ticket-sealing secret reachability drifted")
-if (
-    api_environment["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"]
-    == api_environment["ATLAS_NOTES_COLLABORATION_TICKET_SECRET"]
-):
-    fail("Notes transport and ticket-sealing secrets are not distinct")
+if secret_volume_consumers["atlas-production-credential-secrets"] != {
+    "deployment-secret-init",
+    "api",
+    "celery-processing",
+}:
+    fail("credential projection reachability drifted")
+if secret_volume_consumers["atlas-production-notes-transport-secret"] != {
+    "deployment-secret-init",
+    "api",
+    "notes-collaboration",
+}:
+    fail("Notes transport projection reachability drifted")
+if secret_volume_consumers["atlas-production-notes-ticket-secret"] != {
+    "deployment-secret-init",
+    "api",
+}:
+    fail("Notes ticket projection reachability drifted")
+for volume, consumers in secret_volume_consumers.items():
+    for name in consumers - {"deployment-secret-init"}:
+        mount = next(
+            item
+            for item in services[name].get("volumes", [])
+            if item.get("source") == volume
+        )
+        if not mount.get("read_only", False):
+            fail(f"runtime secret projection {volume} is writable by {name}")
+
 if api_environment.get("ATLAS_NOTES_COLLABORATION_INTERNAL_URL") != (
     "http://notes-collaboration:8015"
 ):
@@ -105,8 +174,6 @@ if carrier_environment.get("ATLAS_NOTES_COLLABORATION_INTERNAL_URL") != (
     fail("Notes carrier does not address the API authority")
 if "ATLAS_NOTES_COLLABORATION_PUBLIC_URL" in carrier_environment:
     fail("public WebSocket configuration leaked into the carrier")
-if carrier.get("volumes"):
-    fail("Notes carrier has a durable volume")
 if not carrier.get("read_only"):
     fail("Notes carrier root filesystem is writable")
 if carrier.get("depends_on", {}).get("api", {}).get("condition") != (
@@ -124,8 +191,43 @@ if (
 ):
     fail("Notes carrier port mapping drifted")
 health_test = " ".join(carrier.get("healthcheck", {}).get("test", []))
-if "/ready" not in health_test or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test:
+if (
+    "/ready" not in health_test
+    or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test
+):
     fail("Notes carrier healthcheck does not exercise authenticated readiness")
+
+secret_gated = {
+    name
+    for name, service in services.items()
+    if service.get("depends_on", {})
+    .get("deployment-secret-init", {})
+    .get("condition")
+    == "service_completed_successfully"
+}
+if secret_gated != {"api", "celery-processing", "notes-collaboration"}:
+    fail("secret consumers are not gated on initializer success")
+
+override_environment = dict(environment)
+override_environment.update(
+    {
+        "ATLAS_CREDENTIAL_MASTER_KEY": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+        "ATLAS_CREDENTIAL_MASTER_KEY_ID": "audit-key-id",
+        "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": "audit-transport-override",
+        "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": "audit-ticket-override",
+    }
+)
+override_resolved = resolve(override_environment)
+if override_resolved.returncode != 0:
+    fail("Compose could not resolve complete secret overrides")
+override_services = json.loads(override_resolved.stdout)["services"]
+for name, consumers in direct_environment_consumers.items():
+    for service_name in consumers:
+        if (
+            override_services[service_name]["environment"].get(name)
+            != override_environment[name]
+        ):
+            fail(f"complete override did not reach {service_name} for {name}")
 
 for name, service in services.items():
     service_environment = service.get("environment", {})

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Callable
 from uuid import uuid4
@@ -71,13 +72,7 @@ from atlas_production.modules.identity_access.records import (
     UserInviteRecord,
     UserRecord,
 )
-from atlas_production.modules.identity_access.local_pilot import (
-    AdminBootstrapConfigurationError,
-)
-from atlas_production.modules.identity_access.security import (
-    agent_token_digest,
-    password_digest,
-)
+from atlas_production.modules.identity_access.security import agent_token_digest
 from atlas_production.shared.public import AuditEventRecord, utc_now_iso
 
 
@@ -87,6 +82,7 @@ _PROJECT_SCOPE_ROLES = {
     "uploader": "contributor",
     "admin": "admin",
 }
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +113,6 @@ class IdentityCreateReceipt:
 
 class IdentityCreateReplayConflict(RuntimeError):
     pass
-
-
 @dataclass(frozen=True, slots=True)
 class InviteTransition:
     record: UserInviteRecord
@@ -252,36 +246,30 @@ class IdentityAuthorizationConflict(RuntimeError):
     pass
 
 
-@dataclass(frozen=True, slots=True)
-class LocalPilotAdminSeedReceipt:
-    actor_id: str
-    created: bool
+class FirstAdminClaimUnavailable(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
-class SeedLocalPilotAdminCommand:
-    """Create the fixed local-pilot admin only for an empty Identity owner."""
+class ClaimFirstAdminCommand:
+    """Atomically establish the only first administrator, session, and audit."""
 
     session_factory: SessionFactory
+    id_allocator: Callable[[], str] = lambda: uuid4().hex
+    token_factory: Callable[[], str] = lambda: token_urlsafe(24)
 
     def execute(
         self,
         *,
-        actor_id: str,
-        display_name: str,
-        email: str | None,
-        password: str | None,
-    ) -> LocalPilotAdminSeedReceipt:
-        if not actor_id or not display_name:
-            raise ValueError("local-pilot admin identity must be non-empty")
-
+        prepare: Callable[[str], tuple[UserRecord, AuditEventRecord]],
+    ) -> tuple[UserRecord, str]:
         session = self.session_factory()
         with session:
             try:
                 acquire_owner_locks(
                     session,
-                    domain_keys=("identity:local-pilot-bootstrap",),
-                    identity_keys=(identity_actor_owner_key(actor_id),),
+                    domain_keys=("identity:first-admin-claim",),
+                    identity_keys=(),
                 )
                 existing_actor_id = session.scalar(
                     select(AtlasUserRow.actor_id)
@@ -290,52 +278,59 @@ class SeedLocalPilotAdminCommand:
                     .with_for_update()
                 )
                 if existing_actor_id is not None:
-                    session.rollback()
-                    return LocalPilotAdminSeedReceipt(
-                        actor_id=actor_id,
-                        created=False,
+                    raise FirstAdminClaimUnavailable(
+                        "the first administrator has already been claimed"
                     )
-
-                normalized_email = canonical_identifier(email or "")
-                if not normalized_email or not password:
-                    raise AdminBootstrapConfigurationError(
-                        "identity_admin_bootstrap_configuration_required"
+                actor_id = f"user-{self.id_allocator()}"
+                user, audit = prepare(actor_id)
+                if (
+                    user.actor_id != actor_id
+                    or not user.display_name
+                    or not user.email
+                    or user.system_role != "admin"
+                    or user.actor_type != "user"
+                    or not user.active
+                    or not user.password_digest
+                    or canonical_identifier(user.email) != user.email
+                    or audit.event_type != "first_admin_claimed"
+                    or audit.actor_id is not None
+                    or audit.target_ref != f"user:{actor_id}"
+                    or audit.project_id is not None
+                    or audit.message_code != "identity.first_admin_was_claimed"
+                    or audit.metadata
+                    != {
+                        "email": user.email,
+                        "system_role": "admin",
+                    }
+                ):
+                    raise ValueError("first administrator claim facts are invalid")
+                token = self.token_factory()
+                if not token:
+                    raise IdentityCurrentnessConflict(
+                        "browser session token was empty"
                     )
-                if len(password) < 12:
-                    raise AdminBootstrapConfigurationError(
-                        "identity_admin_bootstrap_configuration_invalid"
+                acquire_owner_locks(
+                    session,
+                    domain_keys=(),
+                    identity_keys=(
+                        identity_actor_owner_key(actor_id),
+                        f"identity:session:{sha256(token.encode('utf-8')).hexdigest()}",
+                    ),
+                )
+                if session.get(AtlasSessionRow, token) is not None:
+                    raise IdentityCurrentnessConflict(
+                        "browser session token was not unique"
                     )
-
-                created_at = utc_now_iso()
+                session.add(_user_row(user))
                 session.add(
-                    AtlasUserRow(
+                    AtlasSessionRow(
+                        session_token=token,
                         actor_id=actor_id,
-                        display_name=display_name,
-                        email=normalized_email,
-                        system_role="admin",
-                        password_digest=password_digest(password),
-                        active=True,
-                        actor_type="user",
-                        created_at=created_at,
                     )
                 )
-                AuditEventWriter(session).append(
-                    AuditEventRecord(
-                        event_id=f"audit-{uuid4().hex}",
-                        event_type="local_pilot_admin_seeded",
-                        actor_id=None,
-                        target_ref=f"user:{actor_id}",
-                        project_id=None,
-                        message_code="identity.local_pilot_admin_was_seeded",
-                        metadata={
-                            "email": normalized_email,
-                            "system_role": "admin",
-                        },
-                        created_at=created_at,
-                    )
-                )
+                AuditEventWriter(session).append(audit)
                 session.commit()
-                return LocalPilotAdminSeedReceipt(actor_id=actor_id, created=True)
+                return user, token
             except Exception:
                 session.rollback()
                 raise
@@ -505,6 +500,7 @@ class IdentityRepository:
                     users=change_set.users,
                     authorization_scope_type=change_set.authorization_scope_type,
                     authorization_scope_id=change_set.authorization_scope_id,
+                    authorization_actor_id=change_set.authorization_actor_id,
                     identity_lock_keys=(
                         receipt_lock,
                         *identity_lock_keys,
@@ -1618,7 +1614,9 @@ class IdentityRepository:
 
 
 __all__ = [
+    "ClaimFirstAdminCommand",
     "ExpireInviteCommand",
+    "FirstAdminClaimUnavailable",
     "IdentityCurrentnessConflict",
     "IdentityAuthorizationConflict",
     "IdentityInvariantViolation",
@@ -1631,7 +1629,5 @@ __all__ = [
     "IdentitySessionChangeSet",
     "IssueBrowserSessionCommand",
     "InviteTransition",
-    "LocalPilotAdminSeedReceipt",
     "RevokeBrowserSessionCommand",
-    "SeedLocalPilotAdminCommand",
 ]

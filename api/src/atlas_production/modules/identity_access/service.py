@@ -10,6 +10,8 @@ from atlas_production.shared.public import (
     AdminActionResult,
 )
 from .api_models import (
+    FirstAdminClaimRequest,
+    FirstAdminStatus,
     InviteAcceptRequest,
     InviteAcceptResult,
     LocalPilotInviteAcceptance,
@@ -82,6 +84,23 @@ class IdentityAccessService:
                 system_role=None,
             )
         return self.repository.session_state(actor)
+    def first_admin_status(self) -> FirstAdminStatus:
+        return FirstAdminStatus(claim_available=not self.repository.list_users())
+
+    def claim_first_admin(
+        self,
+        payload: FirstAdminClaimRequest,
+    ) -> LoginOutcome:
+        user, token = self.repository.claim_first_admin(
+            display_name=payload.display_name,
+            email=canonical_identifier(payload.email),
+            password_digest=password_digest(payload.password),
+        )
+        return LoginOutcome(
+            session=self.repository.session_state(user),
+            raw_session_token=token,
+        )
+
 
     def login(self, payload: LoginRequest) -> LoginOutcome:
         identifier = canonical_identifier(payload.identifier)

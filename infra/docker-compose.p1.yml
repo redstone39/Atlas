@@ -1,3 +1,5 @@
+name: atlas
+
 x-atlas-worker: &atlas-worker
   build:
     context: ..
@@ -48,6 +50,31 @@ services:
       timeout: 3s
       retries: 24
 
+  deployment-secret-init:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+      target: api
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
+      ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:-}
+      ATLAS_NOTES_COLLABORATION_TICKET_SECRET: ${ATLAS_NOTES_COLLABORATION_TICKET_SECRET:-}
+    volumes:
+      - atlas-production-credential-secrets:/run/atlas/secrets/credentials
+      - atlas-production-notes-transport-secret:/run/atlas/secrets/notes-transport
+      - atlas-production-notes-ticket-secret:/run/atlas/secrets/notes-ticket
+    command:
+      - /app/.venv/bin/python
+      - -m
+      - atlas_production.infrastructure.deployment_secret_init
+
   artifact-storage-init:
     build:
       context: ..
@@ -61,8 +88,6 @@ services:
       - no-new-privileges:true
     environment:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
-      ATLAS_BOOTSTRAP_ADMIN_EMAIL: ${ATLAS_BOOTSTRAP_ADMIN_EMAIL:-}
-      ATLAS_BOOTSTRAP_ADMIN_PASSWORD: ${ATLAS_BOOTSTRAP_ADMIN_PASSWORD:-}
       ATLAS_ARTIFACT_TARGET_CONFIG: /run/atlas/artifact-storage/targets.d
       ATLAS_ARTIFACT_ALLOWED_PARENTS: /srv/atlas-artifacts
     depends_on:
@@ -111,15 +136,18 @@ services:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
       ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
       ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
-      ATLAS_CREDENTIAL_MASTER_KEYRING: ${ATLAS_CREDENTIAL_MASTER_KEYRING:-}
+      ATLAS_CREDENTIAL_MASTER_KEY_FILE: /run/atlas/secrets/credentials/active_key
+      ATLAS_CREDENTIAL_MASTER_KEY_ID_FILE: /run/atlas/secrets/credentials/key_id
       ATLAS_PLUGIN_RUNNER_URL: http://plugin-runner:8013
       ATLAS_OFFICE_RENDERER_URL: http://office-renderer:8014
       ATLAS_REDIS_URL: redis://redis:6379/0
       ATLAS_QDRANT_URL: http://qdrant:6333
       ATLAS_PROCESSING_PLUGIN_ARTIFACT_ROOT: /var/lib/atlas/plugins
       ATLAS_NOTES_COLLABORATION_INTERNAL_URL: http://notes-collaboration:8015
-      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:?set the Notes collaboration transport secret}
-      ATLAS_NOTES_COLLABORATION_TICKET_SECRET: ${ATLAS_NOTES_COLLABORATION_TICKET_SECRET:?set a distinct API-only Notes ticket-sealing secret}
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:-}
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET_FILE: /run/atlas/secrets/notes-transport/secret
+      ATLAS_NOTES_COLLABORATION_TICKET_SECRET: ${ATLAS_NOTES_COLLABORATION_TICKET_SECRET:-}
+      ATLAS_NOTES_COLLABORATION_TICKET_SECRET_FILE: /run/atlas/secrets/notes-ticket/secret
       ATLAS_NOTES_COLLABORATION_PUBLIC_URL: ${ATLAS_NOTES_COLLABORATION_PUBLIC_URL:-ws://127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}/collaboration}
       ATLAS_PLUGIN_TRUSTED_KEYS_JSON: ${ATLAS_PLUGIN_TRUSTED_KEYS_JSON:-}
       ATLAS_ALLOW_UNSIGNED_PLUGINS: "false"
@@ -136,6 +164,8 @@ services:
     ports:
       - "127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}:8002"
     depends_on:
+      deployment-secret-init:
+        condition: service_completed_successfully
       artifact-storage-init:
         condition: service_completed_successfully
       embedding-model-init:
@@ -145,6 +175,9 @@ services:
       - atlas-production-artifacts:/srv/atlas-artifacts
       - atlas-production-artifact-config:/run/atlas/artifact-storage:ro
       - atlas-production-fastembed:/var/lib/atlas-fastembed
+      - atlas-production-credential-secrets:/run/atlas/secrets/credentials:ro
+      - atlas-production-notes-transport-secret:/run/atlas/secrets/notes-transport:ro
+      - atlas-production-notes-ticket-secret:/run/atlas/secrets/notes-ticket:ro
     healthcheck:
       test:
         [
@@ -169,14 +202,19 @@ services:
       - no-new-privileges:true
     environment:
       ATLAS_NOTES_COLLABORATION_INTERNAL_URL: http://api:8002
-      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:?set the Notes collaboration transport secret}
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET: ${ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET:-}
+      ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET_FILE: /run/atlas/secrets/notes-transport/secret
       ATLAS_NOTES_COLLABORATION_HOST: 0.0.0.0
       ATLAS_NOTES_COLLABORATION_PORT: "8015"
     ports:
       - "127.0.0.1:${ATLAS_PRODUCTION_COLLABORATION_PORT:-8015}:8015"
     depends_on:
+      deployment-secret-init:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
+    volumes:
+      - atlas-production-notes-transport-secret:/run/atlas/secrets/notes-transport:ro
     healthcheck:
       test:
         [
@@ -247,7 +285,7 @@ services:
       redis:
         condition: service_healthy
     command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "worker", "-Q", "atlas.dispatch", "--loglevel=INFO", "--concurrency=1"]
-    mem_limit: 512m
+    mem_limit: 256m
 
   celery-processing:
     <<: *atlas-worker
@@ -255,7 +293,8 @@ services:
       ATLAS_PRODUCTION_DATABASE_URL: postgresql+psycopg://atlas:atlas@postgres:5432/atlas_production
       ATLAS_CREDENTIAL_MASTER_KEY: ${ATLAS_CREDENTIAL_MASTER_KEY:-}
       ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
-      ATLAS_CREDENTIAL_MASTER_KEYRING: ${ATLAS_CREDENTIAL_MASTER_KEYRING:-}
+      ATLAS_CREDENTIAL_MASTER_KEY_FILE: /run/atlas/secrets/credentials/active_key
+      ATLAS_CREDENTIAL_MASTER_KEY_ID_FILE: /run/atlas/secrets/credentials/key_id
       ATLAS_REDIS_URL: redis://redis:6379/0
       ATLAS_PDF_MAX_PAGES: ${ATLAS_PDF_MAX_PAGES:-3000}
       ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS: ${ATLAS_DOCLING_LAYOUT_TIMEOUT_SECONDS-60}
@@ -275,7 +314,10 @@ services:
       - atlas-production-artifacts:/srv/atlas-artifacts
       - atlas-production-artifact-config:/run/atlas/artifact-storage:ro
       - atlas-production-fastembed:/var/lib/atlas-fastembed
+      - atlas-production-credential-secrets:/run/atlas/secrets/credentials:ro
     depends_on:
+      deployment-secret-init:
+        condition: service_completed_successfully
       artifact-storage-init:
         condition: service_completed_successfully
       embedding-model-init:
@@ -342,7 +384,7 @@ services:
       redis:
         condition: service_healthy
     command: ["/app/.venv/bin/celery", "-A", "atlas_production.async_runtime.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
-    mem_limit: 512m
+    mem_limit: 256m
 
   web:
     build:
@@ -375,3 +417,6 @@ volumes:
   atlas-production-plugin-packages:
   atlas-production-artifacts:
   atlas-production-artifact-config:
+  atlas-production-credential-secrets:
+  atlas-production-notes-transport-secret:
+  atlas-production-notes-ticket-secret:

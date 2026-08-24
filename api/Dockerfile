@@ -61,8 +61,10 @@ ENV ATLAS_FASTEMBED_CACHE=/var/lib/atlas-fastembed \
 
 COPY --from=tokenizer-assets /var/lib/atlas-tiktoken /var/lib/atlas-tiktoken
 COPY api/src ./src
+COPY --chmod=755 infra/docker-entrypoint.resolve-secrets /usr/local/bin/docker-entrypoint.resolve-secrets
 COPY contracts /contracts
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.resolve-secrets"]
 EXPOSE 8002
 
 CMD ["/app/.venv/bin/uvicorn", "atlas_production.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8002"]

@@ -72,7 +72,7 @@ SAFE_DIRECT_PAYLOAD_MARKER = re.compile(
 )
 SECRET_ASSIGNMENT = re.compile(
     rb"""(?ix)
-    \b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|credential)
+    (?<![-/])\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|credential)
     \b\s*(?:=|:)\s*(?:[rubf]*["']([^"'\r\n]{8,})["']|((?=[A-Za-z0-9_+/=-]{8,}\s*(?:[,;}\]\r\n]|$))(?=[A-Za-z0-9_+/=-]*(?:[-+/=]|\d))[A-Za-z0-9_+/=-]{8,}))
     """
 )

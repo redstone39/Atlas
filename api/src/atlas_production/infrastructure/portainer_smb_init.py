@@ -11,17 +11,7 @@ from atlas_production.infrastructure.composition import (
 from atlas_production.infrastructure.postgres_owner.processing_defaults import (
     SeedProcessingRegistryDefaultsCommand,
 )
-from atlas_production.infrastructure.postgres_owner.identity import (
-    SeedLocalPilotAdminCommand,
-)
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
-from atlas_production.modules.identity_access.local_pilot import (
-    ADMIN_ACTOR_ID,
-    ADMIN_DISPLAY_NAME,
-    BOOTSTRAP_ADMIN_EMAIL_ENV,
-    BOOTSTRAP_ADMIN_PASSWORD_ENV,
-    AdminBootstrapConfigurationError,
-)
 
 from atlas_production.modules.artifact_storage.errors import ArtifactStorageError
 from atlas_production.modules.artifact_storage.records import (
@@ -148,12 +138,6 @@ def main(environment: Mapping[str, str] | None = None) -> int:
         processing_receipt = SeedProcessingRegistryDefaultsCommand(
             runtime.session_factory
         ).execute()
-        SeedLocalPilotAdminCommand(runtime.session_factory).execute(
-            actor_id=ADMIN_ACTOR_ID,
-            display_name=ADMIN_DISPLAY_NAME,
-            email=env.get(BOOTSTRAP_ADMIN_EMAIL_ENV),
-            password=env.get(BOOTSTRAP_ADMIN_PASSWORD_ENV),
-        )
         receipt = initialize_portainer_smb(
             composition,
             generation=generation,
@@ -161,9 +145,6 @@ def main(environment: Mapping[str, str] | None = None) -> int:
             risk_acknowledgement=risk_acknowledgement,
         )
     except PortainerSmbInitializationError as exc:
-        _emit({"status": "rejected", "error_code": exc.error_code})
-        return 1
-    except AdminBootstrapConfigurationError as exc:
         _emit({"status": "rejected", "error_code": exc.error_code})
         return 1
     except ArtifactStorageError as exc:

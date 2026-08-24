@@ -21,7 +21,9 @@ from atlas_production.infrastructure.postgres_audit_adapter import (
     persist_rejection_audit,
 )
 from atlas_production.infrastructure.postgres_owner.identity import (
+    ClaimFirstAdminCommand,
     ExpireInviteCommand,
+    FirstAdminClaimUnavailable,
     IdentityAuthorizationConflict,
     IdentityCreatePrepared,
     IdentityCreateSecret,
@@ -143,13 +145,18 @@ class PostgresIdentityAccessRepository(
         request_fingerprint: Callable[[bytes], str] | None = None,
     ) -> None:
         self.session_factory = session_factory
+        allocator = id_allocator or (lambda: uuid4().hex)
         self.owner = IdentityRepository(
             session_factory,
-            id_allocator=id_allocator or (lambda: uuid4().hex),
+            id_allocator=allocator,
         )
         self.team_owner = TeamRepository(session_factory)
         self.project_owner = ProjectAclRepository(session_factory)
         self.acl_authority = acl_authority or ActionAwareAclAuthority(session_factory)
+        self.claim_first_admin_command = ClaimFirstAdminCommand(
+            session_factory,
+            id_allocator=allocator,
+        )
         self.request_fingerprint = request_fingerprint or (
             lambda payload: AesGcmEnvelopeCipher.from_environment().keyed_fingerprint(
                 domain="identity-directory-create",
@@ -720,6 +727,49 @@ class PostgresIdentityAccessRepository(
         token = token_urlsafe(24)
         buffer.sessions.append((token, actor_id))
         return token
+
+    def claim_first_admin(
+        self,
+        *,
+        display_name: str,
+        email: str,
+        password_digest: str,
+    ) -> tuple[UserRecord, str]:
+        def prepare(actor_id: str) -> tuple[UserRecord, AuditEventRecord]:
+            user = UserRecord(
+                actor_id=actor_id,
+                display_name=display_name,
+                email=email,
+                system_role="admin",
+                password_digest=password_digest,
+                active=True,
+                actor_type="user",
+                created_at=utc_now_iso(),
+            )
+            event = build_audit_event(
+                event_type="first_admin_claimed",
+                actor_id=None,
+                target_ref=f"user:{actor_id}",
+                project_id=None,
+                message_code="identity.first_admin_was_claimed",
+                metadata={
+                    "email": email,
+                    "system_role": "admin",
+                },
+                message_params={},
+                scope_type=None,
+                scope_id=None,
+            )
+            return user, event
+
+        try:
+            return self.claim_first_admin_command.execute(prepare=prepare)
+        except FirstAdminClaimUnavailable as exc:
+            raise IdentityAccessError(
+                error_code="first_admin_claim_unavailable",
+                message_code="identity.first_admin_has_already_been_claimed",
+                status_code=409,
+            ) from exc
 
     def issue_session(self, actor_id: str) -> str:
         return self.issue_session_command.execute(actor_id)

@@ -7,6 +7,9 @@ x-atlas-embedding-model-image: &atlas-embedding-model-image
   platform: ${ATLAS_OFFLINE_PLATFORM:?set offline target platform}
 
 services:
+  deployment-secret-init:
+    <<: *atlas-api-image
+
   artifact-storage-init:
     <<: *atlas-api-image
 

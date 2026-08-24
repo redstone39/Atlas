@@ -23,8 +23,12 @@ REQUIRED = {
     "ATLAS_SMB_GENERATION": "7",
     "ATLAS_ARTIFACT_SWITCH_MODE": "operator_accepted_unverified",
     "ATLAS_ARTIFACT_SWITCH_ACK": "I_ACCEPT_UNVERIFIED_BLOB_MAPPING_AND_CONTENT",
-    "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET": "audit-notes-transport-secret",
-    "ATLAS_NOTES_COLLABORATION_TICKET_SECRET": "audit-distinct-ticket-sealing-secret",
+}
+SECRET_OVERRIDE_NAMES = {
+    "ATLAS_CREDENTIAL_MASTER_KEY",
+    "ATLAS_CREDENTIAL_MASTER_KEY_ID",
+    "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET",
+    "ATLAS_NOTES_COLLABORATION_TICKET_SECRET",
 }
 AUDIT_PLATFORM = "linux/arm64"
 AUDIT_PLATFORM_TAG = "linux-arm64"
@@ -77,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
 
     output = Path(directory) / "bundle"
     builder_environment = dict(os.environ)
-    for name in ALL_PROXY_INPUTS:
+    for name in ALL_PROXY_INPUTS | SECRET_OVERRIDE_NAMES:
         builder_environment.pop(name, None)
     generated = subprocess.run(
         [
@@ -133,49 +137,114 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     if resolved.returncode != 0:
         fail("generated image-only Compose did not resolve")
     model = json.loads(resolved.stdout)
-    if model.get("name") != "infra":
-        fail("offline Compose project identity is not infra")
+    if model.get("name") != "atlas":
+        fail("offline Compose project identity is not atlas")
     services = model["services"]
     api = services.get("api", {})
     carrier = services.get("notes-collaboration", {})
+    initializer = services.get("deployment-secret-init", {})
     if not carrier:
         fail("generated Compose omits the Notes collaboration carrier")
-    api_environment = api.get("environment", {})
-    carrier_environment = carrier.get("environment", {})
-    transport_consumers = {
-        name
-        for name, service in services.items()
-        if "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"
-        in service.get("environment", {})
+    if not initializer or initializer.get("restart") not in (None, "no"):
+        fail("generated Compose omits the one-shot secret initializer")
+    for name in SECRET_OVERRIDE_NAMES:
+        if initializer.get("environment", {}).get(name) != "":
+            fail(f"offline no-env fallback did not resolve for {name}")
+    direct_consumers = {
+        name: {
+            service_name
+            for service_name, service in services.items()
+            if name in service.get("environment", {})
+        }
+        for name in SECRET_OVERRIDE_NAMES
     }
-    if transport_consumers != {"api", "notes-collaboration"}:
-        fail("offline Notes transport secret reachability drifted")
-    ticket_consumers = {
-        name
-        for name, service in services.items()
-        if "ATLAS_NOTES_COLLABORATION_TICKET_SECRET"
-        in service.get("environment", {})
+    if direct_consumers["ATLAS_CREDENTIAL_MASTER_KEY"] != {
+        "deployment-secret-init",
+        "api",
+        "celery-processing",
+    }:
+        fail("offline credential reachability drifted")
+    if direct_consumers["ATLAS_CREDENTIAL_MASTER_KEY_ID"] != direct_consumers[
+        "ATLAS_CREDENTIAL_MASTER_KEY"
+    ]:
+        fail("offline credential pair reachability differs")
+    if direct_consumers["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"] != {
+        "deployment-secret-init",
+        "api",
+        "notes-collaboration",
+    }:
+        fail("offline Notes transport reachability drifted")
+    if direct_consumers["ATLAS_NOTES_COLLABORATION_TICKET_SECRET"] != {
+        "deployment-secret-init",
+        "api",
+    }:
+        fail("offline API-only ticket reachability drifted")
+    secret_volume_consumers = {
+        volume: {
+            name
+            for name, service in services.items()
+            if any(
+                mount.get("source") == volume
+                for mount in service.get("volumes", [])
+            )
+        }
+        for volume in (
+            "atlas-production-credential-secrets",
+            "atlas-production-notes-transport-secret",
+            "atlas-production-notes-ticket-secret",
+        )
     }
-    if ticket_consumers != {"api"}:
-        fail("offline API-only ticket secret reachability drifted")
-    if (
-        api_environment["ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET"]
-        == api_environment["ATLAS_NOTES_COLLABORATION_TICKET_SECRET"]
-    ):
-        fail("offline Notes secrets are not distinct")
-    if carrier.get("volumes"):
-        fail("offline Notes carrier has a durable volume")
+    expected_volume_consumers = {
+        "atlas-production-credential-secrets": {
+            "deployment-secret-init",
+            "api",
+            "celery-processing",
+        },
+        "atlas-production-notes-transport-secret": {
+            "deployment-secret-init",
+            "api",
+            "notes-collaboration",
+        },
+        "atlas-production-notes-ticket-secret": {
+            "deployment-secret-init",
+            "api",
+        },
+    }
+    if secret_volume_consumers != expected_volume_consumers:
+        fail("offline secret projection reachability drifted")
+    for volume, consumers in secret_volume_consumers.items():
+        for service_name in consumers - {"deployment-secret-init"}:
+            mount = next(
+                item
+                for item in services[service_name].get("volumes", [])
+                if item.get("source") == volume
+            )
+            if not mount.get("read_only", False):
+                fail(f"offline runtime mount {volume} is writable")
     if carrier.get("depends_on", {}).get("api", {}).get("condition") != (
         "service_healthy"
     ):
         fail("offline Notes carrier does not wait for API health")
     if "notes-collaboration" in api.get("depends_on", {}):
         fail("offline API depends on the carrier")
+    secret_gated = {
+        name
+        for name, service in services.items()
+        if service.get("depends_on", {})
+        .get("deployment-secret-init", {})
+        .get("condition")
+        == "service_completed_successfully"
+    }
+    if secret_gated != {"api", "celery-processing", "notes-collaboration"}:
+        fail("offline secret consumers are not gated on initializer success")
     carrier_ports = carrier.get("ports", [])
     if len(carrier_ports) != 1 or carrier_ports[0].get("host_ip") != "127.0.0.1":
         fail("offline Notes WebSocket port is not loopback-only")
     health_test = " ".join(carrier.get("healthcheck", {}).get("test", []))
-    if "/ready" not in health_test or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test:
+    if (
+        "/ready" not in health_test
+        or "ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET" not in health_test
+    ):
         fail("offline Notes carrier readiness healthcheck drifted")
     for name, service in services.items():
         service_environment = service.get("environment", {})
@@ -284,6 +353,7 @@ with tempfile.TemporaryDirectory(prefix="atlas-offline-bundle-audit-") as direct
     )
     api_services = {
         "api",
+        "deployment-secret-init",
         "artifact-storage-init",
         "celery-dispatch",
         "celery-processing",
