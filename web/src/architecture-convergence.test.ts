@@ -128,6 +128,7 @@ describe("frontend compatibility convergence", () => {
       'getByLabel("Add existing user")',
       'getByLabel("Message")',
       "name: /^Send$/",
+      'terminalStatus.state !== "terminal_completed"',
     ]) {
       expect(humanSmoke).toContain(currentConsumer);
     }
