@@ -10,6 +10,7 @@ from threading import Event
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
+from sqlalchemy.engine import make_url
 
 API_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(API_ROOT))
@@ -66,6 +67,28 @@ from tests.public_synthetic_data import (  # noqa: E402
     synthetic_review_transcript,
 )
 
+
+
+def _validated_url() -> str:
+    database_url = os.environ.get("ATLAS_TEST_POSTGRES_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("ATLAS_TEST_POSTGRES_URL is required")
+    try:
+        parsed = make_url(database_url)
+    except Exception as exc:
+        raise RuntimeError(
+            "ATLAS_TEST_POSTGRES_URL must be a valid PostgreSQL URL"
+        ) from exc
+    if not parsed.drivername.startswith("postgresql"):
+        raise RuntimeError("ATLAS_TEST_POSTGRES_URL must use PostgreSQL")
+    database_name = parsed.database or ""
+    if database_name == "atlas_production" or not database_name.startswith(
+        "atlas_baseline_test_"
+    ):
+        raise RuntimeError(
+            "PostgreSQL checks require a dedicated atlas_baseline_test_* database"
+        )
+    return database_url
 
 
 class _SyntheticConversationState:
@@ -396,9 +419,7 @@ def _build_composition(runtime: PostgresRuntime):
 
 
 def main() -> None:
-    database_url = os.environ.get("ATLAS_TEST_POSTGRES_URL")
-    if database_url is None:
-        raise RuntimeError("ATLAS_TEST_POSTGRES_URL is required")
+    database_url = _validated_url()
     runtime = PostgresRuntime.from_url(database_url)
     runtime.bootstrap_schema()
     _clean(runtime)
