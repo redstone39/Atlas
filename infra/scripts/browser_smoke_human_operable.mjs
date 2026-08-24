@@ -190,13 +190,27 @@ try {
     throw new Error(`Provider-backed conversation turn was not accepted: ${JSON.stringify(acceptedTurn)}`);
   }
   const terminalResponse = await page.waitForResponse(
-    (response) =>
-      response.url().endsWith(`/api/v1/workspace/turn-executions/${acceptedTurn.execution_id}`) &&
-      response.request().method() === "GET",
+    async (response) => {
+      if (
+        !response
+          .url()
+          .endsWith(
+            `/api/v1/workspace/turn-executions/${acceptedTurn.execution_id}`,
+          ) ||
+        response.request().method() !== "GET"
+      ) {
+        return false;
+      }
+      const status = await response.json();
+      return ["terminal_completed", "terminal_failed"].includes(status.state);
+    },
+    { timeout: 250_000 },
   );
   const terminalStatus = await terminalResponse.json();
-  if (!["terminal_completed", "terminal_failed"].includes(terminalStatus.state)) {
-    throw new Error(`Provider-backed execution did not terminalize: ${JSON.stringify(terminalStatus)}`);
+  if (terminalStatus.state !== "terminal_completed") {
+    throw new Error(
+      `Provider-backed execution failed: ${JSON.stringify(terminalStatus)}`,
+    );
   }
   await page
     .getByLabel("Message")

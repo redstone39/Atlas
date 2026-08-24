@@ -84,7 +84,7 @@ dedicated-test-database naming boundary.
 
 ## P1 agent-access smoke
 
-Prerequisites: Docker with Compose, `curl`, and Python 3. Assign a unique
+Prerequisites: Docker with Compose, `curl`, Python 3, and OpenSSL. Assign a unique
 disposable Compose project; the script starts the P1 stack, claims a generated
 first administrator, exercises agent-token grant and revocation, and removes
 only that named project's volumes on exit:
