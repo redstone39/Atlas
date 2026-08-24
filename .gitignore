@@ -12,3 +12,10 @@
 web/node_modules/
 .next/
 *.tsbuildinfo
+/plans/
+/private/
+/.atlas-benchmark/
+/uploads/
+/artifacts/
+/dumps/
+/exports/

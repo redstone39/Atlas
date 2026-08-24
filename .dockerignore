@@ -11,3 +11,10 @@ web/node_modules
 api/tests
 plugin-sdk/tests
 plugin-runner/tests
+plans
+private
+.atlas-benchmark
+uploads
+artifacts
+dumps
+exports

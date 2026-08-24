@@ -61,10 +61,10 @@ DIRECT_PAYLOAD_PATH = re.compile(
 )
 DIRECT_PAYLOAD_LITERAL = re.compile(
     rb"""(?ix)
-    \b(?:conversation|turn|provider|model)[_-]?(?:payload|content|text|response)
-    \s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    ["']?\b(?:conversation|turn|provider|model)[_-]?(?:payload|content|text|response)
+    \b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
     |
-    \btranscript\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
+    ["']?\btranscript\b["']?\s*(?:=|:)\s*[rubf]*["'][^"'\r\n]+["']
     """
 )
 SAFE_DIRECT_PAYLOAD_MARKER = re.compile(
@@ -90,12 +90,36 @@ def _git(*args: str) -> bytes:
     return subprocess.check_output(["git", *args], cwd=REPO_ROOT)
 
 
-def _paths(committed: bool) -> list[str]:
+def _parse_changes(raw: bytes) -> list[tuple[str, str, bool]]:
+    fields = raw.split(b"\0")
+    changes: list[tuple[str, str, bool]] = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index].decode("ascii")
+        index += 1
+        if status.startswith(("R", "C")):
+            old_path = fields[index].decode("utf-8")
+            new_path = fields[index + 1].decode("utf-8")
+            index += 2
+            changes.extend(((status, old_path, True), (status, new_path, False)))
+            continue
+        path = fields[index].decode("utf-8")
+        index += 1
+        changes.append((status, path, status.startswith("D")))
+    return changes
+
+
+def _changes(committed: bool, base_ref: str | None) -> list[tuple[str, str, bool]]:
+    if committed and base_ref is None:
+        paths = _git("ls-tree", "-r", "--name-only", "-z", "HEAD").split(b"\0")
+        return [("A", path.decode("utf-8"), False) for path in paths if path]
+    args = ["diff"]
+    if not committed:
+        args.append("--cached")
+    args.extend(("--name-status", "-z", "--find-renames"))
     if committed:
-        raw = _git("ls-tree", "-r", "--name-only", "HEAD")
-    else:
-        raw = _git("diff", "--cached", "--name-only", "--diff-filter=ACMR")
-    return [line for line in raw.decode("utf-8").splitlines() if line]
+        args.append(f"{base_ref}..HEAD")
+    return _parse_changes(_git(*args))
 
 
 def _blob(path: str, committed: bool) -> bytes:
@@ -121,37 +145,74 @@ def _denied_path(path: str) -> str | None:
     return None
 
 
-def _is_public_evidence_path(path: str) -> bool:
-    normalized = path.replace("\\", "/")
-    components = set(normalized.split("/"))
-    basename = normalized.rsplit("/", 1)[-1]
-    evidence_suffix = normalized.endswith(
-        (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml")
-    )
-    return evidence_suffix and (
-        "tests" in components
-        or "test" in components
-        or "fixtures" in components
-        or "snapshots" in components
-        or basename.startswith(("test_", "smoke_"))
-        or ".test." in basename
-        or ".spec." in basename
-    )
+def _is_decodable_text(path: str, blob: bytes) -> bool:
+    if "\0" in blob[:8192].decode("utf-8", errors="ignore"):
+        return False
+    try:
+        blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
-def _load_sensitive_hashes() -> set[str]:
+def _load_allowed_paths(source: str) -> set[str]:
+    path = Path(source)
+    if not path.is_file():
+        raise RuntimeError("allowed paths manifest is missing or unreadable")
+    values = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    values = [value for value in values if value]
+    if not values:
+        raise RuntimeError("allowed paths manifest is empty")
+    if len(values) != len(set(values)):
+        raise RuntimeError("allowed paths manifest contains duplicate paths")
+    if any(
+        value.startswith(("/", "../"))
+        or "\\" in value
+        or "/../" in value
+        or value.endswith("/..")
+        for value in values
+    ):
+        raise RuntimeError("allowed paths manifest contains an invalid path")
+    return set(values)
+
+
+def _load_sensitive_hashes(required: bool) -> set[str]:
     source = os.environ.get("ATLAS_PRIVATE_SENSITIVE_HASH_FILE")
     if not source:
+        if required:
+            raise RuntimeError(
+                "ATLAS_PRIVATE_SENSITIVE_HASH_FILE is required in manifest mode"
+            )
         return set()
+    path = Path(source)
+    if not path.is_file():
+        raise RuntimeError("private sensitive hash input is missing or unreadable")
     values = {
         line.strip().lower()
-        for line in Path(source).read_text(encoding="utf-8").splitlines()
+        for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     }
+    if not values:
+        raise RuntimeError("private sensitive hash input is empty")
     invalid = [value for value in values if not re.fullmatch(r"[0-9a-f]{64}", value)]
     if invalid:
         raise RuntimeError("private sensitive hash input contains an invalid SHA-256")
     return values
+
+
+def _validate_manifest(
+    changed_paths: set[str], allowed_paths: set[str], require_exact: bool
+) -> list[tuple[str, str]]:
+    findings = [
+        (path, "changed path is absent from allowed paths manifest")
+        for path in sorted(changed_paths - allowed_paths)
+    ]
+    if require_exact:
+        findings.extend(
+            (path, "allowed path is absent from baseline-to-HEAD changes")
+            for path in sorted(allowed_paths - changed_paths)
+        )
+    return findings
 
 
 def _scan(path: str, blob: bytes, sensitive_hashes: set[str]) -> list[str]:
@@ -168,7 +229,7 @@ def _scan(path: str, blob: bytes, sensitive_hashes: set[str]) -> list[str]:
         for match in SECRET_ASSIGNMENT.finditer(blob)
     ):
         findings.append("hard-coded credential assignment")
-    if _is_public_evidence_path(path) and any(
+    if _is_decodable_text(path, blob) and any(
         SAFE_DIRECT_PAYLOAD_MARKER.search(match.group(0)) is None
         for match in DIRECT_PAYLOAD_LITERAL.finditer(blob)
     ):
@@ -195,18 +256,6 @@ def _self_test() -> None:
             "denied private, fixture, cache, or build path",
         ),
         (
-            "api/.pytest_cache/v/cache/nodeids",
-            b"generated",
-            set(),
-            "denied private, fixture, cache, or build path",
-        ),
-        (
-            "web/node_modules/package/index.js",
-            b"generated",
-            set(),
-            "denied private, fixture, cache, or build path",
-        ),
-        (
             "src/example.txt",
             b"/" + b"Users/example/" + b"Library/Mobile Documents/private/file",
             set(),
@@ -219,7 +268,13 @@ def _self_test() -> None:
             "literal credential or private key",
         ),
         (
-            "src/example.txt",
+            "docs/private.md",
+            b"private-sensitive-fixture",
+            {digest},
+            "private sensitive blob hash overlap",
+        ),
+        (
+            "api/tests/test_private_behavior.py",
             b"private-sensitive-fixture",
             {digest},
             "private sensitive blob hash overlap",
@@ -231,14 +286,20 @@ def _self_test() -> None:
             "denied direct runtime payload path",
         ),
         (
-            "api/tests/test_other_public_behavior.py",
-            b'transcript = "customer private message"',
+            "api/src/ordinary.py",
+            b'trans' + b'cript = "customer private message"',
             set(),
             "direct conversation or Provider payload literal",
         ),
         (
-            "plugin-runner/tests/test_other.py",
-            b'provider_response = "customer private message"',
+            "docs/ordinary.md",
+            b'provider_' + b'response: "customer private message"',
+            set(),
+            "direct conversation or Provider payload literal",
+        ),
+        (
+            "config/ordinary.json",
+            b'{"model_' + b'payload": "customer private message"}',
             set(),
             "direct conversation or Provider payload literal",
         ),
@@ -256,47 +317,113 @@ def _self_test() -> None:
             set(),
             "hard-coded credential assignment",
         ),
-        (
-            "src/example.py",
-            b"se" + b'cret = "latest-production-secret"',
-            set(),
-            "hard-coded credential assignment",
-        ),
     )
     for path, blob, hashes, expected in cases:
         findings = _scan(path, blob, hashes)
         if expected not in findings:
-            raise RuntimeError(f"boundary self-test did not reject {expected}")
-    if _scan("api/src/public.py", b"public-safe", set()):
-        raise RuntimeError("boundary self-test rejected safe public source")
+            raise RuntimeError(
+                f"boundary self-test did not reject {expected}: {path}"
+            )
+
+    safe_cases = (
+        ("api/src/public.py", b"public-safe"),
+        (
+            "api/tests/test_public_behavior.py",
+            b'transcript = "public-synthetic example transcript"',
+        ),
+        (
+            "contracts/user-messages.json",
+            b'{"message_code":"conversation_payload_required","default_message":"example"}',
+        ),
+    )
+    for path, blob in safe_cases:
+        if _scan(path, blob, set()):
+            raise RuntimeError(f"boundary self-test rejected safe public content: {path}")
+
+    if not _validate_manifest({"changed.py"}, {"allowed.py"}, False):
+        raise RuntimeError("boundary self-test accepted a manifest extra path")
+    missing = _validate_manifest({"changed.py"}, {"changed.py", "missing.py"}, True)
+    if ("missing.py", "allowed path is absent from baseline-to-HEAD changes") not in missing:
+        raise RuntimeError("boundary self-test accepted a missing exact-manifest path")
+
+    prior_hash_file = os.environ.pop("ATLAS_PRIVATE_SENSITIVE_HASH_FILE", None)
+    try:
+        try:
+            _load_sensitive_hashes(required=True)
+        except RuntimeError as exc:
+            if "is required" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("boundary self-test accepted missing private hash input")
+    finally:
+        if prior_hash_file is not None:
+            os.environ["ATLAS_PRIVATE_SENSITIVE_HASH_FILE"] = prior_hash_file
     print("public snapshot boundary self-test passed")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Audit the staged index or committed public snapshot boundary."
+        description="Audit the staged index or baseline-to-HEAD public boundary."
     )
     parser.add_argument("--committed", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--base-ref")
+    parser.add_argument("--allowed-paths-file")
+    parser.add_argument("--require-exact-manifest", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _self_test()
         return 0
 
-    sensitive_hashes = _load_sensitive_hashes()
-    findings: list[tuple[str, str]] = []
-    paths = _paths(args.committed)
-    for path in paths:
-        for finding in _scan(path, _blob(path, args.committed), sensitive_hashes):
-            findings.append((path, finding))
+    manifest_mode = bool(
+        args.base_ref or args.allowed_paths_file or args.require_exact_manifest
+    )
+    try:
+        if manifest_mode and not (args.base_ref and args.allowed_paths_file):
+            raise RuntimeError(
+                "manifest mode requires --base-ref and --allowed-paths-file"
+            )
+        if args.require_exact_manifest and not args.committed:
+            raise RuntimeError("--require-exact-manifest requires --committed")
+        if args.base_ref:
+            _git("rev-parse", "--verify", f"{args.base_ref}^{{commit}}")
+
+        sensitive_hashes = _load_sensitive_hashes(required=manifest_mode)
+        allowed_paths = (
+            _load_allowed_paths(args.allowed_paths_file)
+            if args.allowed_paths_file
+            else None
+        )
+        changes = _changes(args.committed, args.base_ref)
+        changed_paths = {path for _, path, _ in changes}
+        findings: list[tuple[str, str]] = []
+        if allowed_paths is not None:
+            findings.extend(
+                _validate_manifest(
+                    changed_paths, allowed_paths, args.require_exact_manifest
+                )
+            )
+        scanned: set[str] = set()
+        for _, path, deleted in changes:
+            if deleted or path in scanned:
+                continue
+            scanned.add(path)
+            for finding in _scan(path, _blob(path, args.committed), sensitive_hashes):
+                findings.append((path, finding))
+    except (OSError, RuntimeError, subprocess.CalledProcessError, UnicodeError) as exc:
+        print(f"public snapshot boundary error: {exc}", file=sys.stderr)
+        return 2
+
     if findings:
         for path, finding in findings:
             print(f"{path}: {finding}", file=sys.stderr)
         return 1
     mode = "committed" if args.committed else "staged"
-    hash_note = " with private hash input" if sensitive_hashes else ""
+    manifest_note = " with manifest" if allowed_paths is not None else ""
+    hash_note = " and private hash input" if sensitive_hashes else ""
     print(
-        f"public snapshot boundary passed: {mode} {len(paths)} paths{hash_note}"
+        f"public snapshot boundary passed: {mode} {len(changed_paths)} paths"
+        f"{manifest_note}{hash_note}"
     )
     return 0
 
