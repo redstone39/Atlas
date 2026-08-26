@@ -86,6 +86,16 @@ EVIDENCE_LOCATOR_FIELDS = frozenset(
 # Values are (classification, byte cap, named serializer family). Schema drift
 # is rejected by the persistence-boundary test until this registry is updated.
 JSONB_PAYLOAD_REGISTRY: dict[str, tuple[str, int, str]] = {
+    "atlas_agent_research.accepted_snapshot": (
+        "authorization_projection",
+        GENERAL_METADATA_MAX_BYTES,
+        "agent_research_accepted_snapshot_v1",
+    ),
+    "atlas_agent_research.packet_payload": (
+        "result_lineage",
+        2_097_152,
+        "research_packet_v1",
+    ),
     "atlas_artifact_storage_targets.capabilities": ("storage_capabilities", RUNTIME_POLICY_MAX_BYTES, "artifact_storage_target_capabilities"),
     "atlas_artifact_write_attempts.intent_json": ("idempotency_lineage", RUNTIME_POLICY_MAX_BYTES, "artifact_write_attempt_intent"),
     "atlas_artifacts.metadata_json": ("artifact_metadata", GENERAL_METADATA_MAX_BYTES, "artifact_metadata"),

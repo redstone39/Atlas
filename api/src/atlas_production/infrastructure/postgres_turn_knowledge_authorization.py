@@ -114,6 +114,15 @@ class ProductionAuthorizedGrantResourceSource:
             raise PermissionError("grant resource authority changed before materialization")
         return self._resources_with_modalities(snapshot.documents)
 
+    def resources_for_research(
+        self, *, actor_id: str, project_ids: tuple[str, ...]
+    ) -> list[GrantDocumentResourceV1]:
+        documents = self._rows.authorized_documents_for_projects(
+            actor_id=actor_id,
+            project_ids=project_ids,
+        )
+        return self._resources_with_modalities(documents)
+
     def authorized_document_resources(self, *, actor_id: str) -> tuple[GrantDocumentResourceV1, ...]:
         """Narrow compatibility helper for adapter unit tests only."""
         return tuple(

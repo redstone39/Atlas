@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import logging
 import traceback
 
@@ -10,10 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .infrastructure.composition import ApiComposition, build_api_composition
+from .infrastructure.mcp_research import AtlasMcpTransport, McpExactPathMiddleware
 from .modules.artifact_storage.public import ArtifactStorageError
 from .routes import (
     agent_access,
-    agent_runtime,
+    agent_research_audit,
     answer_behavior,
     auth,
     conversations,
@@ -45,58 +46,25 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        try:
-            yield
-        finally:
-            try:
-                stop = getattr(
-                    selected.skill_candidate_pipeline_reconciler, "stop", None
+        async with AsyncExitStack() as stack:
+            def register_shutdown(owner, method_name: str) -> None:
+                callback = getattr(owner, method_name, None)
+                if callable(callback):
+                    stack.callback(callback)
+
+            register_shutdown(selected.turn_lease_failure_sweeper, "stop")
+            register_shutdown(selected.turn_resource_release_reconciler, "stop")
+            register_shutdown(selected.turn_experience_reconciler, "stop")
+            register_shutdown(selected.learner_reconciler, "stop")
+            register_shutdown(selected.conversation_review_reconciler, "stop")
+            register_shutdown(selected.turn_execution_carrier, "shutdown")
+            register_shutdown(selected.skill_candidate_pipeline_reconciler, "stop")
+            mcp_transport = getattr(selected, "mcp_transport", None)
+            if isinstance(mcp_transport, AtlasMcpTransport):
+                await stack.enter_async_context(
+                    mcp_transport.server.session_manager.run()
                 )
-                if callable(stop):
-                    stop()
-            finally:
-                try:
-                    shutdown = getattr(
-                        selected.turn_execution_carrier, "shutdown", None
-                    )
-                    if callable(shutdown):
-                        shutdown()
-                finally:
-                    try:
-                        stop = getattr(
-                            selected.conversation_review_reconciler, "stop", None
-                        )
-                        if callable(stop):
-                            stop()
-                    finally:
-                        try:
-                            stop = getattr(selected.learner_reconciler, "stop", None)
-                            if callable(stop):
-                                stop()
-                        finally:
-                            try:
-                                stop = getattr(
-                                    selected.turn_experience_reconciler, "stop", None
-                                )
-                                if callable(stop):
-                                    stop()
-                            finally:
-                                try:
-                                    stop = getattr(
-                                        selected.turn_resource_release_reconciler,
-                                        "stop",
-                                        None,
-                                    )
-                                    if callable(stop):
-                                        stop()
-                                finally:
-                                    stop = getattr(
-                                        selected.turn_lease_failure_sweeper,
-                                        "stop",
-                                        None,
-                                    )
-                                    if callable(stop):
-                                        stop()
+            yield
 
     app = FastAPI(title="Atlas Production API", version="0.1.0", lifespan=lifespan)
 
@@ -155,6 +123,7 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
         auth.router,
         invitations.router,
         agent_access.router,
+        agent_research_audit.router,
         answer_behavior.router,
         conversation_learning.router,
         rbac_admin.router,
@@ -170,9 +139,12 @@ def create_app(composition: ApiComposition | None = None) -> FastAPI:
         model_routes.router,
         conversations.router,
         workspace.router,
-        agent_runtime.router,
     ):
         app.include_router(router)
+    mcp_transport = getattr(selected, "mcp_transport", None)
+    if isinstance(mcp_transport, AtlasMcpTransport):
+        app.add_middleware(McpExactPathMiddleware)
+        app.mount("/mcp", mcp_transport.asgi_app)
     return app
 
 

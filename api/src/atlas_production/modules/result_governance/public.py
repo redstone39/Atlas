@@ -136,6 +136,9 @@ class PostHocClaimAssessmentEnvelopeV1(_StrictTurnDraftModel):
 class PostHocAnswerAssessmentV2(_StrictTurnDraftModel):
     id: Identity
     status: Literal["success", "failure"]
+    internal_consistency: Literal["aligned", "conflict", "insufficient"] | None = Field(
+        default=None, exclude=True, repr=False
+    )
 
 
 class PostHocAnswerAssessmentEnvelopeV2(_StrictTurnDraftModel):
@@ -218,6 +221,7 @@ class PostHocAnswerEvaluatorV2(Protocol):
         deadline_at: datetime,
         route: TurnRouteSnapshotV2,
         assessment_ordinal: int = 1,
+        evidence_handles_by_segment: dict[Identity, list[Identity]] | None = None,
     ) -> PostHocAnswerAssessmentResultV2: ...
 
 
@@ -309,6 +313,12 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
     assessment_input_digest: Digest | None = None
     assessment_output_digest: Digest | None = None
     assessment_results: list[PostHocAnswerAssessmentV2] = Field(max_length=100)
+    research_packet_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     delivery_constraint: Literal["none", "correction_limit_reached"] = "none"
     idempotency_key: Identity
 
@@ -380,6 +390,10 @@ class MaterializeGovernedAnswerDraftV2(_StrictTurnDraftModel):
             result.status != "success" for result in self.assessment_results
         ):
             raise ValueError("aligned assessment requires all answer items to succeed")
+        if (self.research_packet_ref is None) != (
+            self.research_packet_digest is None
+        ):
+            raise ValueError("research packet ref and digest must be paired")
         return self
 
 
@@ -410,9 +424,23 @@ class GovernedAnswerDraftV2(_StrictTurnDraftModel):
     assessment_input_digest: Digest | None = None
     assessment_output_digest: Digest | None = None
     assessment_results: list[PostHocAnswerAssessmentV2] = Field(max_length=100)
+    research_packet_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
     segments: list[GovernedAnswerSegmentV2] = Field(min_length=1, max_length=100)
     digest: Digest
     created_at: AwareDatetime
+    @model_validator(mode="after")
+    def require_research_packet_pair(self) -> "GovernedAnswerDraftV2":
+        if (self.research_packet_ref is None) != (
+            self.research_packet_digest is None
+        ):
+            raise ValueError("research packet ref and digest must be paired")
+        return self
 
 
 class ReleaseGovernedAnswerDraftV1(_StrictTurnDraftModel):

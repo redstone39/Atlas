@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from fractions import Fraction
 import hashlib
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
 from pydantic import TypeAdapter
 import tiktoken
@@ -85,6 +85,8 @@ from atlas_production.modules.retrieval.public import (
     RelevantDocumentCandidateV1,
     RelevantDocumentDiscoveryResultV1,
     RelevantDocumentDiscoveryTraceV1,
+    ResearchEvidenceProjectionItemV1,
+    ResearchEvidenceProjectionV1,
     RetrievalInvocationEnvelopeV1,
     RetrievalEvidenceLineageV1,
     SearchKnowledgeV1,
@@ -210,6 +212,7 @@ class KnowledgeToolService:
         tokenizer_profile: str = "cl100k_base",
         max_output_bytes: int = 262_144,
         deadline_at: datetime | None = None,
+        authority_mode: Literal["current", "accepted_catalog"] = "current",
     ) -> RetrievalInvocationEnvelopeV1:
         try:
             return self._invoke_with_deadline(
@@ -222,6 +225,7 @@ class KnowledgeToolService:
                 tokenizer_profile=tokenizer_profile,
                 max_output_bytes=max_output_bytes,
                 deadline_at=deadline_at,
+                authority_mode=authority_mode,
             )
         except TimeoutError:
             return self._persist_failure_observation(
@@ -261,6 +265,7 @@ class KnowledgeToolService:
         tokenizer_profile: str = "cl100k_base",
         max_output_bytes: int = 262_144,
         deadline_at: datetime | None = None,
+        authority_mode: Literal["current", "accepted_catalog"] = "current",
     ) -> RetrievalInvocationEnvelopeV1:
         if self._deadline_expired(deadline_at):
             raise TimeoutError("retrieval tool deadline elapsed before invocation")
@@ -271,7 +276,10 @@ class KnowledgeToolService:
         )
         if catalog.grant_ref != grant_ref:
             raise RetrievalStoreConflict("catalog does not belong to grant")
-        if isinstance(action, (InspectVisualV1, NavigateDocumentV1)):
+        if (
+            authority_mode == "current"
+            and isinstance(action, (InspectVisualV1, NavigateDocumentV1))
+        ):
             current = self._grant_resources.current_grant_document_resources(
                 execution_id=execution_id,
                 grant_ref=grant_ref,
@@ -319,6 +327,8 @@ class KnowledgeToolService:
             arguments["runtime_max_output_tokens"] = effective_output_tokens
             arguments["tokenizer_profile"] = tokenizer_profile
         schema_version = f"{action.action.replace('_', '-')}-v1"
+        if authority_mode == "accepted_catalog":
+            arguments["authority_mode"] = authority_mode
         resolved = self._validate_action_handles(catalog, action)
         replay = self._store.replay_invocation(
             execution_id=execution_id,
@@ -1074,6 +1084,103 @@ class KnowledgeToolService:
                 )
             )
         return items
+
+    def project_research_evidence(
+        self,
+        *,
+        execution_id: str,
+        catalog_ref: str,
+        handles: list[str],
+        visual_images: list[VisualImagePayloadV1],
+    ) -> ResearchEvidenceProjectionV1:
+        if len(handles) != len(set(handles)):
+            raise RetrievalStoreConflict("research evidence handles must be unique")
+        subset = self.read_declared_evidence_subset(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+            handles=handles,
+            visual_images=visual_images,
+        )
+        if any(mapping.resolution_status != "resolved" for mapping in subset.mappings):
+            raise RetrievalStoreConflict(
+                "research evidence includes unresolved execution handles"
+            )
+        lineage = self.read_claimed_evidence_lineage(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+            handles=handles,
+        )
+        if any(item.resolution_status != "resolved" for item in lineage):
+            raise RetrievalStoreConflict("research evidence lineage is unresolved")
+        catalog = self._store.get_catalog(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+        )
+        media_type_by_document = {
+            document.document_handle: document.descriptor.get("media_type")
+            for document in catalog.documents
+        }
+        subset_by_handle = {item.evidence_handle: item for item in subset.items}
+        projected: list[ResearchEvidenceProjectionItemV1] = []
+        for item in lineage:
+            source = subset_by_handle[item.handle]
+            assert item.document_handle is not None
+            representations = (
+                ["visual"]
+                if item.handle_kind == "visual"
+                else ["text"]
+            )
+            if media_type_by_document.get(item.document_handle) == "application/pdf":
+                representations.append("native")
+            model_visible_content = "\n\n".join(
+                observation.model_visible_content
+                for observation in source.observations
+            )[:50_000]
+            lineage_payload = {
+                "lineage": item.model_dump(mode="json"),
+                "declared_evidence": source.model_dump(
+                    mode="json",
+                    exclude={"observations"},
+                ),
+                "observations": [
+                    observation.model_dump(
+                        mode="json",
+                        exclude={"model_visible_content"},
+                    )
+                    for observation in source.observations
+                ],
+                "model_visible_content_digest": _digest(model_visible_content),
+            }
+            projected.append(
+                ResearchEvidenceProjectionItemV1(
+                    evidence_handle=item.handle,
+                    evidence_id=_opaque(
+                        "research-evidence",
+                        execution_id,
+                        catalog_ref,
+                        item.handle,
+                        source.evidence_digest,
+                    ),
+                    kind="visual" if item.handle_kind == "visual" else "text",
+                    title=item.document_display_name or "Unavailable",
+                    page=item.page_number,
+                    locator=item.locator_label or "Unavailable",
+                    available_representations=representations,
+                    lineage_digest=_digest(lineage_payload),
+                    model_visible_content=model_visible_content,
+                )
+            )
+        payload = {
+            "execution_id": execution_id,
+            "catalog_ref": catalog_ref,
+            "items": [item.model_dump(mode="json") for item in projected],
+        }
+        return ResearchEvidenceProjectionV1(
+            execution_id=execution_id,
+            catalog_ref=catalog_ref,
+            items=projected,
+            digest=_digest(payload),
+        )
 
     def read_discovery_traces(
         self,

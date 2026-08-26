@@ -19,7 +19,7 @@ from atlas_production.routes.conversations import _accepted_page_media_types
 
 FIXTURE = Path(__file__).parent / "contracts" / "openapi-v1.json"
 EXPECTED_FIXTURE_SHA256 = (
-    "04a7d651f0366bd2b137828eebe2461d857f9b69ab01803d44f767912bc4dd4b"
+    "dddecbc3fa18a3f7969cca27c4d1758225c123da7f88cca35f75beca1d3ddf2a"
 )
 
 
@@ -88,15 +88,18 @@ def test_scoped_directory_import_openapi_is_nested_and_closed() -> None:
 
 
 
-def test_agent_query_openapi_declares_only_fail_closed_outcomes() -> None:
-    schema = create_openapi_app().openapi()
-    responses = schema["paths"]["/api/v1/agent/queries"]["post"]["responses"]
+def test_agent_research_openapi_removes_legacy_query_and_exposes_admin_reads() -> None:
+    paths = create_openapi_app().openapi()["paths"]
 
-    assert set(responses) == {"401", "403", "422", "501"}
-    for status_code in ("401", "403", "501"):
-        assert responses[status_code]["content"]["application/json"]["schema"] == {
-            "$ref": "#/components/schemas/ErrorResponse"
-        }
+    assert "/api/v1/agent/queries" not in paths
+    expected = {
+        "/api/v1/admin/audit/agent-research",
+        "/api/v1/admin/audit/agent-research/{research_id}",
+        "/api/v1/admin/audit/agent-research/{research_id}/runtime",
+        "/api/v1/admin/audit/agent-research/{research_id}/evidence/{evidence_id}",
+    }
+    assert {path for path in paths if path.startswith("/api/v1/admin/audit/agent-research")} == expected
+    assert all(set(paths[path]) == {"get"} for path in expected)
 
 
 def test_openapi_exposes_only_strict_execution_conversation_surface() -> None:

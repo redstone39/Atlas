@@ -20,6 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 ATR020_OWNER_TABLES = frozenset(
     {
+        'atlas_agent_research',
         'atlas_authorization_revisions',
         'atlas_turn_access_grant_releases',
         'atlas_turn_access_grants',
@@ -211,6 +212,8 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('event_id')
     )
     op.create_index(op.f('ix_atlas_audit_events_actor_id'), 'atlas_audit_events', ['actor_id'], unique=False)
+    op.create_index('ix_atlas_audit_events_type_created_event', 'atlas_audit_events', ['event_type', 'created_at', 'event_id'], unique=False)
+    op.create_index('ix_atlas_audit_events_target_created_event', 'atlas_audit_events', ['target_ref', 'created_at', 'event_id'], unique=False)
     op.create_index(op.f('ix_atlas_audit_events_document_id'), 'atlas_audit_events', ['document_id'], unique=False)
     op.create_index(op.f('ix_atlas_audit_events_project_id'), 'atlas_audit_events', ['project_id'], unique=False)
     op.create_index(op.f('ix_atlas_audit_events_scope_id'), 'atlas_audit_events', ['scope_id'], unique=False)
@@ -1752,6 +1755,42 @@ def upgrade() -> None:
     for table in _atr020_tables():
         table.create(bind=bind, checkfirst=False)
     op.execute(
+        """
+        CREATE FUNCTION atlas_reject_agent_research_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF ROW(
+            OLD.research_id, OLD.execution_id, OLD.actor_id, OLD.idempotency_key,
+            OLD.request_digest, OLD.question_ref, OLD.question, OLD.output_mode,
+            OLD.accepted_snapshot, OLD.accepted_at
+          ) IS DISTINCT FROM ROW(
+            NEW.research_id, NEW.execution_id, NEW.actor_id, NEW.idempotency_key,
+            NEW.request_digest, NEW.question_ref, NEW.question, NEW.output_mode,
+            NEW.accepted_snapshot, NEW.accepted_at
+          ) THEN
+            RAISE EXCEPTION 'accepted agent research snapshot is immutable'
+              USING ERRCODE = '23514';
+          END IF;
+          IF OLD.status = 'completed' AND ROW(
+            OLD.status, OLD.packet_payload, OLD.packet_ref,
+            OLD.packet_digest, OLD.completed_at
+          ) IS DISTINCT FROM ROW(
+            NEW.status, NEW.packet_payload, NEW.packet_ref,
+            NEW.packet_digest, NEW.completed_at
+          ) THEN
+            RAISE EXCEPTION 'agent research terminal packet is immutable'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER atlas_agent_research_immutable
+        BEFORE UPDATE ON atlas_agent_research
+        FOR EACH ROW EXECUTE FUNCTION atlas_reject_agent_research_mutation();
+        """
+    )
+    op.execute(
         "INSERT INTO atlas_conversation_learning_settings "
         "(settings_key, enabled, settings_revision, updated_actor_id, updated_at) "
         "VALUES ('global', true, 1, 'system:development-baseline', CURRENT_TIMESTAMP)"
@@ -1800,6 +1839,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     for table in reversed(_atr020_tables()):
         table.drop(bind=bind, checkfirst=False)
+    op.execute("DROP FUNCTION IF EXISTS atlas_reject_agent_research_mutation()")
     op.drop_table('atlas_note_create_receipts')
     op.drop_table('atlas_document_upload_intents')
     op.drop_index(op.f('ix_atlas_project_create_receipts_scope_actor_id'), table_name='atlas_project_create_receipts')
@@ -2016,6 +2056,8 @@ def downgrade() -> None:
     op.drop_table('atlas_document_versions')
     op.drop_table('atlas_document_tags')
     op.drop_table('atlas_candidate_groups')
+    op.drop_index('ix_atlas_audit_events_target_created_event', table_name='atlas_audit_events')
+    op.drop_index('ix_atlas_audit_events_type_created_event', table_name='atlas_audit_events')
     op.drop_index(op.f('ix_atlas_audit_events_scope_type'), table_name='atlas_audit_events')
     op.drop_index(op.f('ix_atlas_audit_events_scope_id'), table_name='atlas_audit_events')
     op.drop_index(op.f('ix_atlas_audit_events_project_id'), table_name='atlas_audit_events')

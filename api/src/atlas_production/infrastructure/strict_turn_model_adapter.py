@@ -16,6 +16,7 @@ from atlas_production.infrastructure.strict_turn_model_messages import (
     _canonical,
     _digest,
     _initial_provider_messages,
+    _packet_answer_provider_messages,
 )
 from atlas_production.infrastructure.strict_turn_model_reasoning import (
     _ProviderInitialPlanDecisionV1,
@@ -66,21 +67,27 @@ from atlas_production.modules.turn_execution.public import (
     DeepReasoningModel,
     DeepReasoningPlanResultV1,
     FinalizeAnswerV1,
+    FinalizeResearchV1,
     GateCorrectionFeedbackV1,
     InitialPlanningNodeContextV1,
     ModelActionResultV1,
     ModelContractViolationV1,
     ModelStepResultV1,
+    PacketAnswerComposer,
+    PacketAnswerModelInputV1,
+    ResearchModelInputV1,
     ReplanningNodeContextV1,
     SkillSelectionDecisionV1,
     SkillSelectionRequestV2,
     SkillSelectionResultV1,
     SkillSelectorModel,
+    StrictModelInputV1,
     StrictTurnModel,
     StrictTurnModelSession,
     TurnModelInputV3,
+    finalize_answer_schema,
 )
-from atlas_production.providers import ProviderError
+from atlas_production.providers import ProviderError, build_native_json_schema
 from atlas_production.modules.turn_runtime.public import (
     ExecutionSnapshotV1,
     ProcessScoreV1,
@@ -132,6 +139,25 @@ def _attempt_matches_snapshot(attempt, snapshot) -> bool:
     )
 
 
+def _bound_model_contract_digest(model_input: StrictModelInputV1) -> str:
+    if isinstance(model_input, TurnModelInputV3):
+        payload: object = {
+            "result_kind": "conversation_answer",
+            "answer_behavior": model_input.answer_behavior.model_dump(mode="json"),
+        }
+    else:
+        payload = {
+            "result_kind": "agent_research",
+            "research_id": model_input.research_id,
+            "question_ref": model_input.question_ref,
+            "scope_ref": model_input.scope_ref,
+            "scope_digest": model_input.scope_digest,
+            "catalog_ref": model_input.knowledge_catalog_ref,
+            "output_mode": model_input.output_mode,
+        }
+    return _digest(payload)
+
+
 class ProviderTurnModelSession(StrictTurnModelSession):
     """Carrier-local transcript; it cannot be serialized or reconstructed."""
 
@@ -139,7 +165,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self,
         *,
         routing: ModelRoutingRuntime,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         record_invocations: bool,
     ) -> None:
         self._routing = routing
@@ -149,9 +175,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self._vision_route = model_input.route.vision_route
         self._vision_attempt = None
         self._execution_id = model_input.execution_id
-        self._answer_behavior_digest = _digest(
-            model_input.answer_behavior.model_dump(mode="json")
-        )
+        self._model_contract_digest = _bound_model_contract_digest(model_input)
         # ``open_session`` binds the non-transferable carrier to one execution,
         # but the first provider-visible input is appended only after the
         # runtime has accepted the provider-invocation budget by CAS.
@@ -192,7 +216,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
 
     def _next_request(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         finalize_only: bool,
         enforce_limits: bool = True,
@@ -205,12 +229,9 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             raise ProviderProtocolError(
                 safe_code="turn_model_answer_candidate_not_started"
             )
-        if (
-            _digest(model_input.answer_behavior.model_dump(mode="json"))
-            != self._answer_behavior_digest
-        ):
+        if _bound_model_contract_digest(model_input) != self._model_contract_digest:
             raise ProviderProtocolError(
-                safe_code="turn_model_answer_behavior_changed"
+                safe_code="turn_model_input_contract_changed"
             )
         input_payload = model_input.model_dump(mode="json")
         input_digest = _digest(input_payload)
@@ -264,7 +285,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         return messages, request, final_schema, input_digest, estimate, attempt
     def estimate_begin_answer_candidate_tokens(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         candidate_ordinal: int,
         candidate_kind: str,
@@ -285,7 +306,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
 
     def begin_answer_candidate(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         candidate_ordinal: int,
         candidate_kind: str,
@@ -312,7 +333,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 model_input,
                 selected_skills=selected_skills,
             )
-        else:
+        elif isinstance(model_input, TurnModelInputV3):
             self._messages.append(
                 _answer_skill_system_message(
                     selected_skills,
@@ -325,14 +346,14 @@ class ProviderTurnModelSession(StrictTurnModelSession):
 
 
     def estimate_next_request_tokens(
-        self, model_input: TurnModelInputV3, *, finalize_only: bool
+        self, model_input: StrictModelInputV1, *, finalize_only: bool
     ) -> int:
         return self._next_request(
             model_input, finalize_only=finalize_only
         )[4].input_tokens
 
     def estimate_next_request_tokens_unchecked(
-        self, model_input: TurnModelInputV3, *, finalize_only: bool
+        self, model_input: StrictModelInputV1, *, finalize_only: bool
     ) -> int:
         return self._next_request(
             model_input,
@@ -342,7 +363,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
 
     def next_action(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         finalize_only: bool,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
@@ -450,13 +471,20 @@ class ProviderTurnModelSession(StrictTurnModelSession):
                 output_tokens=output_tokens,
             )
         if isinstance(outcome, ProviderCompleted):
+            research = "finalize_research" in capabilities.allowed_actions
+            model = FinalizeResearchV1 if research else FinalizeAnswerV1
+            action_name = "finalize_research" if research else "finalize_answer"
             try:
-                action = FinalizeAnswerV1.model_validate(outcome.output)
+                action = model.model_validate(outcome.output)
             except ValidationError:
                 self._messages.append(outcome.assistant_message)
                 return ModelContractViolationV1(
-                    safe_code="invalid_finalize_answer",
-                    action_name="finalize_answer",
+                    safe_code=(
+                        "invalid_finalize_research"
+                        if research
+                        else "invalid_finalize_answer"
+                    ),
+                    action_name=action_name,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
@@ -464,7 +492,7 @@ class ProviderTurnModelSession(StrictTurnModelSession):
             if not _within_capabilities(action, capabilities):
                 return ModelContractViolationV1(
                     safe_code="selection_outside_capabilities",
-                    action_name="finalize_answer",
+                    action_name=action_name,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
@@ -669,21 +697,126 @@ class ProviderTurnModelSession(StrictTurnModelSession):
         self._discarded = True
 
 
-class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel, SkillSelectorModel):
+class StrictProviderTurnModel(
+    StrictTurnModel, DeepReasoningModel, SkillSelectorModel, PacketAnswerComposer
+):
     def __init__(self, routing: ModelRoutingRuntime, *, record_invocations: bool = True) -> None:
         self._routing = routing
         self._record_invocations = record_invocations
 
-    def open_session(self, model_input: TurnModelInputV3) -> ProviderTurnModelSession:
+    def open_session(self, model_input: StrictModelInputV1) -> ProviderTurnModelSession:
         return ProviderTurnModelSession(
             routing=self._routing,
             model_input=model_input,
             record_invocations=self._record_invocations,
         )
 
+    def estimate_packet_answer_tokens(
+        self, model_input: PacketAnswerModelInputV1
+    ) -> int:
+        return self._packet_answer_wire(model_input)[3].input_tokens
+
+    def compose_packet_answer(
+        self,
+        model_input: PacketAnswerModelInputV1,
+        *,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
+    ) -> ModelStepResultV1:
+        attempt, request, response_schema, _estimate = self._packet_answer_wire(
+            model_input
+        )
+        handle = None
+        if self._record_invocations:
+            handle = self._routing.prepare_invocation(
+                attempt.route,
+                response_schema,
+                invocation_purpose="agent_research_packet_answer",
+                subject_kind="turn_execution",
+                subject_ref=model_input.execution_id,
+                execution_key=(
+                    f"{model_input.execution_id}:packet-answer:"
+                    f"{schema_retry_ordinal + 1}"
+                ),
+                prompt_digest=_digest(model_input.model_dump(mode="json")),
+                attempt_ordinal=schema_retry_ordinal + 1,
+                repair_origin_error_codes=(
+                    []
+                    if repair_origin_error_code is None
+                    else [repair_origin_error_code]
+                ),
+            )
+            self._routing.record_invocation_started(handle)
+        try:
+            outcome = self._routing.invoke(attempt, request, response_schema)
+        except Exception as error:
+            if handle is not None:
+                self._routing.record_invocation_failure(
+                    handle, getattr(error, "safe_code", "provider_failed")
+                )
+            raise
+        if handle is not None:
+            self._routing.record_invocation_success(handle, dict(outcome.usage))
+        input_tokens = _usage_value(outcome.usage, "input_tokens", "prompt_tokens")
+        output_tokens = _usage_value(
+            outcome.usage, "output_tokens", "completion_tokens"
+        )
+        if not isinstance(outcome, ProviderCompleted):
+            if isinstance(outcome, (ProviderRefused, ProviderIncomplete)):
+                raise ProviderProtocolError(safe_code=f"provider_{outcome.kind}")
+            raise ProviderProtocolError(safe_code="unknown_provider_outcome")
+        try:
+            action = FinalizeAnswerV1.model_validate(outcome.output)
+        except ValidationError:
+            return ModelContractViolationV1(
+                safe_code="invalid_finalize_answer",
+                action_name="finalize_answer",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        allowed = {item.evidence_handle for item in model_input.evidence}
+        if not set(action.claimed_evidence_handles).issubset(allowed):
+            return ModelContractViolationV1(
+                safe_code="selection_outside_capabilities",
+                action_name="finalize_answer",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        return ModelActionResultV1(
+            action=action,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    def _packet_answer_wire(self, model_input: PacketAnswerModelInputV1):
+        attempt = self._routing.open_tested_attempt(model_input.route.route_id)
+        if not _attempt_matches_snapshot(attempt, model_input.route):
+            raise ProviderProtocolError(safe_code="model_route_revision_conflict")
+        response_schema = build_native_json_schema(
+            f"packet_answer_v1_{model_input.packet_digest[:12]}",
+            finalize_answer_schema(),
+        )
+        request = ProviderConversationRequest(
+            messages=_packet_answer_provider_messages(model_input),
+            tools=[],
+            tool_choice="none",
+            parallel_tool_calls=False,
+            max_output_tokens=min(
+                16_000,
+                attempt.route.runtime_policy.max_output_tokens_per_invocation,
+            ),
+        )
+        estimate = require_provider_wire_within_limits(
+            policy=attempt.route.runtime_policy,
+            request=request,
+            response_schema=response_schema,
+            tool_reserve_tokens=0,
+        )
+        return attempt, request, response_schema, estimate
+
     def _reasoning_wire(
         self,
-        model_input: TurnModelInputV3 | ExecutionSnapshotV1,
+        model_input: StrictModelInputV1 | PacketAnswerModelInputV1 | ExecutionSnapshotV1,
         *,
         purpose: str,
         payload: dict[str, object],
@@ -725,7 +858,7 @@ class StrictProviderTurnModel(StrictTurnModel, DeepReasoningModel, SkillSelector
 
     def _invoke_reasoning(
         self,
-        model_input: TurnModelInputV3 | ExecutionSnapshotV1,
+        model_input: StrictModelInputV1 | PacketAnswerModelInputV1 | ExecutionSnapshotV1,
         *,
         purpose: str,
         ordinal: int,

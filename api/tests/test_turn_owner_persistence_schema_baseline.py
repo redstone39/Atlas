@@ -6,6 +6,7 @@ from pathlib import Path
 from atlas_production.infrastructure.persistence import (
     audit_events,
     authorization,
+    agent_runtime,
     citation_preview,
     context_engineering,
     conversation,
@@ -51,6 +52,7 @@ LEGACY_TURN_TABLES = {
 
 def test_development_baseline_registers_every_owner_table() -> None:
     expected = set().union(
+        agent_runtime.OWNER_TABLES,
         authorization.OWNER_TABLES,
         audit_events.TURN_AUDIT_OWNER_TABLES,
         citation_preview.TURN_CITATION_OWNER_TABLES,

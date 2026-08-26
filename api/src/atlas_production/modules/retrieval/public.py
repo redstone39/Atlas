@@ -529,6 +529,34 @@ class ClaimedEvidenceLineageV1(_StrictModel):
     page_number: int | None = Field(default=None, ge=1)
     locator_label: str | None = Field(default=None, max_length=500)
 
+class ResearchEvidenceProjectionItemV1(_StrictModel):
+    evidence_handle: Identity = Field(exclude=True, repr=False)
+    evidence_id: Identity
+    kind: Literal["text", "visual", "native"]
+    title: str = Field(min_length=1, max_length=500)
+    page: int | None = Field(default=None, ge=1)
+    locator: str = Field(min_length=1, max_length=1_000)
+    available_representations: list[Literal["text", "visual", "native"]] = Field(
+        min_length=1, max_length=3
+    )
+    lineage_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_visible_content: str = Field(max_length=50_000, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def require_unique_representations(self) -> "ResearchEvidenceProjectionItemV1":
+        if len(self.available_representations) != len(
+            set(self.available_representations)
+        ):
+            raise ValueError("research evidence representations must be unique")
+        return self
+
+
+class ResearchEvidenceProjectionV1(_StrictModel):
+    execution_id: Identity
+    catalog_ref: OpaqueRef
+    items: list[ResearchEvidenceProjectionItemV1] = Field(max_length=100)
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
 
 class DiscoveryChannelTraceV1(_StrictModel):
     channel: Literal["lexical", "vector"]
@@ -601,6 +629,7 @@ class RetrievalOwner(Protocol):
         action: KnowledgeToolActionV1,
         max_output_tokens: int,
         tokenizer_profile: str,
+        authority_mode: Literal["current", "accepted_catalog"] = "current",
         max_output_bytes: int = 262_144,
         deadline_at: AwareDatetime | None = None,
     ) -> RetrievalInvocationEnvelopeV1: ...
@@ -641,6 +670,15 @@ class RetrievalOwner(Protocol):
         catalog_ref: OpaqueRef,
         handles: list[Identity],
     ) -> list[ClaimedEvidenceLineageV1]: ...
+
+    def project_research_evidence(
+        self,
+        *,
+        execution_id: Identity,
+        catalog_ref: OpaqueRef,
+        handles: list[Identity],
+        visual_images: list[VisualImagePayloadV1],
+    ) -> ResearchEvidenceProjectionV1: ...
 
     def read_discovery_traces(
         self,
@@ -712,6 +750,8 @@ __all__ = [
     "DeclaredEvidenceItemV1",
     "DeclaredEvidenceSubsetV1",
     "ClaimedEvidenceLineageV1",
+    "ResearchEvidenceProjectionItemV1",
+    "ResearchEvidenceProjectionV1",
     "DiscoveryChannelTraceV1",
     "DiscoveryCandidateComponentV1",
     "DiscoveryCandidateLineageV1",

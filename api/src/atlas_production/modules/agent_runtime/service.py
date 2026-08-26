@@ -1,126 +1,115 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import uuid4
 
-from .api_models import AgentQueryRequest
-from .contracts import AgentQueryOutcomeV1
-from .ports import AgentQueryAuditWriter, AgentQueryAuthority
-
+from .api_models import StartAgentResearchV1
+from .contracts import AgentResearchReplayConflict, StartAgentResearchOutcomeV1
+from .ports import (
+    AgentResearchAuditWriter,
+    AgentResearchAuthority,
+    AgentResearchStore,
+)
 
 @dataclass(frozen=True, slots=True)
-class AgentRuntimeApplication:
-    """Own the fail-closed Agent Query use case and its audit decisions."""
+class AgentResearchService:
+    """Accept one independently authorized, immutable single-round research."""
 
-    authority: AgentQueryAuthority
-    audit_writer: AgentQueryAuditWriter
+    authority: AgentResearchAuthority
+    store: AgentResearchStore
+    audit_writer: AgentResearchAuditWriter
 
-    def query(
-        self, *, payload: AgentQueryRequest, raw_token: str | None
-    ) -> AgentQueryOutcomeV1:
-        authorization = self.authority.authorize(
+    def start(
+        self, *, payload: StartAgentResearchV1, raw_token: str | None
+    ) -> StartAgentResearchOutcomeV1:
+        request_digest = payload.canonical_payload_digest()
+        replay_actor_id = self.authority.identify_replay_actor(raw_token=raw_token)
+        if replay_actor_id is not None:
+            replay = self.store.find_replay(
+                actor_id=replay_actor_id,
+                idempotency_key=payload.idempotency_key,
+            )
+            if replay is not None:
+                if replay.request_digest != request_digest:
+                    raise AgentResearchReplayConflict(
+                        "research replay payload conflicts with the original"
+                    )
+                audit = self.audit_writer.append_read_audit(
+                    "agent_research_replayed",
+                    actor_id=replay_actor_id,
+                    target_ref=f"agent-research:{replay.research_id}",
+                    project_id=None,
+                    message_code="agent.research_replayed",
+                    metadata={
+                        "research_id": replay.research_id,
+                        "execution_id": replay.execution_id,
+                        "output_mode": replay.output_mode,
+                    },
+                )
+                return StartAgentResearchOutcomeV1(
+                    status="replayed",
+                    audit_event_ref=audit.event_id,
+                    record=replay,
+                )
+        research_id = f"research-{uuid4().hex}"
+        execution_id = f"research-execution-{uuid4().hex}"
+        acceptance = self.authority.accept_research(
             raw_token=raw_token,
-            project_id=payload.project_id,
-        )
-        if authorization.status == "invalid_token":
-            return self._outcome(
-                payload=payload,
-                event_type="agent_query_denied",
-                error_code="invalid_agent_token",
-                message_code="agent.token_is_missing_or_invalid",
-                status_code=401,
-                actor_id=None,
-                target_ref=None,
-                metadata={"reason": "invalid_agent_token"},
-            )
-        actor_id = authorization.actor_id
-        fingerprint = authorization.token_fingerprint
-        if authorization.status == "invalid_agent":
-            assert actor_id is not None and fingerprint is not None
-            return self._outcome(
-                payload=payload,
-                event_type="agent_query_denied",
-                error_code="invalid_agent_token",
-                message_code="agent.token_is_missing_or_invalid",
-                audit_message_code="agent.user_is_inactive_or_missing",
-                status_code=401,
-                actor_id=actor_id,
-                target_ref=f"agent:{actor_id}",
-                metadata={
-                    "reason": "invalid_agent_user",
-                    "token_fingerprint": fingerprint,
-                },
-            )
-        if authorization.status == "revoked":
-            assert actor_id is not None
-            assert authorization.token_id is not None and fingerprint is not None
-            return self._outcome(
-                payload=payload,
-                event_type="agent_query_denied",
-                error_code="agent_token_revoked",
-                message_code="agent.token_has_been_revoked",
-                status_code=403,
-                actor_id=actor_id,
-                target_ref=f"agent-token:{authorization.token_id}",
-                metadata={
-                    "reason": "agent_token_revoked",
-                    "token_fingerprint": fingerprint,
-                },
-            )
-        assert actor_id is not None
-        assert authorization.access_decision_id is not None and fingerprint is not None
-        if authorization.status == "denied":
-            return self._outcome(
-                payload=payload,
-                event_type="agent_query_denied",
-                error_code="agent_project_access_denied",
-                message_code="agent.does_not_have_active_access_to_this_project",
-                status_code=403,
-                actor_id=actor_id,
-                target_ref=f"agent:{actor_id}",
-                metadata={
-                    "reason": "agent_project_access_denied",
-                    "access_decision_id": authorization.access_decision_id,
-                    "token_fingerprint": fingerprint,
-                },
-            )
-        return self._outcome(
             payload=payload,
-            event_type="agent_query_deferred",
-            error_code="feature_deferred",
-            message_code="agent.query_execution_is_deferred_until_runtime_is_available",
-            status_code=501,
-            actor_id=actor_id,
-            target_ref=f"agent:{actor_id}",
+            research_id=research_id,
+            execution_id=execution_id,
+            request_digest=request_digest,
+        )
+        authorization = acceptance.authorization
+        if authorization.status != "allowed":
+            actor_id = authorization.actor_id
+            reason = {
+                "invalid_token": "invalid_agent_token",
+                "invalid_agent": "invalid_agent_token",
+                "revoked": "agent_token_revoked",
+                "denied": "agent_research_scope_denied",
+            }[authorization.status]
+            message_code = {
+                "invalid_token": "agent.token_is_missing_or_invalid",
+                "invalid_agent": "agent.token_is_missing_or_invalid",
+                "revoked": "agent.token_has_been_revoked",
+                "denied": "agent.research_scope_is_not_authorized",
+            }[authorization.status]
+            audit = self.audit_writer.append_read_audit(
+                "agent_research_denied",
+                actor_id=actor_id,
+                target_ref=None if actor_id is None else f"agent:{actor_id}",
+                project_id=None,
+                message_code=message_code,
+                metadata={"reason": reason},
+            )
+            return StartAgentResearchOutcomeV1(
+                status="denied",
+                error_code=reason,
+                message_code=message_code,
+                audit_event_ref=audit.event_id,
+            )
+
+        assert authorization.actor_id is not None
+        assert acceptance.record is not None
+        record = acceptance.record
+        replayed = acceptance.replayed
+        audit = self.audit_writer.append_read_audit(
+            "agent_research_replayed" if replayed else "agent_research_accepted",
+            actor_id=authorization.actor_id,
+            target_ref=f"agent-research:{record.research_id}",
+            project_id=None,
+            message_code=(
+                "agent.research_replayed" if replayed else "agent.research_accepted"
+            ),
             metadata={
-                "access_decision_id": authorization.access_decision_id,
-                "token_fingerprint": fingerprint,
+                "research_id": record.research_id,
+                "execution_id": record.execution_id,
+                "output_mode": record.output_mode,
             },
         )
-
-    def _outcome(
-        self,
-        *,
-        payload: AgentQueryRequest,
-        event_type: str,
-        error_code: str,
-        message_code: str,
-        status_code: int,
-        actor_id: str | None,
-        target_ref: str | None,
-        metadata: dict[str, object],
-        audit_message_code: str | None = None,
-    ) -> AgentQueryOutcomeV1:
-        audit = self.audit_writer.append_read_audit(
-            event_type,
-            actor_id=actor_id,
-            target_ref=target_ref,
-            project_id=payload.project_id,
-            message_code=audit_message_code or message_code,
-            metadata=metadata,
-        )
-        return AgentQueryOutcomeV1(
-            error_code=error_code,
-            message_code=message_code,
-            status_code=status_code,
+        return StartAgentResearchOutcomeV1(
+            status="replayed" if replayed else "accepted",
             audit_event_ref=audit.event_id,
+            record=record,
         )

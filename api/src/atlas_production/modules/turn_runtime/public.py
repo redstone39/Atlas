@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 import json
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -18,6 +18,7 @@ OpaqueRef = Annotated[str, Field(min_length=1, max_length=300)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MessageParamString = Annotated[str, Field(max_length=500)]
 MessageParamValue = MessageParamString | int | bool | None
+ResultKind = Literal["conversation_answer", "agent_research"]
 
 
 class _StrictModel(BaseModel):
@@ -473,6 +474,58 @@ class TurnRouteSnapshotV2(_StrictModel):
         return self
 
 
+
+def turn_route_snapshots(
+    route: Any, vision_route: Any | None
+) -> tuple[TurnRouteSnapshotV2, RoutePolicyV1]:
+    """Project tested model routes into immutable execution contracts."""
+
+    policy = route.runtime_policy
+    vision_snapshot = None
+    if vision_route is not None:
+        vision_policy = vision_route.runtime_policy
+        vision_snapshot = VisionRouteSnapshotV1(
+            route_id=vision_route.route_id,
+            route_revision=vision_route.revision,
+            runtime_policy_revision=vision_policy.revision,
+            tokenizer_profile=vision_policy.tokenizer_profile,
+            context_window_tokens=vision_policy.context_window_tokens,
+            max_input_tokens_per_invocation=vision_policy.max_input_tokens_per_invocation,
+            max_output_tokens_per_invocation=vision_policy.max_output_tokens_per_invocation,
+            max_tool_result_tokens_per_execution=vision_policy.max_tool_result_tokens_per_execution,
+            max_total_tokens_per_conversation=vision_policy.max_total_tokens_per_conversation,
+        )
+    return (
+        TurnRouteSnapshotV2(
+            route_id=route.route_id,
+            route_revision=route.revision,
+            runtime_policy_revision=policy.revision,
+            tokenizer_profile=policy.tokenizer_profile,
+            context_window_tokens=policy.context_window_tokens,
+            max_input_tokens_per_invocation=policy.max_input_tokens_per_invocation,
+            max_output_tokens_per_invocation=policy.max_output_tokens_per_invocation,
+            max_tool_result_tokens_per_execution=policy.max_tool_result_tokens_per_execution,
+            max_total_tokens_per_conversation=policy.max_total_tokens_per_conversation,
+            vision_route=vision_snapshot,
+        ),
+        RoutePolicyV1(
+            max_tool_invocations=policy.max_tool_executions,
+            max_provider_invocations=policy.max_provider_invocations,
+            max_reasoning_revision_cycles=policy.max_reasoning_revision_cycles,
+            max_schema_retries_per_turn=policy.max_schema_retries_per_turn,
+            max_catalog_pages=policy.max_catalog_pages,
+            max_search_rounds=policy.max_search_rounds,
+            max_model_visible_items_per_turn=policy.max_model_visible_items_per_turn,
+            max_retrieval_repairs=policy.max_retrieval_repairs,
+            max_selected_anchor_pages_per_round=policy.max_selected_anchor_pages_per_round,
+            context_token_budget=policy.max_input_tokens_per_invocation,
+            tool_token_budget=policy.max_tool_result_tokens_per_execution,
+            tool_execution_timeout_seconds=policy.tool_execution_timeout_seconds,
+            deadline_seconds=policy.turn_timeout_seconds,
+        ),
+    )
+
+
 class BudgetSnapshotV1(_StrictModel):
     tool_invocations: int = Field(ge=0)
     catalog_pages: int = Field(ge=0)
@@ -516,9 +569,12 @@ def _require_prompt_skill_catalog_shape(
 
 class ExecutionSnapshotV1(_StrictModel):
     execution_id: Identity
-    turn_id: Identity
-    conversation_id: Identity
+    turn_id: Identity | None = None
+    conversation_id: Identity | None = None
+    research_id: Identity | None = None
     actor_id: Identity
+    operation: Literal["create_turn", "retry_turn", "agent_research"] = "create_turn"
+    result_kind: ResultKind = "conversation_answer"
     state: ExecutionState
     version: int = Field(ge=1)
     policy: RoutePolicyV1
@@ -550,6 +606,18 @@ class ExecutionSnapshotV1(_StrictModel):
 
     @model_validator(mode="after")
     def require_snapshot_shape(self) -> "ExecutionSnapshotV1":
+        conversation_identity = (
+            self.turn_id is not None and self.conversation_id is not None
+        )
+        has_any_conversation_identity = (
+            self.turn_id is not None or self.conversation_id is not None
+        )
+        research_identity = self.research_id is not None
+        if self.result_kind == "conversation_answer":
+            if not conversation_identity or research_identity or self.operation == "agent_research":
+                raise ValueError("conversation execution requires only turn/conversation identity")
+        elif has_any_conversation_identity or not research_identity or self.operation != "agent_research":
+            raise ValueError("agent research execution requires only research identity")
         if (self.applied_guidance_revision == 0) != (
             self.applied_guidance_digest is None
         ):
@@ -614,15 +682,17 @@ class ExecutionSnapshotV1(_StrictModel):
 
 class AllocateExecutionV1(_StrictModel):
     execution_id: Identity
-    turn_id: Identity
-    conversation_id: Identity
+    turn_id: Identity | None = None
+    conversation_id: Identity | None = None
+    research_id: Identity | None = None
     actor_id: Identity
     holder_id: Identity
     route_policy: RoutePolicyV1
     route: TurnRouteSnapshotV2
     lease_policy: LeasePolicyV1
     idempotency_key: Identity
-    operation: Literal["create_turn", "retry_turn"]
+    operation: Literal["create_turn", "retry_turn", "agent_research"]
+    result_kind: ResultKind = "conversation_answer"
     retry_of_turn_id: Identity | None
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_language: ResponseLanguage
@@ -639,6 +709,17 @@ class AllocateExecutionV1(_StrictModel):
     def require_retry_source_only_for_retry(self) -> "AllocateExecutionV1":
         if (self.operation == "retry_turn") != (self.retry_of_turn_id is not None):
             raise ValueError("retry operation requires exactly one retry source turn")
+        conversation_identity = (
+            self.turn_id is not None and self.conversation_id is not None
+        )
+        has_any_conversation_identity = (
+            self.turn_id is not None or self.conversation_id is not None
+        )
+        if self.result_kind == "conversation_answer":
+            if not conversation_identity or self.research_id is not None or self.operation == "agent_research":
+                raise ValueError("conversation allocation requires only turn/conversation identity")
+        elif has_any_conversation_identity or self.research_id is None or self.operation != "agent_research":
+            raise ValueError("agent research allocation requires only research identity")
         if (self.applied_guidance_revision == 0) != (
             self.applied_guidance_digest is None
         ):
@@ -681,6 +762,11 @@ class BindContextV1(_StrictModel):
     expected_version: int = Field(ge=1)
     fencing_token: int = Field(ge=1)
     context_pack_ref: OpaqueRef
+
+class ActivateResearchExecutionV1(_StrictModel):
+    execution_id: Identity
+    expected_version: int = Field(ge=1)
+    fencing_token: int = Field(ge=1)
 
 
 class ReserveAcceptanceModelActionV1(_StrictModel):
@@ -785,10 +871,37 @@ class PrepareTerminalV1(_StrictModel):
     execution_id: Identity
     expected_version: int = Field(ge=1)
     fencing_token: int = Field(ge=1)
+    result_kind: ResultKind = "conversation_answer"
     evidence_pack_ref: OpaqueRef
-    governed_answer_draft_ref: OpaqueRef
-    citation_binding_draft_ref: OpaqueRef
+    governed_answer_draft_ref: OpaqueRef | None = None
+    citation_binding_draft_ref: OpaqueRef | None = None
+    research_packet_ref: OpaqueRef | None = None
+    research_packet_digest: Digest | None = None
     audit_draft_ref: OpaqueRef
+
+    @model_validator(mode="after")
+    def require_terminal_kind_shape(self) -> "PrepareTerminalV1":
+        answer_refs = (
+            self.governed_answer_draft_ref,
+            self.citation_binding_draft_ref,
+        )
+        if self.result_kind == "conversation_answer":
+            if (
+                any(ref is None for ref in answer_refs)
+                or self.research_packet_ref is not None
+                or self.research_packet_digest is not None
+            ):
+                raise ValueError(
+                    "conversation terminal requires answer/citation and no packet"
+                )
+        else:
+            if self.research_packet_ref is None or self.research_packet_digest is None:
+                raise ValueError(
+                    "agent research terminal requires a research packet and digest"
+                )
+            if (answer_refs[0] is None) != (answer_refs[1] is None):
+                raise ValueError("agent research optional answer and citation refs are paired")
+        return self
 
 
 class CommitTerminalV1(_StrictModel):
@@ -907,28 +1020,55 @@ class TerminalOutcomeV1(_StrictModel):
     execution_id: Identity
     scan_sequence: int = Field(ge=1)
     outcome: Literal["completed", "failed"]
+    result_kind: ResultKind = "conversation_answer"
     terminal_commit_intent_ref: OpaqueRef | None = None
     evidence_pack_ref: OpaqueRef | None = None
     governed_answer_draft_ref: OpaqueRef | None = None
     citation_binding_draft_ref: OpaqueRef | None = None
+    research_packet_ref: OpaqueRef | None = None
+    research_packet_digest: Digest | None = None
     audit_draft_ref: OpaqueRef | None = None
     failure_code: str | None = Field(default=None, min_length=1, max_length=100)
     committed_at: AwareDatetime
 
     @model_validator(mode="after")
     def require_exact_outcome_shape(self) -> "TerminalOutcomeV1":
-        completed_refs = (
+        common_refs = (
             self.terminal_commit_intent_ref,
             self.evidence_pack_ref,
-            self.governed_answer_draft_ref,
-            self.citation_binding_draft_ref,
             self.audit_draft_ref,
         )
-        if self.outcome == "completed":
-            if any(value is None for value in completed_refs) or self.failure_code is not None:
-                raise ValueError("completed terminal outcome requires immutable refs only")
-        elif any(value is not None for value in completed_refs) or self.failure_code is None:
-            raise ValueError("failed terminal outcome requires only failure_code")
+        answer_refs = (
+            self.governed_answer_draft_ref,
+            self.citation_binding_draft_ref,
+        )
+        all_refs = (
+            *common_refs,
+            *answer_refs,
+            self.research_packet_ref,
+            self.research_packet_digest,
+        )
+        if self.outcome == "failed":
+            if any(value is not None for value in all_refs) or self.failure_code is None:
+                raise ValueError("failed terminal outcome requires only failure_code")
+            return self
+        if any(value is None for value in common_refs) or self.failure_code is not None:
+            raise ValueError("completed terminal outcome requires immutable common refs")
+        if self.result_kind == "conversation_answer":
+            if (
+                any(value is None for value in answer_refs)
+                or self.research_packet_ref is not None
+                or self.research_packet_digest is not None
+            ):
+                raise ValueError("conversation outcome requires the existing five refs")
+        elif (
+            self.research_packet_ref is None
+            or self.research_packet_digest is None
+            or (answer_refs[0] is None) != (answer_refs[1] is None)
+        ):
+            raise ValueError(
+                "research outcome requires packet ref/digest and paired optional answer refs"
+            )
         return self
 
 
@@ -958,6 +1098,10 @@ class TurnRuntimeOwner(Protocol):
 
     def reserve_acceptance_model_action(
         self, command: ReserveAcceptanceModelActionV1
+    ) -> ExecutionSnapshotV1: ...
+
+    def activate_research(
+        self, command: ActivateResearchExecutionV1
     ) -> ExecutionSnapshotV1: ...
 
     def request_model_action(self, command: RequestModelActionV1) -> ExecutionSnapshotV1: ...
@@ -998,6 +1142,7 @@ class TurnRuntimeOwner(Protocol):
 
 
 __all__ = [
+    "ResultKind",
     "ExecutionState",
     "TERMINAL_STATES",
     "TurnRuntimeError",
@@ -1021,6 +1166,7 @@ __all__ = [
     "ReasoningTraceV4",
     "TurnRouteSnapshotV2",
     "VisionRouteSnapshotV1",
+    "turn_route_snapshots",
     "BudgetSnapshotV1",
     "ExecutionLeaseV1",
     "ExecutionSnapshotV1",
@@ -1029,6 +1175,7 @@ __all__ = [
     "StageAcceptanceResourceV1",
     "BindContextV1",
     "ReserveAcceptanceModelActionV1",
+    "ActivateResearchExecutionV1",
     "RequestModelActionV1",
     "ClaimSchemaRetryV1",
     "RecordReasoningProgressV1",

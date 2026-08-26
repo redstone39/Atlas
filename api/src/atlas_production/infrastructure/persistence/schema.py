@@ -5,6 +5,7 @@ no database access, state initialization, payload serialization, or repository
 construction.
 """
 
+from . import agent_runtime as _agent_runtime
 from . import artifact_storage as _artifact_storage
 from . import async_processing as _async_processing
 from . import audit_events as _audit_events

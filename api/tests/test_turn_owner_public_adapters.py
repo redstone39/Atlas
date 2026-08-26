@@ -434,9 +434,10 @@ def test_evidence_pack_read_enriches_authorization_lineage_without_model_id_leak
 
 
 class _RuntimeSession:
-    def __init__(self, outcome, intent=None) -> None:
+    def __init__(self, outcome, intent=None, *, result_kind="conversation_answer") -> None:
         self.outcome = outcome
         self.intent = intent
+        self.execution = SimpleNamespace(result_kind=result_kind)
 
     def __enter__(self):
         return self
@@ -445,8 +446,11 @@ class _RuntimeSession:
         return None
 
     def get(self, model, _key):
-        return self.outcome if model.__name__.endswith("TerminalOutcomeRow") else self.intent
-
+        if model.__name__.endswith("TerminalOutcomeRow"):
+            return self.outcome
+        if model.__name__.endswith("ExecutionRow"):
+            return self.execution
+        return self.intent
 
 def test_terminal_outcome_read_exposes_completed_refs_or_failed_code() -> None:
     completed = SimpleNamespace(
@@ -454,9 +458,10 @@ def test_terminal_outcome_read_exposes_completed_refs_or_failed_code() -> None:
         terminal_intent_ref="intent-1", failure_code=None, committed_at=NOW,
     )
     intent = SimpleNamespace(
-        execution_id="execution-1", evidence_pack_ref="pack-1",
-        governed_answer_draft_ref="answer-1", citation_binding_draft_ref="citation-1",
-        audit_draft_ref="audit-1",
+        execution_id="execution-1", result_kind="conversation_answer",
+        evidence_pack_ref="pack-1", governed_answer_draft_ref="answer-1",
+        citation_binding_draft_ref="citation-1", audit_draft_ref="audit-1",
+        research_packet_ref=None, research_packet_digest=None,
     )
     owner = PostgresTurnRuntimeOwner(lambda: _RuntimeSession(completed, intent))
     assert owner.terminal_outcome("execution-1").evidence_pack_ref == "pack-1"  # type: ignore[union-attr]

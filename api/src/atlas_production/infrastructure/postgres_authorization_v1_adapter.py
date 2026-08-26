@@ -18,6 +18,7 @@ from atlas_production.infrastructure.postgres_owner.authorization import (
 )
 from atlas_production.modules.authorization.public import (
     CreateTurnAccessGrantV1,
+    CreateResearchAccessGrantV1,
     CurrentResourceAuthorizationReader,
     CurrentResourceAuthorizationSnapshotV1,
     GrantDocumentResourceSnapshotV1,
@@ -218,6 +219,55 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
             return _grant_ref(replay)
         return _grant_ref(created)
 
+    def create_research_grant(
+        self, command: CreateResearchAccessGrantV1
+    ) -> TurnAccessGrantRefV1:
+        authorization_revision = int(command.scope_digest[:15], 16) + 1
+        authority_digest = command.scope_digest
+        grant_ref = _opaque(
+            "grant",
+            {
+                "execution_id": command.execution_id,
+                "research_id": command.research_id,
+                "actor_id": command.actor_id,
+                "scope_ref": command.scope_ref,
+                "scope_digest": command.scope_digest,
+                "deadline_at": command.deadline_at.isoformat(),
+                "idempotency_key": command.idempotency_key,
+            },
+        )
+        replay = self._store.get_grant_by_idempotency(
+            actor_id=command.actor_id, idempotency_key=command.idempotency_key
+        )
+        if replay is not None:
+            self._validate_research_grant_replay(command, grant_ref, replay)
+            return _grant_ref(replay)
+        try:
+            created = self._store.create_grant(
+                CreateGrantInput(
+                    grant_ref=grant_ref,
+                    execution_id=command.execution_id,
+                    actor_id=command.actor_id,
+                    # The owner-local store persists one generic execution subject.
+                    # Research grants use research_id and never enter the
+                    # conversation-currentness read path.
+                    conversation_id=command.research_id,
+                    authorization_revision=authorization_revision,
+                    authority_digest=authority_digest,
+                    deadline_at=command.deadline_at,
+                    idempotency_key=command.idempotency_key,
+                )
+            )
+        except AuthorizationStoreConflict:
+            replay = self._store.get_grant_by_idempotency(
+                actor_id=command.actor_id, idempotency_key=command.idempotency_key
+            )
+            if replay is None:
+                raise
+            self._validate_research_grant_replay(command, grant_ref, replay)
+            return _grant_ref(replay)
+        return _grant_ref(created)
+
     def current_grant_document_resources(
         self,
         *,
@@ -276,6 +326,23 @@ class PostgresAuthorizationV1Adapter(_GrantDocumentResourceAdapter):
             or replay.deadline_at != command.deadline_at
         ):
             raise AuthorizationStoreConflict("grant replay public command changed")
+
+    @staticmethod
+    def _validate_research_grant_replay(
+        command: CreateResearchAccessGrantV1,
+        expected_grant_ref: str,
+        replay: GrantRecord,
+    ) -> None:
+        if (
+            replay.grant_ref != expected_grant_ref
+            or replay.execution_id != command.execution_id
+            or replay.actor_id != command.actor_id
+            or replay.conversation_id != command.research_id
+            or replay.deadline_at != command.deadline_at
+        ):
+            raise AuthorizationStoreConflict(
+                "research grant replay public command changed"
+            )
 
     def release_grant(self, command: ReleaseTurnAccessGrantV1) -> None:
         # This read closes before the release transaction starts.  Its immutable

@@ -16,8 +16,10 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_execution.public import (
     FinalizeAnswerV1,
+    FinalizeResearchV1,
     TurnModelCapabilitySnapshotV1,
     finalize_answer_schema,
+    finalize_research_schema,
 )
 from atlas_production.providers import build_native_json_schema
 
@@ -217,9 +219,13 @@ def _tool(
 
 
 def _final_schema(capabilities: TurnModelCapabilitySnapshotV1):
-    application_schema = deepcopy(finalize_answer_schema())
+    research = "finalize_research" in capabilities.allowed_actions
+    application_schema = deepcopy(
+        finalize_research_schema() if research else finalize_answer_schema()
+    )
+    kind = "research" if research else "answer"
     return build_native_json_schema(
-        f"finalize_answer_v1_{capabilities.digest[:12]}", application_schema
+        f"finalize_{kind}_v1_{capabilities.digest[:12]}", application_schema
     )
 
 
@@ -237,6 +243,7 @@ def _within_capabilities(
         action,
         (
             FinalizeAnswerV1,
+            FinalizeResearchV1,
             FindKnowledgeDocumentsV1,
             DiscoverRelevantDocumentsV1,
             InspectVisualV1,
@@ -293,5 +300,12 @@ def _within_capabilities(
                 )
             )
         )
-    assert isinstance(action, FinalizeAnswerV1)
+    assert isinstance(action, (FinalizeAnswerV1, FinalizeResearchV1))
+    evidence = {item.evidence_handle for item in capabilities.evidence}
+    visual = {item.handle for item in capabilities.visuals}
+    if isinstance(action, FinalizeResearchV1):
+        return all(
+            set(finding.claimed_evidence_handles).issubset(evidence | visual)
+            for finding in action.findings
+        )
     return True

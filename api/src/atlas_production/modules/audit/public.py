@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from atlas_production.modules.result_governance.public import (
     EvidenceReviewStatusV2,
@@ -33,6 +33,25 @@ Identity = Annotated[str, Field(min_length=1, max_length=200)]
 OpaqueRef = Annotated[str, Field(min_length=1, max_length=300)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
+
+
+def _require_answer_or_research_result(value):
+    packet = (value.research_packet_ref, value.research_packet_digest)
+    answer = (
+        value.governed_answer_draft_ref,
+        value.governed_answer_digest,
+        value.citation_binding_draft_ref,
+        value.citation_binding_digest,
+    )
+    has_packet = all(item is not None for item in packet)
+    has_answer = all(item is not None for item in answer)
+    if any(item is not None for item in packet) != has_packet:
+        raise ValueError("audit research packet ref and digest must be paired")
+    if any(item is not None for item in answer) != has_answer:
+        raise ValueError("audit governed answer and citation refs must be complete")
+    if not has_packet and not has_answer:
+        raise ValueError("audit requires a conversation answer or research packet")
+    return value
 
 class TurnAuditStepV1(_StrictTurnAuditDraftModel):
     ordinal: int = Field(ge=1)
@@ -89,15 +108,33 @@ class MaterializeTurnAuditDraftV2(_StrictTurnAuditDraftModel):
     claimed_evidence_handles: list[Identity] = Field(max_length=100)
     evidence_pack_ref: OpaqueRef
     evidence_pack_digest: Digest
-    governed_answer_draft_ref: OpaqueRef
-    governed_answer_digest: Digest
-    citation_binding_draft_ref: OpaqueRef
-    citation_binding_digest: Digest
+    governed_answer_draft_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    governed_answer_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    citation_binding_draft_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    citation_binding_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     retrieval_status: RetrievalStatusV1
     evidence_review_status: EvidenceReviewStatusV2
     terminal_status: Literal["terminal_completed"]
     steps: list[TurnAuditStepV1] = Field(max_length=40)
     idempotency_key: Identity
+
+    @model_validator(mode="after")
+    def require_result_shape(self) -> "MaterializeTurnAuditDraftV2":
+        return _require_answer_or_research_result(self)
 
 
 class TurnAuditDraftV2(_StrictTurnAuditDraftModel):
@@ -107,16 +144,34 @@ class TurnAuditDraftV2(_StrictTurnAuditDraftModel):
     claimed_evidence_handles: list[Identity]
     evidence_pack_ref: OpaqueRef
     evidence_pack_digest: Digest
-    governed_answer_draft_ref: OpaqueRef
-    governed_answer_digest: Digest
-    citation_binding_draft_ref: OpaqueRef
-    citation_binding_digest: Digest
+    governed_answer_draft_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    governed_answer_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    citation_binding_draft_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    citation_binding_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_ref: OpaqueRef | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    research_packet_digest: Digest | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     retrieval_status: RetrievalStatusV1
     evidence_review_status: EvidenceReviewStatusV2
     terminal_status: Literal["terminal_completed"]
     steps: list[TurnAuditStepV1]
     digest: Digest
     created_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def require_result_shape(self) -> "TurnAuditDraftV2":
+        return _require_answer_or_research_result(self)
 
 
 class ReleaseTurnAuditDraftV1(_StrictTurnAuditDraftModel):

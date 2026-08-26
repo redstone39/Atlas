@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from .routes import (
     agent_access,
-    agent_runtime,
+    agent_research_audit,
     answer_behavior,
     auth,
     conversations,
@@ -47,6 +47,7 @@ def create_openapi_app() -> FastAPI:
         auth.router,
         invitations.router,
         agent_access.router,
+        agent_research_audit.router,
         answer_behavior.router,
         conversation_learning.router,
         rbac_admin.router,
@@ -62,7 +63,6 @@ def create_openapi_app() -> FastAPI:
         model_routes.router,
         conversations.router,
         workspace.router,
-        agent_runtime.router,
     ):
         app.include_router(router)
 

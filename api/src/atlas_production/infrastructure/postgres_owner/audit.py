@@ -66,6 +66,7 @@ class AuditRepository:
             return audit_events.read_recent_events(session, limit=limit)
 
 
+
 __all__ = [
     "AccessDecisionWriter",
     "AuditEventWriter",

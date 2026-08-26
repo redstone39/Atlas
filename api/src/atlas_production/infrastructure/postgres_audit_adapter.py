@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
+
+from atlas_production.infrastructure.persistence import audit_events
 
 from atlas_production.infrastructure.postgres_owner.audit import (
     AuditEventWriter,
@@ -81,6 +84,44 @@ class PostgresAuditConsumerAdapter:
     def recent_events(self, *, limit: int = 50) -> list[AuditEventRecord]:
         return self.owner.recent_events(limit=limit)
 
+
+@dataclass(frozen=True, slots=True)
+class PostgresAgentResearchAuditReader:
+    """Agent Research-only audit projection with no arbitrary query surface."""
+
+    session_factory: SessionFactory
+
+    def denials(
+        self,
+        *,
+        after: tuple[datetime, str] | None,
+        upper: tuple[datetime, str] | None,
+        limit: int,
+    ) -> list[AuditEventRecord]:
+        if limit < 1 or limit > 101:
+            raise ValueError("research denial limit must be between 1 and 101")
+        with self.session_factory() as session:
+            return audit_events.read_agent_research_denials(
+                session,
+                after=after,
+                upper=upper,
+                limit=limit,
+            )
+
+    def timeline(
+        self,
+        *,
+        research_id: str,
+        limit: int = 200,
+    ) -> list[AuditEventRecord]:
+        if not research_id or limit < 1 or limit > 200:
+            raise ValueError("research audit timeline query is invalid")
+        with self.session_factory() as session:
+            return audit_events.read_agent_research_timeline(
+                session,
+                research_id=research_id,
+                limit=limit,
+            )
 
 
 @dataclass(frozen=True, slots=True)

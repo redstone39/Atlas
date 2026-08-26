@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from atlas_production.infrastructure.mcp_research import PostgresMcpAgentAccess
 from atlas_production.infrastructure.postgres_agent_adapter import (
-    PostgresAgentQueryAuthority,
     PostgresAgentAccessRepository,
 )
 from atlas_production.infrastructure.postgres_audit_adapter import (
@@ -1562,36 +1562,14 @@ class _AgentAuthoritySession(_AclSession):
 )
 def test_raw_agent_principal_matrix(kwargs: dict[str, object], expected: str) -> None:
     session = _AgentAuthoritySession(**kwargs)
-    result = PostgresAgentQueryAuthority(lambda: session).authorize(
-        raw_token=session.raw,
-        project_id="project-unit",
-    )
+    result = PostgresMcpAgentAccess(lambda: session).current_identity(session.raw)
     assert result.status == expected
     if expected == "allowed":
         assert result.actor_id == session.actor.actor_id
         assert result.token_fingerprint
-        assert result.access_decision_id
-        assert session.commits == 1
-        assert session.scalar_calls == 4
-        assert session.added
-    else:
-        assert session.commits == 0
+    assert session.commits == 0
 
 
-def test_raw_agent_missing_token_does_not_open_database() -> None:
-    opened = False
-
-    def factory():
-        nonlocal opened
-        opened = True
-        raise AssertionError("missing token must fail before SQL")
-
-    result = PostgresAgentQueryAuthority(factory).authorize(
-        raw_token=None,
-        project_id="project-unit",
-    )
-    assert result.status == "invalid_token"
-    assert opened is False
 
 
 def test_duplicate_raw_agent_digest_fails_closed() -> None:
@@ -1605,10 +1583,7 @@ def test_duplicate_raw_agent_digest_fails_closed() -> None:
         return original_scalars(statement)
 
     session.scalars = duplicate_tokens
-    result = PostgresAgentQueryAuthority(lambda: session).authorize(
-        raw_token=session.raw,
-        project_id="project-unit",
-    )
+    result = PostgresMcpAgentAccess(lambda: session).current_identity(session.raw)
     assert result.status == "invalid_token"
     assert session.scalar_calls == 0
 

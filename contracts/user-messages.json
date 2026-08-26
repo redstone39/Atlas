@@ -16,6 +16,39 @@
     "agent.does_not_have_active_access_to_this_project": {
       "params": {}
     },
+    "agent.mcp_scope_denied": {
+      "params": {}
+    },
+    "agent.mcp_scope_listed": {
+      "params": {}
+    },
+    "agent.mcp_tool_denied": {
+      "params": {}
+    },
+    "agent.research_accepted": {
+      "params": {}
+    },
+    "agent.research_evidence_denied": {
+      "params": {}
+    },
+    "agent.research_evidence_read": {
+      "params": {}
+    },
+    "agent.research_read": {
+      "params": {}
+    },
+    "agent.research_read_denied": {
+      "params": {}
+    },
+    "agent.research_replay_conflict": {
+      "params": {}
+    },
+    "agent.research_replayed": {
+      "params": {}
+    },
+    "agent.research_scope_is_not_authorized": {
+      "params": {}
+    },
     "agent.query_execution_is_deferred_until_runtime_is_available": {
       "params": {}
     },
@@ -900,6 +933,27 @@
       "params": {}
     },
     "audit.admin_opened_declared_evidence": {
+      "params": {}
+    },
+    "audit.admin_listed_agent_research": {
+      "params": {}
+    },
+    "audit.admin_opened_agent_research": {
+      "params": {}
+    },
+    "audit.admin_opened_agent_research_evidence": {
+      "params": {}
+    },
+    "audit.admin_opened_agent_research_runtime": {
+      "params": {}
+    },
+    "audit.agent_research_cursor_is_invalid": {
+      "params": {}
+    },
+    "audit.agent_research_evidence_was_not_found": {
+      "params": {}
+    },
+    "audit.agent_research_was_not_found": {
       "params": {}
     },
     "project.member_was_not_found_after_update": {

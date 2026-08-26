@@ -247,6 +247,7 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
         deadline_at: datetime,
         route: TurnRouteSnapshotV2,
         assessment_ordinal: int = 1,
+        evidence_handles_by_segment: dict[str, list[str]] | None = None,
     ) -> PostHocAnswerAssessmentResultV2:
         remaining = (deadline_at - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0:
@@ -298,11 +299,33 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
         answer_ids = [
             segment.segment_id for segment in finalized_answer.segments
         ]
+        known_handles = {
+            item.evidence_handle for item in declared_evidence_subset.items
+        }
+        if evidence_handles_by_segment is not None:
+            if set(evidence_handles_by_segment) != set(answer_ids):
+                raise ClaimAssessmentUnavailable(
+                    "research finding evidence mapping is incomplete",
+                    reason_code="invalid_output",
+                )
+            if any(
+                len(handles) != len(set(handles))
+                or not set(handles).issubset(known_handles)
+                for handles in evidence_handles_by_segment.values()
+            ):
+                raise ClaimAssessmentUnavailable(
+                    "research finding evidence mapping is invalid",
+                    reason_code="invalid_output",
+                )
+        answer_items = [
+            {"id": segment.segment_id, "text": segment.text}
+            for segment in finalized_answer.segments
+        ]
+        if evidence_handles_by_segment is not None:
+            for item in answer_items:
+                item["evidence_handles"] = evidence_handles_by_segment[str(item["id"])]
         payload = {
-            "answer_items": [
-                {"id": segment.segment_id, "text": segment.text}
-                for segment in finalized_answer.segments
-            ],
+            "answer_items": answer_items,
             "evidence_items": [
                 {
                     "id": item.evidence_handle,
@@ -398,6 +421,13 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
             "Do not return explanations or additional text.\n\n"
             "The provider-native JSON Schema is the sole output-format authority."
         )
+        if evidence_handles_by_segment is not None:
+            system += (
+                "\nEach answer item includes evidence_handles. Evaluate that item "
+                "using only its listed evidence handles, even when other evidence_items "
+                "are present for another item. An empty list cannot be evidence-aligned "
+                "for a material factual claim.\n"
+            )
         messages = [
             ProviderSystemMessage(content=system),
             ProviderUserMessage(content=_canonical(payload)),
@@ -485,6 +515,11 @@ class StrictPostHocClaimEvaluator(PostHocAnswerEvaluatorV2):
                 PostHocAnswerAssessmentV2(
                     id=answer_id,
                     status="success" if item_outcome == "aligned" else "failure",
+                    internal_consistency=(
+                        item_outcome
+                        if evidence_handles_by_segment is not None
+                        else None
+                    ),
                 )
                 for answer_id, item_outcome in zip(
                     answer_ids, decision.item_outcomes, strict=True

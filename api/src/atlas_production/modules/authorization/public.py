@@ -32,6 +32,16 @@ class CreateTurnAccessGrantV1(_StrictModel):
     idempotency_key: Identity
 
 
+class CreateResearchAccessGrantV1(_StrictModel):
+    execution_id: Identity
+    research_id: Identity
+    actor_id: Identity
+    scope_ref: OpaqueRef
+    scope_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deadline_at: AwareDatetime
+    idempotency_key: Identity
+
+
 class ReleaseTurnAccessGrantV1(_StrictModel):
     execution_id: Identity
     grant_ref: OpaqueRef
@@ -166,6 +176,10 @@ class GrantDocumentResourceOwner(Protocol):
 class AuthorizationOwner(GrantDocumentResourceOwner, Protocol):
     def create_grant(self, command: CreateTurnAccessGrantV1) -> TurnAccessGrantRefV1: ...
 
+    def create_research_grant(
+        self, command: CreateResearchAccessGrantV1
+    ) -> TurnAccessGrantRefV1: ...
+
     def release_grant(self, command: ReleaseTurnAccessGrantV1) -> None: ...
 
     def release_execution_grant(
@@ -183,6 +197,7 @@ class AuthorizationOwner(GrantDocumentResourceOwner, Protocol):
 __all__ = [
     "AuthorizationOwner",
     "CreateTurnAccessGrantV1",
+    "CreateResearchAccessGrantV1",
     "CurrentGrantAuthorizationSnapshotV1",
     "CurrentResourceAuthorizationReader",
     "CurrentResourceAuthorizationSnapshotV1",

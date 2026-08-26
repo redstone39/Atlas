@@ -20,9 +20,19 @@ class AtlasTurnExecutionRow(OrmBase):
     __tablename__ = "atlas_turn_executions"
 
     execution_id: Mapped[str] = mapped_column(String(200), primary_key=True)
-    turn_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
-    conversation_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    turn_id: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    research_id: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True)
     actor_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    operation: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="create_turn", server_default="create_turn"
+    )
+    result_kind: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="conversation_answer",
+        server_default="conversation_answer",
+    )
     input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     response_language: Mapped[str] = mapped_column(String(10), nullable=False)
     reasoning_mode: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -112,6 +122,19 @@ class AtlasTurnExecutionRow(OrmBase):
 
     __table_args__ = (
         CheckConstraint(f"state IN ({EXECUTION_STATES})", name="ck_atlas_turn_execution_state"),
+        CheckConstraint(
+            "operation IN ('create_turn','retry_turn','agent_research')",
+            name="ck_atlas_turn_execution_operation",
+        ),
+        CheckConstraint(
+            "result_kind IN ('conversation_answer','agent_research')",
+            name="ck_atlas_turn_execution_result_kind",
+        ),
+        CheckConstraint(
+            "(result_kind = 'conversation_answer' AND turn_id IS NOT NULL AND conversation_id IS NOT NULL AND research_id IS NULL AND operation IN ('create_turn','retry_turn')) OR "
+            "(result_kind = 'agent_research' AND turn_id IS NULL AND conversation_id IS NULL AND research_id IS NOT NULL AND operation = 'agent_research')",
+            name="ck_atlas_turn_execution_identity_shape",
+        ),
         CheckConstraint("version >= 1", name="ck_atlas_turn_execution_version"),
         CheckConstraint("input_digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_execution_input_digest"),
         CheckConstraint(
@@ -419,14 +442,24 @@ class AtlasTurnTerminalIntentRow(OrmBase):
     execution_id: Mapped[str] = mapped_column(
         String(200), ForeignKey("atlas_turn_executions.execution_id", ondelete="RESTRICT"), nullable=False, unique=True
     )
+    result_kind: Mapped[str] = mapped_column(String(30), nullable=False)
     evidence_pack_ref: Mapped[str] = mapped_column(String(300), nullable=False)
-    governed_answer_draft_ref: Mapped[str] = mapped_column(String(300), nullable=False)
-    citation_binding_draft_ref: Mapped[str] = mapped_column(String(300), nullable=False)
+    governed_answer_draft_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    citation_binding_draft_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    research_packet_ref: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    research_packet_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     audit_draft_ref: Mapped[str] = mapped_column(String(300), nullable=False)
     intent_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     prepared_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (CheckConstraint("intent_digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_terminal_intent_digest"),)
+    __table_args__ = (
+        CheckConstraint("intent_digest ~ '^[0-9a-f]{64}$'", name="ck_atlas_turn_terminal_intent_digest"),
+        CheckConstraint(
+            "(result_kind = 'conversation_answer' AND governed_answer_draft_ref IS NOT NULL AND citation_binding_draft_ref IS NOT NULL AND research_packet_ref IS NULL AND research_packet_digest IS NULL) OR "
+            "(result_kind = 'agent_research' AND research_packet_ref IS NOT NULL AND research_packet_digest IS NOT NULL AND research_packet_digest ~ '^[0-9a-f]{64}$' AND ((governed_answer_draft_ref IS NULL AND citation_binding_draft_ref IS NULL) OR (governed_answer_draft_ref IS NOT NULL AND citation_binding_draft_ref IS NOT NULL)))",
+            name="ck_atlas_turn_terminal_intent_kind_shape",
+        ),
+    )
 
 
 class AtlasTurnTerminalOutcomeRow(OrmBase):

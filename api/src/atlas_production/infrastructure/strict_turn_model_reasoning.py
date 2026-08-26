@@ -23,7 +23,7 @@ from atlas_production.modules.turn_execution.public import (
     ReplanningNodeContextV1,
     SkillSelectionNodeContextV1,
     SkillSelectionRequestV2,
-    TurnModelInputV3,
+    StrictModelInputV1,
 )
 from atlas_production.modules.turn_runtime.public import (
     ReasoningEvaluationV1,
@@ -170,7 +170,7 @@ def _next_runtime_plan_item_id(
         candidate_ordinal += 1
 
 def _initial_planning_context(
-    model_input: TurnModelInputV3,
+    model_input: StrictModelInputV1,
 ) -> InitialPlanningNodeContextV1:
     return InitialPlanningNodeContextV1(
         current_user_request=model_input.model_user_input,
@@ -198,7 +198,7 @@ def _initial_planning_context(
 
 
 def _replanning_context(
-    model_input: TurnModelInputV3,
+    model_input: StrictModelInputV1,
     *,
     plan: ReasoningPlanV2,
     evaluation: ReasoningEvaluationV1,
@@ -319,7 +319,7 @@ def _replan_schema(plan: ReasoningPlanV2) -> dict[str, object]:
     return schema
 
 def _evaluation_payload(
-    model_input: TurnModelInputV3,
+    model_input: StrictModelInputV1,
     *,
     plan: ReasoningPlanV2,
     proposal: FinalizeAnswerV1,

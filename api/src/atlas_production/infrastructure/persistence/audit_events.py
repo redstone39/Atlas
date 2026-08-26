@@ -5,7 +5,18 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint, select
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    and_,
+    or_,
+    select,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -20,6 +31,11 @@ from .payload_policy import (
     PersistedPayloadPolicyError,
     validate_typed_patch,
     validate_typed_payload,
+)
+
+_AGENT_RESEARCH_DENIED_EVENT_TYPES = (
+    "agent_research_denied",
+    "agent_mcp_research_denied",
 )
 
 
@@ -65,6 +81,8 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "command",
         "count",
         "delivery_mode",
+        "evidence_id",
+        "execution_id",
         "discovery_status",
         "document_id",
         "document_format",
@@ -87,6 +105,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "event_kind",
         "job_id",
         "lifecycle_status",
+        "has_more",
         "logical_identity",
         "member_actor_id",
         "member_actor_type",
@@ -96,6 +115,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "next_attempt",
         "operation",
         "operation_id",
+        "output_mode",
         "package_digest",
         "parent_team_id",
         "plugin_id",
@@ -127,6 +147,9 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "run_id",
         "runtime_policy",
         "runtime_policy_digest",
+        "representation",
+        "research_id",
+        "returned_count",
         "runtime_policy_revision",
         "scope_mode",
         "scope_role",
@@ -141,6 +164,7 @@ _AUDIT_METADATA_FIELDS = frozenset(
         "tag_refs",
         "target_connection_id",
         "team_id",
+        "tool",
         "tested_route_ids",
         "terminal_status",
         "token_fingerprint",
@@ -160,6 +184,7 @@ _AUDIT_BOOLEAN_FIELDS = frozenset(
         "allow_member_download",
         "inherit_parent_documents",
         "replayed",
+        "has_more",
         "source_download_restricted",
         "supports_vision",
         "visual_watermark_rendered",
@@ -176,6 +201,7 @@ _AUDIT_INTEGER_FIELDS = frozenset(
         "processing_generation",
         "next_attempt",
         "resource_lifecycle_epoch",
+        "returned_count",
         "collaboration_epoch",
         "revision",
         "runtime_policy_revision",
@@ -299,6 +325,21 @@ class AtlasAuditEventRow(OrmBase):
     event_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
+    __table_args__ = (
+        Index(
+            "ix_atlas_audit_events_type_created_event",
+            "event_type",
+            "created_at",
+            "event_id",
+        ),
+        Index(
+            "ix_atlas_audit_events_target_created_event",
+            "target_ref",
+            "created_at",
+            "event_id",
+        ),
+    )
+
 
 class AtlasTurnAuditDraftRow(OrmBase):
     """Audit-owner safe immutable terminal preparation projection."""
@@ -402,6 +443,67 @@ def read_recent_events(session: Session, *, limit: int) -> list[AuditEventRecord
         .order_by(
             AtlasAuditEventRow.created_at.desc(),
             AtlasAuditEventRow.event_id.desc(),
+        )
+        .limit(limit)
+    ).all()
+    return [_record_from_row(row) for row in rows]
+
+
+def read_agent_research_denials(
+    session: Session,
+    *,
+    after: tuple[datetime, str] | None,
+    upper: tuple[datetime, str] | None,
+    limit: int,
+) -> list[AuditEventRecord]:
+    statement = select(AtlasAuditEventRow).where(
+        AtlasAuditEventRow.event_type.in_(_AGENT_RESEARCH_DENIED_EVENT_TYPES)
+    )
+    if upper is not None:
+        created_at, event_id = upper
+        created_at_text = created_at.isoformat()
+        statement = statement.where(
+            or_(
+                AtlasAuditEventRow.created_at < created_at_text,
+                and_(
+                    AtlasAuditEventRow.created_at == created_at_text,
+                    AtlasAuditEventRow.event_id <= event_id,
+                ),
+            )
+        )
+    if after is not None:
+        created_at, event_id = after
+        created_at_text = created_at.isoformat()
+        statement = statement.where(
+            or_(
+                AtlasAuditEventRow.created_at < created_at_text,
+                and_(
+                    AtlasAuditEventRow.created_at == created_at_text,
+                    AtlasAuditEventRow.event_id < event_id,
+                ),
+            )
+        )
+    rows = session.scalars(
+        statement.order_by(
+            AtlasAuditEventRow.created_at.desc(),
+            AtlasAuditEventRow.event_id.desc(),
+        ).limit(limit)
+    ).all()
+    return [_record_from_row(row) for row in rows]
+
+def read_agent_research_timeline(
+    session: Session,
+    *,
+    research_id: str,
+    limit: int,
+) -> list[AuditEventRecord]:
+    target_ref = f"agent-research:{research_id}"
+    rows = session.scalars(
+        select(AtlasAuditEventRow)
+        .where(AtlasAuditEventRow.target_ref == target_ref)
+        .order_by(
+            AtlasAuditEventRow.created_at.asc(),
+            AtlasAuditEventRow.event_id.asc(),
         )
         .limit(limit)
     ).all()

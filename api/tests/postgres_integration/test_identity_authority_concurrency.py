@@ -17,9 +17,9 @@ from atlas_production.infrastructure.persistence.identity_access import (
     AtlasUserRow,
 )
 from atlas_production.infrastructure.persistence.project_governance import AtlasProjectRow
+from atlas_production.infrastructure.mcp_research import PostgresMcpAgentAccess
 from atlas_production.infrastructure.postgres_agent_adapter import (
     PostgresAgentAccessRepository,
-    PostgresAgentQueryAuthority,
 )
 from atlas_production.infrastructure.postgres_identity_adapter import (
     PostgresCurrentPrincipal,
@@ -264,22 +264,16 @@ def test_browser_session_and_raw_agent_authority_use_current_rows(
         assert revoke.execute(session_token) is False
         assert principal.current_user(session_token) is None
 
-        authority = PostgresAgentQueryAuthority(postgres_runtime.session_factory)
-        allowed = authority.authorize(
-            raw_token=raw_agent_token,
-            project_id=project_id,
-        )
+        authority = PostgresMcpAgentAccess(postgres_runtime.session_factory)
+        allowed = authority.current_identity(raw_agent_token)
         assert allowed.status == "allowed"
-        assert allowed.access_decision_id
+        assert allowed.actor_id == agent_id
         with postgres_runtime.session_factory() as session:
             token = session.get(AtlasAgentTokenRow, f"token-{PREFIX}-agent")
             token.status = "revoked"
             token.revoked_at = NOW
             session.commit()
-        assert authority.authorize(
-            raw_token=raw_agent_token,
-            project_id=project_id,
-        ).status == "revoked"
+        assert authority.current_identity(raw_agent_token).status == "revoked"
     finally:
         _cleanup(postgres_runtime)
 

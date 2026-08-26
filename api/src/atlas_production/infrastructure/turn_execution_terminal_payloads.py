@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal, Sequence
 
 from atlas_production.infrastructure.turn_execution_foundation import _digest, _ref
+from atlas_production.modules.agent_runtime.public import ResearchPacketV1
 from atlas_production.modules.audit.public import (
     MaterializeTurnAuditDraftV2,
     TurnAuditStepV1,
@@ -24,7 +25,10 @@ from atlas_production.modules.retrieval.public import (
     DeclaredEvidenceSubsetV1,
     GovernanceEvidencePackV1,
 )
-from atlas_production.modules.turn_execution.public import FinalizeAnswerV1
+from atlas_production.modules.turn_execution.public import (
+    FinalizeAnswerV1,
+    FinalizeResearchV1,
+)
 from atlas_production.modules.turn_runtime.public import (
     CommitTerminalV1,
     ExecutionSnapshotV1,
@@ -114,6 +118,8 @@ def _governance_command(
     assessment_output_digest: str | None,
     assessment_results: list[PostHocAnswerAssessmentV2],
     delivery_constraint: Literal["none", "correction_limit_reached"],
+    research_packet_ref: str | None = None,
+    research_packet_digest: str | None = None,
 ) -> MaterializeGovernedAnswerDraftV2:
     return MaterializeGovernedAnswerDraftV2(
         draft_ref=_ref("governed-answer-draft", execution_id),
@@ -133,6 +139,8 @@ def _governance_command(
         assessment_output_digest=assessment_output_digest,
         assessment_results=assessment_results,
         delivery_constraint=delivery_constraint,
+        research_packet_ref=research_packet_ref,
+        research_packet_digest=research_packet_digest,
         idempotency_key=f"{execution_id}:governed-answer",
     )
 
@@ -148,6 +156,8 @@ def _invalid_governance_command(
     visual_image_digests: list[str],
     assessment_input_digest: str | None,
     delivery_constraint: Literal["none", "correction_limit_reached"],
+    research_packet_ref: str | None = None,
+    research_packet_digest: str | None = None,
 ) -> MaterializeGovernedAnswerDraftV2:
     return _governance_command(
         execution_id=execution_id,
@@ -164,6 +174,8 @@ def _invalid_governance_command(
         assessment_output_digest=None,
         assessment_results=[],
         delivery_constraint=delivery_constraint,
+        research_packet_ref=research_packet_ref,
+        research_packet_digest=research_packet_digest,
     )
 
 
@@ -242,6 +254,110 @@ def _audit_command(
     )
 
 
+
+def _research_packet_ref(execution_id: str) -> str:
+    return _ref("research-packet", execution_id)
+
+
+def _research_terminal_materialization_steps(
+    *,
+    start_ordinal: int,
+    assessment_step: TurnAuditStepV1,
+    evidence_pack: GovernanceEvidencePackV1,
+    proposal: FinalizeResearchV1,
+    packet_ref: str,
+    packet: ResearchPacketV1,
+    governed: GovernedAnswerDraftV2 | None,
+    citation: CitationBindingDraftV2 | None,
+) -> list[TurnAuditStepV1]:
+    steps = [
+        assessment_step,
+        TurnAuditStepV1(
+            ordinal=start_ordinal + 1,
+            step_kind="governance",
+            operation="materialize_research_packet",
+            status="completed",
+            safe_input_digest=_digest(
+                [evidence_pack.digest, proposal.model_dump(mode="json")]
+            ),
+            result_ref=packet_ref,
+            result_digest=packet.packet_digest,
+            evidence_count=len(packet.evidence),
+        ),
+    ]
+    if governed is not None and citation is not None:
+        steps.extend(
+            [
+                TurnAuditStepV1(
+                    ordinal=start_ordinal + 2,
+                    step_kind="governance",
+                    operation="materialize_packet_bound_answer",
+                    status="completed",
+                    safe_input_digest=_digest(
+                        [packet.packet_digest, governed.digest]
+                    ),
+                    result_ref=governed.draft_ref,
+                    result_digest=governed.digest,
+                    evidence_count=len(packet.evidence),
+                ),
+                TurnAuditStepV1(
+                    ordinal=start_ordinal + 3,
+                    step_kind="citation",
+                    operation="materialize_citation_binding",
+                    status="completed",
+                    safe_input_digest=_digest(governed.digest),
+                    result_ref=citation.draft_ref,
+                    result_digest=citation.digest,
+                    evidence_count=len(citation.bindings),
+                ),
+            ]
+        )
+    return steps
+
+
+def _research_audit_command(
+    *,
+    execution_id: str,
+    proposal: FinalizeResearchV1,
+    evidence_pack: GovernanceEvidencePackV1,
+    packet_ref: str,
+    packet: ResearchPacketV1,
+    retrieval_status: RetrievalStatusV1,
+    evidence_review_status: Literal["evidence_aligned", "questionable"],
+    governed: GovernedAnswerDraftV2 | None,
+    citation: CitationBindingDraftV2 | None,
+    steps: Sequence[TurnAuditStepV1],
+) -> MaterializeTurnAuditDraftV2:
+    handles: list[str] = []
+    seen: set[str] = set()
+    for finding in proposal.findings:
+        for handle in finding.claimed_evidence_handles:
+            if handle not in seen:
+                handles.append(handle)
+                seen.add(handle)
+    return MaterializeTurnAuditDraftV2(
+        draft_ref=_ref("turn-audit-draft", execution_id),
+        execution_id=execution_id,
+        claimed_evidence_handles=handles,
+        evidence_pack_ref=evidence_pack.evidence_pack_ref,
+        evidence_pack_digest=evidence_pack.digest,
+        governed_answer_draft_ref=(
+            None if governed is None else governed.draft_ref
+        ),
+        governed_answer_digest=None if governed is None else governed.digest,
+        citation_binding_draft_ref=(
+            None if citation is None else citation.draft_ref
+        ),
+        citation_binding_digest=None if citation is None else citation.digest,
+        research_packet_ref=packet_ref,
+        research_packet_digest=packet.packet_digest,
+        retrieval_status=retrieval_status,
+        evidence_review_status=evidence_review_status,
+        terminal_status="terminal_completed",
+        steps=list(steps),
+        idempotency_key=f"{execution_id}:turn-audit",
+    )
+
 def _prepare_terminal_command(
     *,
     snapshot: ExecutionSnapshotV1,
@@ -257,6 +373,29 @@ def _prepare_terminal_command(
         evidence_pack_ref=evidence_pack_ref,
         governed_answer_draft_ref=governed_answer_draft_ref,
         citation_binding_draft_ref=citation_binding_draft_ref,
+        audit_draft_ref=audit_draft_ref,
+    )
+
+def _prepare_research_terminal_command(
+    *,
+    snapshot: ExecutionSnapshotV1,
+    evidence_pack_ref: str,
+    research_packet_ref: str,
+    research_packet_digest: str,
+    audit_draft_ref: str,
+    governed_answer_draft_ref: str | None = None,
+    citation_binding_draft_ref: str | None = None,
+) -> PrepareTerminalV1:
+    return PrepareTerminalV1(
+        execution_id=snapshot.execution_id,
+        expected_version=snapshot.version,
+        fencing_token=snapshot.lease.fencing_token,
+        result_kind="agent_research",
+        evidence_pack_ref=evidence_pack_ref,
+        governed_answer_draft_ref=governed_answer_draft_ref,
+        citation_binding_draft_ref=citation_binding_draft_ref,
+        research_packet_ref=research_packet_ref,
+        research_packet_digest=research_packet_digest,
         audit_draft_ref=audit_draft_ref,
     )
 

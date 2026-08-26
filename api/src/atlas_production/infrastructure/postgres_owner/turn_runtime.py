@@ -28,6 +28,7 @@ from atlas_production.infrastructure.persistence.turn_runtime import (
 from atlas_production.modules.prompt_skills.public import PromptSkillCatalogRefV1
 from atlas_production.modules.turn_runtime.public import (
     AcceptExecutionV1,
+    ActivateResearchExecutionV1,
     AllocateExecutionV1,
     BeginResultGovernanceV1,
     BeginToolInvocationV1,
@@ -96,6 +97,9 @@ def _terminal_digest(command: PrepareTerminalV1) -> str:
         "evidence_pack_ref": command.evidence_pack_ref,
         "execution_id": command.execution_id,
         "governed_answer_draft_ref": command.governed_answer_draft_ref,
+        "research_packet_ref": command.research_packet_ref,
+        "research_packet_digest": command.research_packet_digest,
+        "result_kind": command.result_kind,
     }
     return hashlib.sha256(
         json.dumps(materialized, sort_keys=True, separators=(",", ":")).encode()
@@ -251,11 +255,15 @@ class PostgresTurnRuntimeOwner:
             outcome = session.get(AtlasTurnTerminalOutcomeRow, execution_id)
             if outcome is None:
                 return None
+            execution = session.get(AtlasTurnExecutionRow, execution_id)
+            if execution is None:
+                raise TurnRuntimeTerminalConflict("terminal execution does not exist")
             if outcome.outcome == "failed":
                 return TerminalOutcomeV1(
                     execution_id=outcome.execution_id,
                     scan_sequence=outcome.scan_sequence,
                     outcome="failed",
+                    result_kind=execution.result_kind,
                     failure_code=outcome.failure_code,
                     committed_at=outcome.committed_at,
                 )
@@ -271,10 +279,13 @@ class PostgresTurnRuntimeOwner:
                 execution_id=outcome.execution_id,
                 outcome="completed",
                 terminal_commit_intent_ref=outcome.terminal_intent_ref,
+                result_kind=intent.result_kind,
                 evidence_pack_ref=intent.evidence_pack_ref,
                 governed_answer_draft_ref=intent.governed_answer_draft_ref,
                 citation_binding_draft_ref=intent.citation_binding_draft_ref,
                 audit_draft_ref=intent.audit_draft_ref,
+                research_packet_ref=intent.research_packet_ref,
+                research_packet_digest=intent.research_packet_digest,
                 committed_at=outcome.committed_at,
             )
 
@@ -292,6 +303,7 @@ class PostgresTurnRuntimeOwner:
                 == AtlasTurnTerminalOutcomeRow.terminal_intent_ref,
             )
             .where(AtlasTurnTerminalOutcomeRow.outcome == "completed")
+            .where(AtlasTurnTerminalIntentRow.result_kind == "conversation_answer")
         )
         if after is not None:
             statement = statement.where(
@@ -321,11 +333,14 @@ class PostgresTurnRuntimeOwner:
                         execution_id=outcome.execution_id,
                         scan_sequence=outcome.scan_sequence,
                         outcome="completed",
+                        result_kind=intent.result_kind,
                         terminal_commit_intent_ref=outcome.terminal_intent_ref,
                         evidence_pack_ref=intent.evidence_pack_ref,
                         governed_answer_draft_ref=intent.governed_answer_draft_ref,
                         citation_binding_draft_ref=intent.citation_binding_draft_ref,
                         audit_draft_ref=intent.audit_draft_ref,
+                        research_packet_ref=intent.research_packet_ref,
+                        research_packet_digest=intent.research_packet_digest,
                         committed_at=outcome.committed_at,
                     )
                 )
@@ -352,7 +367,10 @@ class PostgresTurnRuntimeOwner:
             execution_id=execution.execution_id,
             turn_id=execution.turn_id,
             conversation_id=execution.conversation_id,
+            research_id=execution.research_id,
             actor_id=execution.actor_id,
+            operation=execution.operation,
+            result_kind=execution.result_kind,
             state=execution.state,
             version=execution.version,
             policy=_policy_model(execution),
@@ -586,7 +604,10 @@ class PostgresTurnRuntimeOwner:
                     execution_id=command.execution_id,
                     turn_id=command.turn_id,
                     conversation_id=command.conversation_id,
+                    research_id=command.research_id,
                     actor_id=command.actor_id,
+                    operation=command.operation,
+                    result_kind=command.result_kind,
                     input_digest=command.input_digest,
                     response_language=command.response_language,
                     reasoning_mode=command.reasoning_mode,
@@ -950,6 +971,49 @@ class PostgresTurnRuntimeOwner:
                 execution_id=command.execution_id,
                 sequence=changed.version,
                 event_type="model_action_requested",
+                state=changed.state,
+            )
+            session.flush()
+            return self._snapshot(session, command.execution_id)
+
+    def activate_research(
+        self, command: ActivateResearchExecutionV1
+    ) -> ExecutionSnapshotV1:
+        with self._session_factory() as session, session.begin():
+            current = session.get(AtlasTurnExecutionRow, command.execution_id)
+            if (
+                current is None
+                or current.result_kind != "agent_research"
+                or current.context_pack_ref is not None
+            ):
+                raise TurnRuntimeCurrentnessConflict(
+                    "research execution activation requires accepted research"
+                )
+            selections = [
+                ExecutionPromptSkillSelectionTraceV1.model_validate(item)
+                for item in current.prompt_skill_selections
+            ]
+            if (
+                len(selections) != 1
+                or selections[0].node != "resolver"
+                or selections[0].status != "not_applicable"
+            ):
+                raise TurnRuntimeCurrentnessConflict(
+                    "research execution activation requires not-applicable Resolver"
+                )
+            changed = self._cas_execution(
+                session,
+                execution_id=command.execution_id,
+                expected_version=command.expected_version,
+                fencing_token=command.fencing_token,
+                from_states=(ExecutionState.ACCEPTED.value,),
+                to_state=ExecutionState.CONTEXT_READY.value,
+            )
+            self._append_event(
+                session,
+                execution_id=command.execution_id,
+                sequence=changed.version,
+                event_type="context_ready",
                 state=changed.state,
             )
             session.flush()
@@ -1323,13 +1387,20 @@ class PostgresTurnRuntimeOwner:
                 to_state=ExecutionState.MATERIALIZING_TERMINAL.value,
                 values={"terminal_commit_intent_ref": intent_ref},
             )
+            if changed.result_kind != command.result_kind:
+                raise TurnRuntimeTerminalConflict(
+                    "terminal result kind differs from immutable allocation"
+                )
             session.add(
                 AtlasTurnTerminalIntentRow(
                     terminal_intent_ref=intent_ref,
                     execution_id=command.execution_id,
+                    result_kind=command.result_kind,
                     evidence_pack_ref=command.evidence_pack_ref,
                     governed_answer_draft_ref=command.governed_answer_draft_ref,
                     citation_binding_draft_ref=command.citation_binding_draft_ref,
+                    research_packet_ref=command.research_packet_ref,
+                    research_packet_digest=command.research_packet_digest,
                     audit_draft_ref=command.audit_draft_ref,
                     intent_digest=intent_digest,
                     prepared_at=func.clock_timestamp(),
@@ -1338,49 +1409,193 @@ class PostgresTurnRuntimeOwner:
             session.flush()
             return self._snapshot(session, command.execution_id)
 
-    def commit_terminal(self, command: CommitTerminalV1) -> ExecutionSnapshotV1:
-        with self._session_factory() as session, session.begin():
-            try:
-                changed = self._cas_execution(
-                    session,
-                    execution_id=command.execution_id,
-                    expected_version=command.expected_version,
-                    fencing_token=command.fencing_token,
-                    from_states=(ExecutionState.MATERIALIZING_TERMINAL.value,),
-                    to_state=ExecutionState.TERMINAL_COMPLETED.value,
-                    values={"terminal_failure_code": None},
-                )
-            except TurnRuntimeCurrentnessConflict as error:
-                raise TurnRuntimeTerminalConflict(
-                    "terminal commit lost the execution CAS"
-                ) from error
-            if changed.terminal_commit_intent_ref != command.terminal_commit_intent_ref:
-                raise TurnRuntimeTerminalConflict("terminal intent is not the prepared intent")
-            intent = session.get(AtlasTurnTerminalIntentRow, command.terminal_commit_intent_ref)
-            if intent is None or intent.execution_id != command.execution_id:
-                raise TurnRuntimeTerminalConflict("prepared terminal intent does not exist")
-            session.add(
-                AtlasTurnTerminalOutcomeRow(
-                    execution_id=command.execution_id,
-                    outcome="completed",
-                    terminal_intent_ref=command.terminal_commit_intent_ref,
-                    failure_code=None,
-                    detected_by=None,
-                    committed_at=func.clock_timestamp(),
-                )
+    def _lock_research_terminal_in_session(
+        self,
+        session: Session,
+        command: CommitTerminalV1,
+        *,
+        research_id: str,
+    ) -> str:
+        execution = session.scalar(
+            select(AtlasTurnExecutionRow)
+            .where(AtlasTurnExecutionRow.execution_id == command.execution_id)
+            .with_for_update()
+        )
+        if (
+            execution is None
+            or execution.result_kind != "agent_research"
+            or execution.research_id != research_id
+            or execution.terminal_commit_intent_ref
+            != command.terminal_commit_intent_ref
+        ):
+            raise TurnRuntimeTerminalConflict(
+                "research terminal execution identity does not match"
             )
-            self._add_bound_release_intents(session, changed)
-            self._add_staged_release_intents(session, command.execution_id)
-            self._append_event(
+        if execution.state == ExecutionState.MATERIALIZING_TERMINAL.value:
+            if execution.version != command.expected_version:
+                raise TurnRuntimeTerminalConflict(
+                    "research terminal execution version is stale"
+                )
+            return "prepared"
+        if execution.state == ExecutionState.TERMINAL_COMPLETED.value:
+            if execution.version != command.expected_version + 1:
+                raise TurnRuntimeTerminalConflict(
+                    "research terminal replay version does not match"
+                )
+            return "completed"
+        raise TurnRuntimeTerminalConflict(
+            "research terminal execution is not publishable"
+        )
+
+    @staticmethod
+    def _validate_research_terminal_intent_in_session(
+        session: Session,
+        command: CommitTerminalV1,
+        *,
+        packet_ref: str,
+        packet_digest: str,
+    ) -> AtlasTurnTerminalIntentRow:
+        intent = session.get(
+            AtlasTurnTerminalIntentRow, command.terminal_commit_intent_ref
+        )
+        if (
+            intent is None
+            or intent.execution_id != command.execution_id
+            or intent.result_kind != "agent_research"
+            or intent.research_packet_ref != packet_ref
+            or intent.research_packet_digest != packet_digest
+        ):
+            raise TurnRuntimeTerminalConflict(
+                "research terminal intent does not match packet ref and digest"
+            )
+        return intent
+
+    def _replay_research_terminal_in_session(
+        self,
+        session: Session,
+        command: CommitTerminalV1,
+        *,
+        packet_ref: str,
+        packet_digest: str,
+    ) -> ExecutionSnapshotV1:
+        self._validate_research_terminal_intent_in_session(
+            session,
+            command,
+            packet_ref=packet_ref,
+            packet_digest=packet_digest,
+        )
+        outcome = session.get(AtlasTurnTerminalOutcomeRow, command.execution_id)
+        if (
+            outcome is None
+            or outcome.outcome != "completed"
+            or outcome.terminal_intent_ref != command.terminal_commit_intent_ref
+        ):
+            raise TurnRuntimeTerminalConflict(
+                "research terminal outcome does not match its immutable intent"
+            )
+        return self._snapshot(session, command.execution_id)
+
+    def _commit_terminal_in_session(
+        self,
+        session: Session,
+        command: CommitTerminalV1,
+        *,
+        expected_result_kind: str,
+    ) -> ExecutionSnapshotV1:
+        try:
+            changed = self._cas_execution(
                 session,
                 execution_id=command.execution_id,
-                sequence=changed.version,
-                event_type="terminal_completed",
-                state=changed.state,
-                result_ref=command.terminal_commit_intent_ref,
+                expected_version=command.expected_version,
+                fencing_token=command.fencing_token,
+                from_states=(ExecutionState.MATERIALIZING_TERMINAL.value,),
+                to_state=ExecutionState.TERMINAL_COMPLETED.value,
+                values={"terminal_failure_code": None},
             )
-            session.flush()
-            return self._snapshot(session, command.execution_id)
+        except TurnRuntimeCurrentnessConflict as error:
+            raise TurnRuntimeTerminalConflict(
+                "terminal commit lost the execution CAS"
+            ) from error
+        if (
+            changed.result_kind != expected_result_kind
+            or changed.terminal_commit_intent_ref
+            != command.terminal_commit_intent_ref
+        ):
+            raise TurnRuntimeTerminalConflict(
+                "terminal result kind or intent is not the prepared value"
+            )
+        intent = session.get(
+            AtlasTurnTerminalIntentRow, command.terminal_commit_intent_ref
+        )
+        if (
+            intent is None
+            or intent.execution_id != command.execution_id
+            or intent.result_kind != expected_result_kind
+        ):
+            raise TurnRuntimeTerminalConflict("prepared terminal intent does not exist")
+        session.add(
+            AtlasTurnTerminalOutcomeRow(
+                execution_id=command.execution_id,
+                outcome="completed",
+                terminal_intent_ref=command.terminal_commit_intent_ref,
+                failure_code=None,
+                detected_by=None,
+                committed_at=func.clock_timestamp(),
+            )
+        )
+        self._add_bound_release_intents(session, changed)
+        self._add_staged_release_intents(session, command.execution_id)
+        self._append_event(
+            session,
+            execution_id=command.execution_id,
+            sequence=changed.version,
+            event_type="terminal_completed",
+            state=changed.state,
+            result_ref=command.terminal_commit_intent_ref,
+        )
+        session.flush()
+        return self._snapshot(session, command.execution_id)
+
+    def _commit_research_terminal_in_session(
+        self,
+        session: Session,
+        command: CommitTerminalV1,
+        *,
+        packet_ref: str,
+        packet_digest: str,
+    ) -> ExecutionSnapshotV1:
+        self._validate_research_terminal_intent_in_session(
+            session,
+            command,
+            packet_ref=packet_ref,
+            packet_digest=packet_digest,
+        )
+        return self._commit_terminal_in_session(
+            session,
+            command,
+            expected_result_kind="agent_research",
+        )
+
+    def commit_terminal(self, command: CommitTerminalV1) -> ExecutionSnapshotV1:
+        with self._session_factory() as session, session.begin():
+            execution = session.scalar(
+                select(AtlasTurnExecutionRow)
+                .where(AtlasTurnExecutionRow.execution_id == command.execution_id)
+                .with_for_update()
+            )
+            if execution is None:
+                raise TurnRuntimeTerminalConflict(
+                    "terminal execution does not exist"
+                )
+            if execution.result_kind == "agent_research":
+                raise TurnRuntimeTerminalConflict(
+                    "agent research terminal publication requires the atomic owner pair"
+                )
+            return self._commit_terminal_in_session(
+                session,
+                command,
+                expected_result_kind="conversation_answer",
+            )
 
     def _terminal_failure(
         self,
@@ -1626,6 +1841,23 @@ class PostgresTurnRuntimeOwner:
             if row is None:
                 raise TurnRuntimeCurrentnessConflict("release intent status is stale")
             return _release_model(row)
+
+    def events_bounded(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+    ) -> list[RuntimeEventV1]:
+        if not execution_id or limit < 1 or limit > 201:
+            raise ValueError("bounded execution event query is invalid")
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(AtlasTurnRuntimeEventRow)
+                .where(AtlasTurnRuntimeEventRow.execution_id == execution_id)
+                .order_by(AtlasTurnRuntimeEventRow.sequence)
+                .limit(limit)
+            ).all()
+            return [_event_model(row) for row in rows]
 
     def events(self, execution_id: str, *, after_sequence: int = 0) -> list[RuntimeEventV1]:
         if not execution_id or after_sequence < 0:

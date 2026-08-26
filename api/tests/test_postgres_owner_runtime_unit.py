@@ -521,8 +521,8 @@ def test_retrieval_currentness_uses_target_owner_keys_without_reverse_dependency
     retrieval_source = (owner_root / "postgres_turn_knowledge_rows.py").read_text()
     for owner_key in (
         "identity_actor_owner_key(actor_id)",
-        'project_acl_subject_owner_key("user", actor_id)',
-        'team_subject_owner_key("user", actor_id)',
+        "project_acl_subject_owner_key(actor_type, actor_id)",
+        "team_subject_owner_key(actor_type, actor_id)",
         "project_owner_key(project_id)",
         "team_owner_key(team_id)",
         'project_acl_subject_owner_key("team", team_id)',

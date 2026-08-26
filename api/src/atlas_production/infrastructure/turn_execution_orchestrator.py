@@ -51,11 +51,21 @@ from atlas_production.infrastructure.turn_execution_terminal_payloads import (
     _finalized_answer,
     _governance_command,
     _invalid_governance_command,
+    _prepare_research_terminal_command,
     _prepare_terminal_command,
+    _research_audit_command,
+    _research_packet_ref,
+    _research_terminal_materialization_steps,
     _terminal_materialization_steps,
     _terminal_retrieval_status,
 )
 
+from atlas_production.modules.agent_runtime.public import (
+    ResearchEvidenceDescriptorV1,
+    ResearchFindingV1,
+    ResearchLimitV1,
+    ResearchPacketV1,
+)
 from atlas_production.modules.audit.public import (
     TurnAuditDraftOwnerV2,
     TurnAuditStepV1,
@@ -86,14 +96,22 @@ from atlas_production.modules.retrieval.public import (
 )
 from atlas_production.modules.turn_execution.public import (
     AnswerCandidateNodeContextV1,
+    AnswerSegmentProposalV1,
     DeepReasoningContractError,
     DeepReasoningModel,
     FinalizeAnswerV1,
+    FinalizeResearchV1,
     InitialPlanningNodeContextV1,
     ModelContractViolationV1,
+    PacketAnswerComposer,
+    PacketAnswerEvidenceV1,
+    PacketAnswerFindingV1,
+    PacketAnswerModelInputV1,
     ReplanningNodeContextV1,
+    ResearchModelInputV1,
     SkillSelectionRequestV2,
     SkillSelectorModel,
+    StrictModelInputV1,
     StrictTurnModel,
     StrictTurnModelSession,
     TurnExecutionOrchestrator,
@@ -143,6 +161,36 @@ def _capability_rejection_audit_step(
     )
 
 
+def _research_as_answer(proposal: FinalizeResearchV1) -> FinalizeAnswerV1:
+    handles: list[str] = []
+    seen: set[str] = set()
+    for finding in proposal.findings:
+        for handle in finding.claimed_evidence_handles:
+            if handle not in seen:
+                handles.append(handle)
+                seen.add(handle)
+    return FinalizeAnswerV1(
+        action="finalize_answer",
+        segments=[
+            AnswerSegmentProposalV1(
+                segment_id=finding.finding_id,
+                text=finding.text,
+            )
+            for finding in proposal.findings
+        ],
+        claimed_evidence_handles=handles,
+    )
+
+
+def _research_evidence_mapping(
+    proposal: FinalizeResearchV1,
+) -> dict[str, list[str]]:
+    return {
+        finding.finding_id: list(finding.claimed_evidence_handles)
+        for finding in proposal.findings
+    }
+
+
 
 class TurnModelInputSource(Protocol):
     def build(
@@ -151,26 +199,46 @@ class TurnModelInputSource(Protocol):
         *,
         observations: Sequence[KnowledgeToolObservationV1],
         contract_repair_remaining: int,
-    ) -> TurnModelInputV3: ...
+    ) -> StrictModelInputV1: ...
 
+
+class TurnModelInputBuilder(Protocol):
+    def __call__(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        observations: Sequence[KnowledgeToolObservationV1],
+        contract_repair_remaining: int,
+    ) -> StrictModelInputV1: ...
+
+
+class ResearchTerminalPublisher(Protocol):
+    def publish(
+        self,
+        *,
+        command,
+        packet_ref: str,
+        packet: ResearchPacketV1,
+    ): ...
 
 def _context_token_reservation(
-    source: TurnModelInputSource,
+    source: TurnModelInputSource | TurnModelInputBuilder,
     snapshot: ExecutionSnapshotV1,
     observations: Sequence[KnowledgeToolObservationV1],
     contract_repair_remaining: int,
-    count_tokens: Callable[[TurnModelInputV3, bool], int],
+    count_tokens: Callable[[StrictModelInputV1, bool], int],
     *,
     finalize_only: bool,
     reasoning_plan: ReasoningPlanV2 | None = None,
 ) -> int:
     """Converge on the route-tokenized size of the post-CAS model input."""
+    build = source.build if hasattr(source, "build") else source
 
-    initial = source.build(
-            snapshot,
-            observations=observations,
-            contract_repair_remaining=contract_repair_remaining,
-        )
+    initial = build(
+        snapshot,
+        observations=observations,
+        contract_repair_remaining=contract_repair_remaining,
+    )
     if reasoning_plan is not None:
         initial = initial.model_copy(update={"reasoning_plan": reasoning_plan})
     estimate = count_tokens(
@@ -191,11 +259,11 @@ def _context_token_reservation(
                 "budget": predicted_budget,
             }
         )
-        predicted_input = source.build(
-                predicted,
-                observations=observations,
-                contract_repair_remaining=contract_repair_remaining,
-            )
+        predicted_input = build(
+            predicted,
+            observations=observations,
+            contract_repair_remaining=contract_repair_remaining,
+        )
         if reasoning_plan is not None:
             predicted_input = predicted_input.model_copy(
                 update={"reasoning_plan": reasoning_plan}
@@ -225,12 +293,15 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         runtime: TurnRuntimeOwner,
         model: StrictTurnModel,
         model_inputs: TurnModelInputSource,
+        research_model_inputs: TurnModelInputSource | None = None,
         retrieval: RetrievalOwner,
         result_governance: ResultGovernanceDraftOwnerV2,
         citation: CitationBindingDraftOwnerV2,
         audit: TurnAuditDraftOwnerV2,
         evaluator: PostHocAnswerEvaluatorV2,
         experience_recorder: TurnExperienceRecorder,
+        research_terminal_publisher: ResearchTerminalPublisher | None = None,
+        packet_answer_composer: PacketAnswerComposer | None = None,
         reasoning_model: DeepReasoningModel | None = None,
         skill_selector_model: SkillSelectorModel | None = None,
         prompt_skill_catalog: PromptSkillCatalog | None = None,
@@ -240,17 +311,38 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         self._runtime = runtime
         self._model = model
         self._model_inputs = model_inputs
+        self._research_model_inputs = research_model_inputs
         self._retrieval = retrieval
         self._result_governance = result_governance
         self._citation = citation
         self._audit = audit
         self._evaluator = evaluator
         self._experience_recorder = experience_recorder
+        self._research_terminal_publisher = research_terminal_publisher
+        self._packet_answer_composer = packet_answer_composer
         self._reasoning_model = reasoning_model
         self._skill_selector_model = skill_selector_model
         self._prompt_skill_catalog = prompt_skill_catalog
         self._prompt_skill_exact_reader = prompt_skill_exact_reader
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _build_model_input(
+        self,
+        snapshot: ExecutionSnapshotV1,
+        *,
+        observations: Sequence[KnowledgeToolObservationV1],
+        contract_repair_remaining: int,
+    ) -> StrictModelInputV1:
+        source = self._model_inputs
+        if snapshot.result_kind == "agent_research":
+            source = self._research_model_inputs
+            if source is None:
+                raise ValueError("research execution has no accepted model input source")
+        return source.build(
+            snapshot,
+            observations=observations,
+            contract_repair_remaining=contract_repair_remaining,
+        )
 
     def _claim_schema_retry(
         self,
@@ -312,9 +404,10 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         visual_images_by_handle: dict[str, VisualImagePayloadV1],
         assessment_ordinal: int,
         assessment_cache: dict[
-            tuple[str, str, tuple[str, ...], str],
+            tuple[str, str, tuple[str, ...], str, str],
             ProvisionalEvidenceAssessmentV1,
         ],
+        evidence_handles_by_segment: dict[str, list[str]] | None = None,
     ) -> tuple[ExecutionSnapshotV1, ProvisionalEvidenceAssessmentV1]:
         if snapshot.catalog_ref is None:
             raise ValueError("candidate assessment lost its catalog ref")
@@ -336,11 +429,17 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
             "declared_subset_digest": declared_subset.digest,
             "visual_image_digests": visual_image_digests,
         }
+        mapping_digest = (
+            ""
+            if evidence_handles_by_segment is None
+            else _digest(evidence_handles_by_segment)
+        )
         cache_key = (
             answer_digest,
             declared_subset.digest,
             tuple(visual_image_digests),
             "provisional-declared-evidence-v1",
+            mapping_digest,
         )
         cached = assessment_cache.get(cache_key)
         if cached is not None:
@@ -386,6 +485,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 deadline_at=snapshot.deadline_at,
                 route=snapshot.route,
                 assessment_ordinal=assessment_ordinal,
+                evidence_handles_by_segment=evidence_handles_by_segment,
             )
         except ClaimAssessmentUnavailable as error:
             return remember(
@@ -716,11 +816,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     status="baseline_fallback",
                     fallback_code=self._selector_failure_code(error),
                 )
-        candidate_input = self._model_inputs.build(
-            snapshot,
-            observations=observations,
-            contract_repair_remaining=contract_repair_remaining,
-        )
+        candidate_input = self._build_model_input(snapshot,
+        observations=observations,
+        contract_repair_remaining=contract_repair_remaining,)
         if reasoning_plan is not None:
             candidate_input = candidate_input.model_copy(
                 update={"reasoning_plan": reasoning_plan}
@@ -775,11 +873,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 selection=admitted,
             )
         )
-        candidate_input = self._model_inputs.build(
-            snapshot,
-            observations=observations,
-            contract_repair_remaining=contract_repair_remaining,
-        )
+        candidate_input = self._build_model_input(snapshot,
+        observations=observations,
+        contract_repair_remaining=contract_repair_remaining,)
         if reasoning_plan is not None:
             candidate_input = candidate_input.model_copy(
                 update={"reasoning_plan": reasoning_plan}
@@ -866,8 +962,18 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         snapshot = self._runtime.snapshot(execution_id)
         if snapshot.state is not ExecutionState.CONTEXT_READY:
             raise ValueError("orchestrator only starts a fresh context_ready execution")
-        if snapshot.grant_ref is None or snapshot.catalog_ref is None or snapshot.context_pack_ref is None:
+        if snapshot.grant_ref is None or snapshot.catalog_ref is None:
             raise ValueError("accepted execution refs are incomplete")
+        if (
+            snapshot.result_kind == "conversation_answer"
+            and snapshot.context_pack_ref is None
+        ):
+            raise ValueError("conversation execution requires an accepted context pack")
+        if (
+            snapshot.result_kind == "agent_research"
+            and snapshot.reasoning_mode != "deep"
+        ):
+            raise ValueError("agent research requires the shared Deep route")
 
         observations: list[KnowledgeToolObservationV1] = []
         contract_repair_remaining = _contract_repair_remaining(snapshot)
@@ -890,7 +996,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         reasoning_corrections: list[ReasoningCorrectionV2] = []
         provisional_evidence_checks: list[ProvisionalEvidenceCheckV1] = []
         provisional_assessment_cache: dict[
-            tuple[str, str, tuple[str, ...], str],
+            tuple[str, str, tuple[str, ...], str, str],
             ProvisionalEvidenceAssessmentV1,
         ] = {}
         pending_correction: tuple[
@@ -901,11 +1007,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         force_finalize_only = False
         terminal_provisional_assessment: ProvisionalEvidenceAssessmentV1 | None = None
         try:
-            initial_input = self._model_inputs.build(
-                snapshot,
-                observations=observations,
-                contract_repair_remaining=contract_repair_remaining,
-            )
+            initial_input = self._build_model_input(snapshot,
+            observations=observations,
+            contract_repair_remaining=contract_repair_remaining,)
             _validate_model_input(snapshot, initial_input)
             if snapshot.reasoning_mode == "deep":
                 if self._reasoning_model is None:
@@ -931,11 +1035,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     progress_status="completed",
                     message_code="reasoning.understanding_completed",
                 )
-                planner_context_input = self._model_inputs.build(
-                    snapshot,
-                    observations=observations,
-                    contract_repair_remaining=contract_repair_remaining,
-                )
+                planner_context_input = self._build_model_input(snapshot,
+                observations=observations,
+                contract_repair_remaining=contract_repair_remaining,)
                 _validate_model_input(snapshot, planner_context_input)
                 planner_node_context = (
                     self._reasoning_model.build_initial_planning_node_context(
@@ -977,11 +1079,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         )
                     )
                 if initial_selected_skills:
-                    selected_preflight_input = self._model_inputs.build(
-                        snapshot,
-                        observations=observations,
-                        contract_repair_remaining=contract_repair_remaining,
-                    )
+                    selected_preflight_input = self._build_model_input(snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,)
                     _validate_model_input(snapshot, selected_preflight_input)
                     selected_context_exceeded = False
                     try:
@@ -1033,11 +1133,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 schema_retry_ordinal = 0
                 while True:
                     repair = schema_retry_ordinal > 0
-                    planner_input = self._model_inputs.build(
-                        snapshot,
-                        observations=observations,
-                        contract_repair_remaining=contract_repair_remaining,
-                    )
+                    planner_input = self._build_model_input(snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,)
                     _validate_model_input(snapshot, planner_input)
                     context_tokens = self._reasoning_model.estimate_plan_request_tokens(
                         planner_input,
@@ -1055,11 +1153,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                         )
                     )
                     contract_repair_remaining = _contract_repair_remaining(snapshot)
-                    planner_input = self._model_inputs.build(
-                        snapshot,
-                        observations=observations,
-                        contract_repair_remaining=contract_repair_remaining,
-                    )
+                    planner_input = self._build_model_input(snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,)
                     _validate_model_input(snapshot, planner_input)
                     try:
                         plan_kwargs = {
@@ -1139,11 +1235,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     message_code="reasoning.planning_completed",
                     message_params={"plan_items": len(reasoning_plan.items)},
                 )
-                initial_input = self._model_inputs.build(
-                    snapshot,
-                    observations=observations,
-                    contract_repair_remaining=contract_repair_remaining,
-                ).model_copy(update={"reasoning_plan": reasoning_plan})
+                initial_input = self._build_model_input(snapshot,
+                observations=observations,
+                contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                 _validate_model_input(snapshot, initial_input)
             _answer_catalog_ref, answer_skill_catalog = (
                 self._load_prompt_skill_catalog(snapshot, "answer")
@@ -1164,11 +1258,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     raise TimeoutError("turn deadline elapsed")
                 if candidate_needs_start:
                     candidate_ordinal += 1
-                    candidate_input = self._model_inputs.build(
-                        snapshot,
-                        observations=observations,
-                        contract_repair_remaining=contract_repair_remaining,
-                    )
+                    candidate_input = self._build_model_input(snapshot,
+                    observations=observations,
+                    contract_repair_remaining=contract_repair_remaining,)
                     if reasoning_plan is not None:
                         candidate_input = candidate_input.model_copy(
                             update={"reasoning_plan": reasoning_plan}
@@ -1229,7 +1321,7 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     has_evidence=bool(evidence_by_handle),
                 )
                 context_tokens = _context_token_reservation(
-                    self._model_inputs,
+                    self._build_model_input,
                     snapshot,
                     observations,
                     contract_repair_remaining,
@@ -1251,11 +1343,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 )
                 contract_repair_remaining = _contract_repair_remaining(snapshot)
                 contract_repair_request = False
-                model_input = self._model_inputs.build(
-                    snapshot,
-                    observations=observations,
-                    contract_repair_remaining=contract_repair_remaining,
-                )
+                model_input = self._build_model_input(snapshot,
+                observations=observations,
+                contract_repair_remaining=contract_repair_remaining,)
                 if reasoning_plan is not None:
                     model_input = model_input.model_copy(
                         update={"reasoning_plan": reasoning_plan}
@@ -1341,6 +1431,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                 )
 
                 action = model_result.action
+                research_proposal = (
+                    action if isinstance(action, FinalizeResearchV1) else None
+                )
+                if research_proposal is not None:
+                    action = _research_as_answer(research_proposal)
                 if isinstance(action, FinalizeAnswerV1):
                     if snapshot.reasoning_mode == "deep":
                         assert reasoning_trace is not None
@@ -1363,6 +1458,11 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 visual_images_by_handle=visual_images_by_handle,
                                 assessment_ordinal=assessment_ordinal,
                                 assessment_cache=provisional_assessment_cache,
+                                evidence_handles_by_segment=(
+                                    None
+                                    if research_proposal is None
+                                    else _research_evidence_mapping(research_proposal)
+                                ),
                             )
                         )
                         is_limit_final = pending_limit_finalization is not None
@@ -1440,11 +1540,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 evaluation_schema_origin: SchemaRetryOriginCode | None = None
                                 evaluation_schema_ordinal = 0
                                 while True:
-                                    evaluation_input = self._model_inputs.build(
-                                        snapshot,
-                                        observations=observations,
-                                        contract_repair_remaining=contract_repair_remaining,
-                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    evaluation_input = self._build_model_input(snapshot,
+                                    observations=observations,
+                                    contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                     _validate_model_input(snapshot, evaluation_input)
                                     evaluation_tokens = (
                                         self._reasoning_model.estimate_evaluation_request_tokens(
@@ -1463,11 +1561,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                             context_tokens=evaluation_tokens,
                                         )
                                     )
-                                    evaluation_input = self._model_inputs.build(
-                                        snapshot,
-                                        observations=observations,
-                                        contract_repair_remaining=contract_repair_remaining,
-                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    evaluation_input = self._build_model_input(snapshot,
+                                    observations=observations,
+                                    contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                     _validate_model_input(snapshot, evaluation_input)
                                     try:
                                         if evaluation_schema_origin is None:
@@ -1642,11 +1738,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                 if correction_kind == "research_then_revise":
                                     failure_code = "contract_violation"
                                     reasoning_replanner_failed = True
-                                    replan_context_input = self._model_inputs.build(
-                                        snapshot,
-                                        observations=observations,
-                                        contract_repair_remaining=contract_repair_remaining,
-                                    ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                    replan_context_input = self._build_model_input(snapshot,
+                                    observations=observations,
+                                    contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                     _validate_model_input(snapshot, replan_context_input)
                                     replan_node_context = (
                                         self._reasoning_model.build_replanning_node_context(
@@ -1702,11 +1796,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                             )
                                         )
                                     if replan_selected_skills:
-                                        selected_preflight_input = self._model_inputs.build(
-                                            snapshot,
-                                            observations=observations,
-                                            contract_repair_remaining=contract_repair_remaining,
-                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        selected_preflight_input = self._build_model_input(snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                         _validate_model_input(
                                             snapshot, selected_preflight_input
                                         )
@@ -1769,11 +1861,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                     replan_schema_ordinal = 0
                                     while True:
                                         repair = replan_schema_ordinal > 0
-                                        replan_input = self._model_inputs.build(
-                                            snapshot,
-                                            observations=observations,
-                                            contract_repair_remaining=contract_repair_remaining,
-                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        replan_input = self._build_model_input(snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                         _validate_model_input(snapshot, replan_input)
                                         replan_tokens = (
                                             self._reasoning_model.estimate_replan_request_tokens(
@@ -1797,11 +1887,9 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                                         contract_repair_remaining = (
                                             _contract_repair_remaining(snapshot)
                                         )
-                                        replan_input = self._model_inputs.build(
-                                            snapshot,
-                                            observations=observations,
-                                            contract_repair_remaining=contract_repair_remaining,
-                                        ).model_copy(update={"reasoning_plan": reasoning_plan})
+                                        replan_input = self._build_model_input(snapshot,
+                                        observations=observations,
+                                        contract_repair_remaining=contract_repair_remaining,).model_copy(update={"reasoning_plan": reasoning_plan})
                                         _validate_model_input(snapshot, replan_input)
                                         try:
                                             replan_kwargs = {
@@ -2008,25 +2096,43 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                             },
                         )
                     failure_code = "terminal_materialization_failed"
-                    self._materialize_terminal(
-                        snapshot=snapshot,
-                        proposal=action,
-                        evidence_by_handle=evidence_by_handle,
-                        visual_images_by_handle=visual_images_by_handle,
-                        audit_steps=audit_steps,
-                        used_retrieval=used_retrieval,
-                        retrieval_error_status=retrieval_error_status,
-                        finalize_only=finalize_only,
-                        provisional_assessment=terminal_provisional_assessment,
-                        delivery_constraint=(
-                            "correction_limit_reached"
-                            if snapshot.reasoning_mode == "deep"
-                            and reasoning_trace is not None
-                            and reasoning_trace.termination_reason
-                            == "correction_limit_reached"
-                            else "none"
-                        ),
-                    )
+                    if research_proposal is None:
+                        self._materialize_terminal(
+                            snapshot=snapshot,
+                            proposal=action,
+                            evidence_by_handle=evidence_by_handle,
+                            visual_images_by_handle=visual_images_by_handle,
+                            audit_steps=audit_steps,
+                            used_retrieval=used_retrieval,
+                            retrieval_error_status=retrieval_error_status,
+                            finalize_only=finalize_only,
+                            provisional_assessment=terminal_provisional_assessment,
+                            delivery_constraint=(
+                                "correction_limit_reached"
+                                if snapshot.reasoning_mode == "deep"
+                                and reasoning_trace is not None
+                                and reasoning_trace.termination_reason
+                                == "correction_limit_reached"
+                                else "none"
+                            ),
+                        )
+                    else:
+                        self._materialize_research_terminal(
+                            snapshot=snapshot,
+                            research_input=model_input,
+                            evidence_by_handle=evidence_by_handle,
+                            proposal=research_proposal,
+                            answer_projection=action,
+                            visual_images_by_handle=visual_images_by_handle,
+                            audit_steps=audit_steps,
+                            used_retrieval=used_retrieval,
+                            retrieval_error_status=retrieval_error_status,
+                            finalize_only=finalize_only,
+                            provisional_assessment=terminal_provisional_assessment,
+                            packet_answer_assessment_ordinal=(
+                                len(provisional_evidence_checks) + 1
+                            ),
+                        )
                     return
 
                 used_retrieval = True
@@ -2053,16 +2159,19 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
                     + timedelta(seconds=snapshot.policy.tool_execution_timeout_seconds),
                     snapshot.deadline_at,
                 )
-                envelope = self._retrieval.invoke(
-                    execution_id=execution_id,
-                    grant_ref=snapshot.grant_ref,
-                    catalog_ref=snapshot.catalog_ref,
-                    invocation_ordinal=invocation_ordinal,
-                    action=action,
-                    max_output_tokens=tokens,
-                    tokenizer_profile=snapshot.route.tokenizer_profile,
-                    deadline_at=tool_deadline_at,
-                )
+                invocation_arguments = {
+                    "execution_id": execution_id,
+                    "grant_ref": snapshot.grant_ref,
+                    "catalog_ref": snapshot.catalog_ref,
+                    "invocation_ordinal": invocation_ordinal,
+                    "action": action,
+                    "max_output_tokens": tokens,
+                    "tokenizer_profile": snapshot.route.tokenizer_profile,
+                    "deadline_at": tool_deadline_at,
+                }
+                if snapshot.result_kind == "agent_research":
+                    invocation_arguments["authority_mode"] = "accepted_catalog"
+                envelope = self._retrieval.invoke(**invocation_arguments)
                 if self._clock() >= snapshot.deadline_at:
                     failure_code = "deadline_exceeded"
                     raise TimeoutError("turn deadline elapsed during retrieval")
@@ -2176,6 +2285,383 @@ class StatelessTurnExecutionOrchestrator(TurnExecutionOrchestrator):
         finally:
             if session is not None:
                 session.discard()
+
+    def _materialize_research_terminal(
+        self,
+        *,
+        snapshot: ExecutionSnapshotV1,
+        research_input: StrictModelInputV1,
+        proposal: FinalizeResearchV1,
+        answer_projection: FinalizeAnswerV1,
+        evidence_by_handle: dict[str, RetrievalEvidenceLineageV1],
+        visual_images_by_handle: dict[str, VisualImagePayloadV1],
+        audit_steps: list[TurnAuditStepV1],
+        used_retrieval: bool,
+        retrieval_error_status: RetrievalStatusV1 | None,
+        finalize_only: bool,
+        provisional_assessment: ProvisionalEvidenceAssessmentV1 | None,
+        packet_answer_assessment_ordinal: int,
+    ) -> None:
+        if (
+            not isinstance(research_input, ResearchModelInputV1)
+            or snapshot.research_id != research_input.research_id
+            or self._research_terminal_publisher is None
+        ):
+            raise ValueError("research terminal dependencies or identity are unavailable")
+        execution_id = snapshot.execution_id
+        if snapshot.catalog_ref is None:
+            raise ValueError("research terminal lost its accepted catalog")
+        evidence_pack = self._retrieval.materialize_evidence_pack(
+            execution_id=execution_id,
+            catalog_ref=snapshot.catalog_ref,
+            evidence_handles=list(evidence_by_handle),
+            idempotency_key=f"{execution_id}:terminal-evidence",
+        )
+        retrieval_status = _terminal_retrieval_status(
+            evidence_pack=evidence_pack,
+            retrieval_error_status=retrieval_error_status,
+            finalize_only=finalize_only,
+            used_retrieval=used_retrieval,
+        )
+        claimed_handles = answer_projection.claimed_evidence_handles
+        visual_images = [
+            visual_images_by_handle[handle]
+            for handle in claimed_handles
+            if handle in visual_images_by_handle
+        ]
+        evidence_projection = self._retrieval.project_research_evidence(
+            execution_id=execution_id,
+            catalog_ref=snapshot.catalog_ref,
+            handles=claimed_handles,
+            visual_images=visual_images,
+        )
+        evidence_id_by_handle = {
+            item.evidence_handle: item.evidence_id
+            for item in evidence_projection.items
+        }
+        assessment_by_finding: dict[
+            str, Literal["aligned", "conflict", "insufficient"]
+        ] = {}
+        if provisional_assessment is not None and (
+            provisional_assessment.state == "completed"
+        ):
+            assessment_by_finding = {
+                result.id: (
+                    result.internal_consistency
+                    if result.internal_consistency is not None
+                    else "aligned"
+                    if result.status == "success"
+                    else "insufficient"
+                )
+                for result in provisional_assessment.results
+            }
+        findings: list[ResearchFindingV1] = []
+        for finding in proposal.findings:
+            evidence_ids = [
+                evidence_id_by_handle[handle]
+                for handle in finding.claimed_evidence_handles
+            ]
+            assessment = assessment_by_finding.get(
+                finding.finding_id, "insufficient"
+            )
+            if not evidence_ids:
+                assessment = "insufficient"
+            findings.append(
+                ResearchFindingV1(
+                    finding_id=finding.finding_id,
+                    text=finding.text,
+                    evidence_ids=evidence_ids,
+                    evidence_assessment=assessment,
+                )
+            )
+        packet = ResearchPacketV1.materialize(
+            research_id=research_input.research_id,
+            execution_id=execution_id,
+            question_ref=research_input.question_ref,
+            scope_ref=research_input.scope_ref,
+            scope_digest=research_input.scope_digest,
+            findings=[
+                finding.model_dump(mode="json") for finding in findings
+            ],
+            unresolved_questions=proposal.unresolved_questions,
+            research_limits=[
+                ResearchLimitV1(code=item.code, detail=item.detail).model_dump(
+                    mode="json"
+                )
+                for item in proposal.research_limits
+            ],
+            evidence=[
+                ResearchEvidenceDescriptorV1(
+                    evidence_id=item.evidence_id,
+                    kind=item.kind,
+                    title=item.title,
+                    page=item.page,
+                    locator=item.locator,
+                    available_representations=item.available_representations,
+                    lineage_digest=item.lineage_digest,
+                ).model_dump(mode="json")
+                for item in evidence_projection.items
+            ],
+        )
+        packet_ref = _research_packet_ref(execution_id)
+        governed = None
+        citation = None
+        governance_command = None
+        if (
+            research_input.output_mode == "evidence_packet_and_answer"
+            and all(
+                finding.evidence_assessment != "insufficient"
+                for finding in packet.findings
+            )
+            and self._packet_answer_composer is not None
+            and self._clock() < snapshot.deadline_at
+        ):
+            packet_answer_input = PacketAnswerModelInputV1(
+                execution_id=execution_id,
+                question=research_input.model_user_input,
+                packet_ref=packet_ref,
+                packet_digest=packet.packet_digest,
+                route=snapshot.route,
+                findings=[
+                    PacketAnswerFindingV1(
+                        finding_id=finding.finding_id,
+                        text=finding.text,
+                        evidence_handles=list(finding.claimed_evidence_handles),
+                    )
+                    for finding in proposal.findings
+                ],
+                evidence=[
+                    PacketAnswerEvidenceV1(
+                        evidence_handle=item.evidence_handle,
+                        content=item.model_visible_content,
+                        title=item.title,
+                        locator=item.locator,
+                        page_number=item.page,
+                    )
+                    for item in evidence_projection.items
+                ],
+                visual_images=visual_images,
+            )
+            try:
+                schema_retry_ordinal = 0
+                repair_origin: SchemaRetryOriginCode | None = None
+                while True:
+                    context_tokens = (
+                        self._packet_answer_composer.estimate_packet_answer_tokens(
+                            packet_answer_input
+                        )
+                    )
+                    snapshot = self._runtime.request_model_action(
+                        RequestModelActionV1(
+                            execution_id=execution_id,
+                            expected_version=snapshot.version,
+                            fencing_token=snapshot.lease.fencing_token,
+                            context_tokens=context_tokens,
+                        )
+                    )
+                    packet_answer_input = packet_answer_input.model_copy(
+                        update={"route": snapshot.route}
+                    )
+                    try:
+                        answer_result = (
+                            self._packet_answer_composer.compose_packet_answer(
+                                packet_answer_input,
+                                schema_retry_ordinal=schema_retry_ordinal,
+                                repair_origin_error_code=repair_origin,
+                            )
+                        )
+                    except Exception as error:
+                        claimed = self._claim_schema_retry(
+                            snapshot,
+                            purpose="packet_answer",
+                            semantic_ordinal=packet_answer_assessment_ordinal,
+                            error=error,
+                        )
+                        if claimed is None:
+                            raise
+                        snapshot, repair_origin = claimed
+                        schema_retry_ordinal += 1
+                        continue
+                    break
+                if isinstance(answer_result, ModelContractViolationV1):
+                    raise ClaimAssessmentUnavailable(
+                        "packet answer contract is invalid",
+                        reason_code="invalid_output",
+                    )
+                if not isinstance(answer_result.action, FinalizeAnswerV1):
+                    raise ClaimAssessmentUnavailable(
+                        "packet answer composer returned a non-answer",
+                        reason_code="invalid_output",
+                    )
+                finalized_answer = _finalized_answer(answer_result.action)
+                declared_subset = self._retrieval.read_declared_evidence_subset(
+                    execution_id=execution_id,
+                    catalog_ref=snapshot.catalog_ref,
+                    handles=answer_result.action.claimed_evidence_handles,
+                    visual_images=visual_images,
+                )
+                if not declared_subset.items:
+                    raise ClaimAssessmentUnavailable(
+                        "packet-bound answer requires packet evidence",
+                        reason_code="invalid_output",
+                    )
+                snapshot = self._runtime.request_model_action(
+                    RequestModelActionV1(
+                        execution_id=execution_id,
+                        expected_version=snapshot.version,
+                        fencing_token=snapshot.lease.fencing_token,
+                        context_tokens=0,
+                    )
+                )
+                answer_digest = _digest(
+                    finalized_answer.model_dump(mode="json")
+                )
+                answer_assessment = self._evaluator.assess(
+                    execution_id=execution_id,
+                    finalized_answer=finalized_answer,
+                    declared_evidence_subset=declared_subset,
+                    deadline_at=snapshot.deadline_at,
+                    route=snapshot.route,
+                    assessment_ordinal=packet_answer_assessment_ordinal,
+                )
+                if (
+                    answer_assessment.answer_digest != answer_digest
+                    or answer_assessment.declared_subset_digest
+                    != declared_subset.digest
+                    or answer_assessment.visual_image_digests
+                    != [
+                        image.image_digest
+                        for image in declared_subset.visual_images
+                    ]
+                ):
+                    raise ClaimAssessmentUnavailable(
+                        "packet answer assessment binding changed",
+                        reason_code="invalid_output",
+                    )
+                declared_lineage = _declared_lineage(declared_subset)
+                governance_command = _governance_command(
+                    execution_id=execution_id,
+                    finalized_answer=finalized_answer,
+                    retrieval_status=retrieval_status,
+                    declared_subset=declared_subset,
+                    declared_lineage=declared_lineage,
+                    assessment_state="completed",
+                    assessment_reason_code="completed",
+                    assessment_consistency=answer_assessment.consistency,
+                    answer_digest=answer_digest,
+                    visual_image_digests=[
+                        image.image_digest
+                        for image in declared_subset.visual_images
+                    ],
+                    assessment_input_digest=(
+                        answer_assessment.assessment_input_digest
+                    ),
+                    assessment_output_digest=(
+                        answer_assessment.assessment_output_digest
+                    ),
+                    assessment_results=answer_assessment.results,
+                    delivery_constraint="none",
+                    research_packet_ref=packet_ref,
+                    research_packet_digest=packet.packet_digest,
+                )
+            except Exception as error:
+                expected = isinstance(
+                    error,
+                    (
+                        ClaimAssessmentUnavailable,
+                        TurnRuntimeBudgetExceeded,
+                        TimeoutError,
+                        ValidationError,
+                    ),
+                ) or getattr(error, "safe_code", None) is not None
+                if not expected:
+                    raise
+                snapshot = self._runtime.snapshot(execution_id)
+                governance_command = None
+        snapshot = self._runtime.begin_governance(
+            BeginResultGovernanceV1(
+                execution_id=execution_id,
+                expected_version=snapshot.version,
+                fencing_token=snapshot.lease.fencing_token,
+                finalize_action_digest=_digest(proposal.model_dump(mode="json")),
+            )
+        )
+        if governance_command is not None:
+            governed = self._result_governance.materialize_v2(
+                governance_command
+            )
+            citation = self._citation.materialize_v2(
+                _citation_command(execution_id, governed)
+            )
+        declared_subset = self._retrieval.read_declared_evidence_subset(
+            execution_id=execution_id,
+            catalog_ref=snapshot.catalog_ref,
+            handles=claimed_handles,
+            visual_images=visual_images,
+        )
+        assessment_step = _assessment_audit_step(
+            ordinal=len(audit_steps) + 1,
+            assessment_state=(
+                "not_attempted"
+                if provisional_assessment is None
+                else provisional_assessment.state
+            ),
+            declared_subset=declared_subset,
+            finalized_answer=_finalized_answer(answer_projection),
+        )
+        audit_steps.extend(
+            _research_terminal_materialization_steps(
+                start_ordinal=len(audit_steps) + 1,
+                assessment_step=assessment_step,
+                evidence_pack=evidence_pack,
+                proposal=proposal,
+                packet_ref=packet_ref,
+                packet=packet,
+                governed=governed,
+                citation=citation,
+            )
+        )
+        audit = self._audit.materialize_v2(
+            _research_audit_command(
+                execution_id=execution_id,
+                proposal=proposal,
+                evidence_pack=evidence_pack,
+                packet_ref=packet_ref,
+                packet=packet,
+                retrieval_status=retrieval_status,
+                evidence_review_status=(
+                    "evidence_aligned"
+                    if all(
+                        finding.evidence_assessment == "aligned"
+                        for finding in packet.findings
+                    )
+                    else "questionable"
+                ),
+                governed=governed,
+                citation=citation,
+                steps=audit_steps,
+            )
+        )
+        snapshot = self._runtime.prepare_terminal(
+            _prepare_research_terminal_command(
+                snapshot=snapshot,
+                evidence_pack_ref=evidence_pack.evidence_pack_ref,
+                research_packet_ref=packet_ref,
+                research_packet_digest=packet.packet_digest,
+                governed_answer_draft_ref=(
+                    None if governed is None else governed.draft_ref
+                ),
+                citation_binding_draft_ref=(
+                    None if citation is None else citation.draft_ref
+                ),
+                audit_draft_ref=audit.draft_ref,
+            )
+        )
+        self._research_terminal_publisher.publish(
+            command=_commit_terminal_command(snapshot),
+            packet_ref=packet_ref,
+            packet=packet,
+        )
 
     def _materialize_terminal(
         self,

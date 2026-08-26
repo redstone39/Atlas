@@ -65,7 +65,7 @@ def _semantic_payload(command: MaterializeGovernedAnswerDraftV1) -> dict[str, ob
 def _semantic_payload_v2(
     command: MaterializeGovernedAnswerDraftV2,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "operation": "materialize_governed_answer_draft",
         "schema_version": "governed-answer-draft-v2",
         "execution_id": command.execution_id,
@@ -92,6 +92,10 @@ def _semantic_payload_v2(
         ],
         "delivery_constraint": command.delivery_constraint,
     }
+    if command.research_packet_ref is not None:
+        payload["research_packet_ref"] = command.research_packet_ref
+        payload["research_packet_digest"] = command.research_packet_digest
+    return payload
 
 
 def _draft_payload(draft: GovernedAnswerDraftV1) -> dict[str, object]:
@@ -348,6 +352,8 @@ class PostgresResultGovernanceV1Store:
                 assessment_input_digest=command.assessment_input_digest,
                 assessment_output_digest=command.assessment_output_digest,
                 assessment_results=command.assessment_results,
+                research_packet_ref=command.research_packet_ref,
+                research_packet_digest=command.research_packet_digest,
                 segments=governed_segments,
                 digest=semantic_digest,
                 created_at=_now(),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
@@ -115,12 +115,13 @@ class PostgresProductionKnowledgeRowSource:
         session: Session,
         *,
         actor_id: str,
+        actor_type: Literal["user", "service_account"] = "user",
         requested_scope: set[tuple[str, str]] | None = None,
     ) -> set[str]:
         scope, team_ids, _can_administer = (
             read_effective_document_scope_with_team_ids(
                 session,
-                actor_type="user",
+                actor_type=actor_type,
                 actor_id=actor_id,
                 requested_scope=requested_scope,
             )
@@ -143,8 +144,8 @@ class PostgresProductionKnowledgeRowSource:
             session,
             identity_keys=(
                 identity_actor_owner_key(actor_id),
-                project_acl_subject_owner_key("user", actor_id),
-                team_subject_owner_key("user", actor_id),
+                project_acl_subject_owner_key(actor_type, actor_id),
+                team_subject_owner_key(actor_type, actor_id),
                 *(
                     project_owner_key(scope_id)
                     for scope_type, scope_id in scope
@@ -165,7 +166,7 @@ class PostgresProductionKnowledgeRowSource:
         current_scope, _current_team_ids, _can_administer = (
             read_effective_document_scope_with_team_ids(
                 session,
-                actor_type="user",
+                actor_type=actor_type,
                 actor_id=actor_id,
                 requested_scope=scope,
             )
@@ -251,16 +252,32 @@ class PostgresProductionKnowledgeRowSource:
         with self._session_factory() as session:
             return self._authorized_documents_in_session(session, actor_id=actor_id)
 
+    def authorized_documents_for_projects(
+        self, *, actor_id: str, project_ids: tuple[str, ...]
+    ) -> tuple[CurrentDocumentResource, ...]:
+        if not project_ids:
+            return ()
+        requested_scope = {("project", project_id) for project_id in project_ids}
+        with self._session_factory() as session:
+            return self._authorized_documents_in_session(
+                session,
+                actor_id=actor_id,
+                actor_type="service_account",
+                requested_scope=requested_scope,
+            )
+
     def _authorized_documents_in_session(
         self,
         session: Session,
         *,
         actor_id: str,
+        actor_type: Literal["user", "service_account"] = "user",
         requested_scope: set[tuple[str, str]] | None = None,
     ) -> tuple[CurrentDocumentResource, ...]:
         document_ids = self._authorized_document_ids_in_session(
             session,
             actor_id=actor_id,
+            actor_type=actor_type,
             requested_scope=requested_scope,
         )
         if not document_ids:

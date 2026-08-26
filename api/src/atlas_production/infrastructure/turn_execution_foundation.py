@@ -21,7 +21,10 @@ from atlas_production.modules.retrieval.public import (
     SearchKnowledgeV1,
     VisualInspectionResultV1,
 )
-from atlas_production.modules.turn_execution.public import TurnModelInputV3
+from atlas_production.modules.turn_execution.public import (
+    StrictModelInputV1,
+    TurnModelInputV3,
+)
 from atlas_production.modules.turn_runtime.public import (
     ExecutionSnapshotV1,
     SchemaRetryOriginCode,
@@ -162,11 +165,15 @@ def _has_legal_tool(
 
 
 def _validate_model_input(
-    snapshot: ExecutionSnapshotV1, model_input: TurnModelInputV3
+    snapshot: ExecutionSnapshotV1, model_input: StrictModelInputV1
 ) -> None:
+    context_mismatch = (
+        isinstance(model_input, TurnModelInputV3)
+        and model_input.context_pack_ref != snapshot.context_pack_ref
+    )
     if (
         model_input.execution_id != snapshot.execution_id
-        or model_input.context_pack_ref != snapshot.context_pack_ref
+        or context_mismatch
         or model_input.knowledge_catalog_ref != snapshot.catalog_ref
         or model_input.budget != snapshot.budget
         or model_input.policy != snapshot.policy

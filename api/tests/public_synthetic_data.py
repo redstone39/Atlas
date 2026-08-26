@@ -301,3 +301,59 @@ def synthetic_candidate_draft(
         rationale="The public synthetic evidence supports a reusable planning behavior.",
         risk="Apply only to comparative tasks with multiple sources.",
     )
+
+
+PUBLIC_RESEARCH_ID = "public-synthetic-research-1"
+PUBLIC_RESEARCH_EXECUTION_ID = "public-synthetic-research-execution-1"
+PUBLIC_RESEARCH_SCOPE_REF = "public-synthetic-scope-ref-1"
+PUBLIC_RESEARCH_PACKET_REF = "public-synthetic-packet-ref-1"
+PUBLIC_RESEARCH_EVIDENCE_ID = "public-synthetic-evidence-1"
+PUBLIC_RESEARCH_EVIDENCE_HANDLE = "public-synthetic-evidence-handle-1"
+PUBLIC_RESEARCH_QUESTION = "Compare the public synthetic evidence."
+PUBLIC_RESEARCH_SCOPE = {
+    "mode": "selected",
+    "refs": [{"kind": "project", "id": "public-synthetic-project-1"}],
+}
+
+
+def synthetic_research_packet_payload() -> dict[str, object]:
+    return {
+        "research_id": PUBLIC_RESEARCH_ID,
+        "execution_id": PUBLIC_RESEARCH_EXECUTION_ID,
+        "question_ref": "public-synthetic-question-ref-1",
+        "scope_ref": PUBLIC_RESEARCH_SCOPE_REF,
+        "scope_digest": canonical_digest(PUBLIC_RESEARCH_SCOPE),
+        "findings": [
+            {
+                "finding_id": "public-synthetic-finding-1",
+                "text": "The public synthetic evidence supports the comparison.",
+                "evidence_ids": [PUBLIC_RESEARCH_EVIDENCE_ID],
+                "evidence_assessment": "aligned",
+            }
+        ],
+        "unresolved_questions": [
+            "Which additional public synthetic source should be evaluated?"
+        ],
+        "research_limits": [
+            {
+                "code": "public-synthetic-source-limit",
+                "detail": "Only one public synthetic source was available.",
+            }
+        ],
+        "evidence": [
+            {
+                "evidence_id": PUBLIC_RESEARCH_EVIDENCE_ID,
+                "kind": "text",
+                "title": "Public synthetic evidence",
+                "page": 1,
+                "locator": "public-synthetic://evidence/1",
+                "available_representations": ["text"],
+                "lineage_digest": canonical_digest(
+                    {
+                        "handle": PUBLIC_RESEARCH_EVIDENCE_HANDLE,
+                        "project_id": "public-synthetic-project-1",
+                    }
+                ),
+            }
+        ],
+    }

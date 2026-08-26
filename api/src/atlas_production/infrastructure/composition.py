@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from atlas_production.infrastructure.mcp_config import McpTransportConfig
 from atlas_production.async_runtime.vector_index import VectorIndex
 from atlas_production.async_runtime.public import best_effort_dispatch
 from atlas_production.infrastructure.artifact_storage_config_adapter import (
@@ -20,12 +21,25 @@ from atlas_production.infrastructure.artifact_storage_filesystem_adapter import 
 )
 from atlas_production.infrastructure.persistence import artifact_storage as rows
 from atlas_production.infrastructure.postgres_agent_adapter import (
+    PostgresAgentResearchAuthority,
+    PostgresAgentResearchStore,
     build_postgres_agent_access,
+)
+from atlas_production.infrastructure.agent_research_acceptance import (
+    ProductionAgentResearchSnapshotBuilder,
+)
+from atlas_production.infrastructure.mcp_research import (
+    AgentResearchEvidenceReader,
+    AtlasMcpResearchApplication,
+    AtlasMcpTransport,
+    PostgresMcpAgentAccess,
+    build_mcp_transport,
 )
 from atlas_production.infrastructure.processing_jobs_authorization import (
     RbacProcessingJobsAuthorization,
 )
 from atlas_production.infrastructure.postgres_audit_adapter import (
+    PostgresAgentResearchAuditReader,
     build_postgres_audit_adapter,
 )
 from atlas_production.infrastructure.postgres_document_artifact_provider import (
@@ -118,7 +132,11 @@ from atlas_production.infrastructure.turn_execution_orchestrator import (
     StatelessTurnExecutionOrchestrator,
 )
 from atlas_production.infrastructure.turn_model_input_adapter import (
+    PublicOwnerResearchModelInputSource,
     PublicOwnerTurnModelInputSource,
+)
+from atlas_production.infrastructure.turn_execution_research_terminal import (
+    PostgresResearchTerminalPublisher,
 )
 from atlas_production.infrastructure.turn_input_projection import (
     ProviderTurnInputProjector,
@@ -198,7 +216,10 @@ from atlas_production.infrastructure.postgres_owner.artifact import (
     TargetControlCommand,
 )
 from atlas_production.modules.audit.public import AdminAuditEventReadService
-from atlas_production.modules.agent_runtime.public import AgentRuntimeApplication
+from atlas_production.modules.agent_runtime.public import (
+    AgentResearchAuditService,
+    AgentResearchService,
+)
 from atlas_production.modules.conversation_audit.service import ConversationAuditService
 from atlas_production.modules.model_routing.service import ModelRoutingService
 from atlas_production.modules.ops.public import OpsReadinessService
@@ -229,6 +250,7 @@ from atlas_production.modules.conversation_review.public import (
     ConversationLearningSettingsService,
 )
 from atlas_production.modules.prompt_skills.public import PromptSkillService
+from atlas_production.modules.turn_runtime.public import LeasePolicyV1
 from atlas_production.providers import default_provider_adapter_factory
 from atlas_production.infrastructure.postgres_runtime import PostgresRuntime
 from atlas_production.modules.artifact_storage.records import (
@@ -251,7 +273,8 @@ class ApiComposition:
     identity_access: IdentityAccessService
     directory_identity: DirectoryIdentityService
     agent_access: AgentAccessService
-    agent_runtime: AgentRuntimeApplication
+    agent_research: AgentResearchService
+    agent_research_audit: AgentResearchAuditService
     team_access: TeamAccessService
     project_governance: ProjectGovernanceService
     workspace_scope_authority: ActionAwareAclAuthority
@@ -286,6 +309,7 @@ class ApiComposition:
     learner_reconciler: LearnerReconciler | None = None
     skill_candidates: SkillCandidateAdmin | None = None
     skill_candidate_pipeline_reconciler: SkillCandidatePipelineReconciler | None = None
+    mcp_transport: AtlasMcpTransport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +428,7 @@ def build_api_composition(
 
     selected = runtime or PostgresRuntime.from_environment()
     selected.bootstrap_schema()
+    mcp_config = McpTransportConfig.from_environment()
     session_factory = selected.session_factory
     filesystem = _active_artifact_filesystem(selected)
     artifact_storage = _artifact_adapter(selected, filesystem)
@@ -436,9 +461,7 @@ def build_api_composition(
         PostgresInviteScopeGrantAdapter(identity_repository),
         directory_identity,
     )
-    agent_access, agent_query_authority = build_postgres_agent_access(
-        session_factory
-    )
+    agent_access = build_postgres_agent_access(session_factory)
     team_access = build_postgres_team_access(
         session_factory,
         directory_identity,
@@ -462,7 +485,7 @@ def build_api_composition(
         ),
     )
     audit_reader, audit_writer = build_postgres_audit_adapter(session_factory)
-    agent_runtime = AgentRuntimeApplication(agent_query_authority, audit_writer)
+    research_audit_reader = PostgresAgentResearchAuditReader(session_factory)
     prompt_skill_owner = PostgresPromptSkillOwner(session_factory)
     prompt_skills = PromptSkillService(prompt_skill_owner)
 
@@ -499,6 +522,7 @@ def build_api_composition(
         session_factory,
         filesystem,
     )
+    knowledge_source = ProductionAuthorizedGrantResourceSource(knowledge_rows)
     authorization_store = PostgresAuthorizationStore(session_factory)
     strict_authorization = PostgresAuthorizationV1Adapter(
         authorization_store,
@@ -548,6 +572,28 @@ def build_api_composition(
         evidence=knowledge_rows,
         pages=knowledge_rows,
     )
+    research_store = PostgresAgentResearchStore(session_factory)
+    research_snapshot_builder = ProductionAgentResearchSnapshotBuilder(
+        runtime=strict_runtime,
+        authorization=strict_authorization,
+        knowledge_source=knowledge_source,
+        generation_retention=generation_retention,
+        retrieval=strict_retrieval,
+        model_routes=model_routing,
+        prompt_skill_catalog=prompt_skill_owner,
+        answer_behavior=answer_behavior_owner,
+        lease_policy=LeasePolicyV1(),
+    )
+    research_authority = PostgresAgentResearchAuthority(
+        session_factory,
+        research_snapshot_builder,
+        research_snapshot_builder.fail_uncommitted,
+    )
+    agent_research = AgentResearchService(
+        research_authority,
+        research_store,
+        audit_writer,
+    )
     strict_turn_model = StrictProviderTurnModel(model_routing)
     strict_orchestrator = StatelessTurnExecutionOrchestrator(
         runtime=strict_runtime,
@@ -557,6 +603,10 @@ def build_api_composition(
             grant_resources=strict_authorization,
             answer_behavior=answer_behavior_owner,
         ),
+        research_model_inputs=PublicOwnerResearchModelInputSource(
+            researches=research_store,
+            grant_resources=strict_authorization,
+        ),
         retrieval=strict_retrieval,
         result_governance=strict_results,
         citation=strict_citations,
@@ -564,11 +614,51 @@ def build_api_composition(
         evaluator=StrictPostHocClaimEvaluator(model_routing, strict_runtime),
         experience_recorder=turn_experience_recorder,
         reasoning_model=strict_turn_model,
+        research_terminal_publisher=PostgresResearchTerminalPublisher(
+            session_factory,
+            strict_runtime,
+        ),
+        packet_answer_composer=strict_turn_model,
         skill_selector_model=strict_turn_model,
         prompt_skill_catalog=prompt_skill_owner,
         prompt_skill_exact_reader=prompt_skill_owner,
     )
     turn_execution_carrier = ThreadTurnCarrier(strict_orchestrator, strict_runtime)
+    mcp_access = PostgresMcpAgentAccess(session_factory)
+    research_evidence = AgentResearchEvidenceReader(
+        access=mcp_access,
+        researches=research_store,
+        runtime=strict_runtime,
+        audits=strict_audit,
+        results=strict_results,
+        citations=strict_citations,
+        retrieval=strict_retrieval,
+        knowledge=knowledge_rows,
+        protected=protected_declared_evidence,
+    )
+    mcp_transport = build_mcp_transport(
+        application=AtlasMcpResearchApplication(
+            access=mcp_access,
+            research=agent_research,
+            researches=research_store,
+            runtime=strict_runtime,
+            results=strict_results,
+            citations=strict_citations,
+            evidence=research_evidence,
+            audit_writer=audit_writer,
+            carrier=turn_execution_carrier,
+        ),
+        access=mcp_access,
+        audit_writer=audit_writer,
+        config=mcp_config,
+    )
+    agent_research_audit = AgentResearchAuditService(
+        researches=research_store,
+        audit_events=research_audit_reader,
+        audit_writer=audit_writer,
+        runtime=strict_runtime,
+        evidence=research_evidence,
+    )
     conversations = PostgresConversationV1Adapter(session_factory)
     conversation_review_owner = PostgresConversationReviewOwner(session_factory)
     conversation_learning_settings = ConversationLearningSettingsService(
@@ -649,7 +739,7 @@ def build_api_composition(
         conversations=conversations,
         retry_lineage=conversations,
         authorization=strict_authorization,
-        knowledge_source=ProductionAuthorizedGrantResourceSource(knowledge_rows),
+        knowledge_source=knowledge_source,
         contexts=strict_contexts,
         input_projections=strict_contexts,
         retrieval=strict_retrieval,
@@ -732,14 +822,15 @@ def build_api_composition(
         ),
         _ArtifactReadinessProbe(selected),
         notes_notifier,
+        mcp_transport_mode=mcp_config.mode,
     )
-
     return ApiComposition(
         current_principal=current_principal,
         identity_access=identity_access,
         agent_access=agent_access,
         directory_identity=directory_identity,
-        agent_runtime=agent_runtime,
+        agent_research=agent_research,
+        agent_research_audit=agent_research_audit,
         team_access=team_access,
         project_governance=project_governance,
         workspace_scope_authority=identity_repository.acl_authority,
@@ -776,6 +867,7 @@ def build_api_composition(
         turn_experience_reconciler=turn_experience_reconciler,
         document_library=document_library,
         turn_lease_failure_sweeper=turn_lease_failure_sweeper,
+        mcp_transport=mcp_transport,
     )
 
 

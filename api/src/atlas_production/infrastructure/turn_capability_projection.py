@@ -257,7 +257,11 @@ def project_turn_model_capabilities(
         allowed_actions.append("expand_knowledge")
     if navigation_allowed:
         allowed_actions.append("navigate_document")
-    allowed_actions.append("finalize_answer")
+    allowed_actions.append(
+        "finalize_research"
+        if snapshot.result_kind == "agent_research"
+        else "finalize_answer"
+    )
 
     limits = TurnModelCapabilityLimitsV1(
         max_page_size=10 if catalog_allowed else 0,

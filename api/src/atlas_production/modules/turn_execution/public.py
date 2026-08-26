@@ -50,6 +50,7 @@ KnowledgeActionName: TypeAlias = Literal[
     "expand_knowledge",
     "navigate_document",
     "finalize_answer",
+    "finalize_research",
 ]
 ExpandDirection: TypeAlias = Literal[
     "previous_page", "next_page", "figure_context", "related_evidence"
@@ -75,6 +76,52 @@ class FinalizeAnswerV1(_StrictModel):
             raise ValueError("final answer segment ids must be unique")
         return self
 
+class ResearchFindingProposalV1(_StrictModel):
+    finding_id: Identity
+    text: str = Field(min_length=1, max_length=12_000)
+    claimed_evidence_handles: list[Identity] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def require_unique_claimed_handles(self) -> "ResearchFindingProposalV1":
+        if len(self.claimed_evidence_handles) != len(
+            set(self.claimed_evidence_handles)
+        ):
+            raise ValueError("finding evidence handles must be unique")
+        return self
+
+
+class ResearchLimitProposalV1(_StrictModel):
+    code: Identity
+    detail: str = Field(min_length=1, max_length=2_000)
+
+
+class FinalizeResearchV1(_StrictModel):
+    action: Literal["finalize_research"]
+    findings: list[ResearchFindingProposalV1] = Field(min_length=1, max_length=100)
+    unresolved_questions: list[str] = Field(max_length=100)
+    research_limits: list[ResearchLimitProposalV1] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def require_bounded_unique_research(self) -> "FinalizeResearchV1":
+        finding_ids = [finding.finding_id for finding in self.findings]
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ValueError("research finding ids must be unique")
+        handles = {
+            handle
+            for finding in self.findings
+            for handle in finding.claimed_evidence_handles
+        }
+        if len(handles) > 100:
+            raise ValueError("research packet claims more than 100 evidence handles")
+        if any(
+            not question.strip() or len(question) > 12_000
+            for question in self.unresolved_questions
+        ):
+            raise ValueError("unresolved questions require bounded non-whitespace text")
+        if sum(len(finding.text) for finding in self.findings) > 120_000:
+            raise ValueError("research finding text exceeds aggregate limit")
+        return self
+
 
 TurnActionV1: TypeAlias = Annotated[
     ListKnowledgeDocumentsV1
@@ -85,7 +132,8 @@ TurnActionV1: TypeAlias = Annotated[
     | InspectVisualV1
     | ExpandKnowledgeV1
     | NavigateDocumentV1
-    | FinalizeAnswerV1,
+    | FinalizeAnswerV1
+    | FinalizeResearchV1,
     Field(discriminator="action"),
 ]
 
@@ -99,6 +147,7 @@ ProviderTurnActionV1: TypeAlias = (
     | ExpandKnowledgeV1
     | NavigateDocumentV1
     | FinalizeAnswerV1
+    | FinalizeResearchV1
 )
 
 
@@ -108,6 +157,10 @@ class TurnActionEnvelopeV1(_StrictModel):
 
 class FinalizeActionEnvelopeV1(_StrictModel):
     next_action: FinalizeAnswerV1
+
+
+class FinalizeResearchActionEnvelopeV1(_StrictModel):
+    next_action: FinalizeResearchV1
 
 
 class ModelActionResultV1(_StrictModel):
@@ -129,6 +182,7 @@ class ModelContractViolationV1(_StrictModel):
         "invalid_turn_tool_arguments",
         "selection_outside_capabilities",
         "invalid_finalize_answer",
+        "invalid_finalize_research",
     ]
     action_name: str | None = Field(default=None, max_length=100)
     input_tokens: int = Field(default=0, ge=0)
@@ -319,6 +373,126 @@ class TurnModelInputV3(_StrictModel):
             )
         return self
 
+class ResearchModelBehaviorContractV1(_StrictModel):
+    research_rule: Literal[
+        "Produce an evidence-first research packet for exactly the accepted question. Findings, unresolved questions, and limits are the result; do not write or simulate a conversational Answer."
+    ] = "Produce an evidence-first research packet for exactly the accepted question. Findings, unresolved questions, and limits are the result; do not write or simulate a conversational Answer."
+    evidence_rule: Literal[
+        "For each finding, declare only evidence handles exposed by this execution. A finding with no adequate evidence must remain visible with no claimed handle; do not infer that missing evidence proves the claim."
+    ] = "For each finding, declare only evidence handles exposed by this execution. A finding with no adequate evidence must remain visible with no claimed handle; do not infer that missing evidence proves the claim."
+    authority_rule: Literal[
+        "Use only the immutable acceptance-time catalog and capabilities supplied for this execution. Never request or infer current authority."
+    ] = "Use only the immutable acceptance-time catalog and capabilities supplied for this execution. Never request or infer current authority."
+
+
+class ResearchModelInputV1(_StrictModel):
+    schema_version: Literal["research-model-input-v1"] = "research-model-input-v1"
+    execution_id: Identity
+    research_id: Identity
+    question_ref: OpaqueRef
+    model_user_input: str = Field(min_length=1, max_length=50_000)
+    recent_tail: list[TurnModelRecentExchangeV3] = Field(
+        default_factory=list, max_length=0
+    )
+    summary: None = None
+    scope_ref: OpaqueRef
+    scope_digest: Digest
+    knowledge_catalog_ref: OpaqueRef
+    catalog_document_count: int = Field(ge=0)
+    output_mode: Literal["evidence_packet", "evidence_packet_and_answer"]
+    budget: BudgetSnapshotV1
+    policy: RoutePolicyV1
+    route: TurnRouteSnapshotV2
+    capabilities: TurnModelCapabilitySnapshotV1
+    behavior_contract: ResearchModelBehaviorContractV1 = Field(
+        default_factory=ResearchModelBehaviorContractV1
+    )
+    previous_observation: KnowledgeToolObservationV1 | None = None
+    reasoning_plan: ReasoningPlanV2 | None = None
+
+    @model_validator(mode="after")
+    def require_execution_fixed_model_visible_item_total(self) -> "ResearchModelInputV1":
+        identities = (
+            {item.evidence_handle for item in self.capabilities.evidence}
+            | {item.handle for item in self.capabilities.visuals}
+            | {
+                item.navigation_handle
+                for item in self.capabilities.navigation
+            }
+        )
+        if len(identities) != self.budget.model_visible_items:
+            raise ValueError(
+                "model-visible capabilities do not match the runtime budget total"
+            )
+        if len(identities) > self.policy.max_model_visible_items_per_turn:
+            raise ValueError(
+                "model-visible capabilities exceed the execution-fixed limit"
+            )
+        return self
+
+
+StrictModelInputV1: TypeAlias = TurnModelInputV3 | ResearchModelInputV1
+
+
+class PacketAnswerFindingV1(_StrictModel):
+    finding_id: Identity
+    text: str = Field(min_length=1, max_length=12_000)
+    evidence_handles: list[Identity] = Field(default_factory=list, max_length=100)
+
+
+class PacketAnswerEvidenceV1(_StrictModel):
+    evidence_handle: Identity
+    content: str = Field(max_length=50_000)
+    title: str = Field(min_length=1, max_length=500)
+    locator: str = Field(min_length=1, max_length=1_000)
+    page_number: int | None = Field(default=None, ge=1)
+
+
+class PacketAnswerModelInputV1(_StrictModel):
+    schema_version: Literal["packet-answer-model-input-v1"] = (
+        "packet-answer-model-input-v1"
+    )
+    execution_id: Identity
+    question: str = Field(min_length=1, max_length=50_000)
+    packet_ref: OpaqueRef
+    packet_digest: Digest
+    findings: list[PacketAnswerFindingV1] = Field(min_length=1, max_length=100)
+    route: TurnRouteSnapshotV2
+    evidence: list[PacketAnswerEvidenceV1] = Field(max_length=100)
+    visual_images: list[VisualImagePayloadV1] = Field(
+        default_factory=list, exclude=True, repr=False
+    )
+
+    @model_validator(mode="after")
+    def require_packet_only_subset(self) -> "PacketAnswerModelInputV1":
+        evidence_handles = [item.evidence_handle for item in self.evidence]
+        if len(evidence_handles) != len(set(evidence_handles)):
+            raise ValueError("packet answer evidence handles must be unique")
+        allowed = set(evidence_handles)
+        if any(
+            not set(finding.evidence_handles).issubset(allowed)
+            for finding in self.findings
+        ):
+            raise ValueError("packet answer finding references evidence outside packet")
+        if any(
+            image.visual_handle not in allowed for image in self.visual_images
+        ):
+            raise ValueError("packet answer image is outside packet evidence")
+        return self
+
+
+class PacketAnswerComposer(Protocol):
+    def estimate_packet_answer_tokens(
+        self, model_input: PacketAnswerModelInputV1
+    ) -> int: ...
+
+    def compose_packet_answer(
+        self,
+        model_input: PacketAnswerModelInputV1,
+        *,
+        schema_retry_ordinal: int = 0,
+        repair_origin_error_code: SchemaRetryOriginCode | None = None,
+    ) -> ModelStepResultV1: ...
 
 class DeepReasoningPlanResultV1(_StrictModel):
     plan: ReasoningPlanV2
@@ -578,15 +752,31 @@ class DeepReasoningModel(Protocol):
     ) -> DeepReasoningEvaluationResultV1: ...
 
 
-def turn_action_schema(*, finalize_only: bool = False) -> dict:
-    envelope_type = FinalizeActionEnvelopeV1 if finalize_only else TurnActionEnvelopeV1
+def turn_action_schema(
+    *,
+    finalize_only: bool = False,
+    finalize_kind: Literal["answer", "research"] = "answer",
+) -> dict:
+    if not finalize_only:
+        return TurnActionEnvelopeV1.model_json_schema()
+    envelope_type = (
+        FinalizeResearchActionEnvelopeV1
+        if finalize_kind == "research"
+        else FinalizeActionEnvelopeV1
+    )
     return envelope_type.model_json_schema()
 
 
 def finalize_answer_schema() -> dict:
-    """Return the strict final response contract used on the provider wire."""
+    """Return the strict final answer contract used on the provider wire."""
 
     return FinalizeAnswerV1.model_json_schema()
+
+
+def finalize_research_schema() -> dict:
+    """Return the strict research packet proposal contract used on the wire."""
+
+    return FinalizeResearchV1.model_json_schema()
 
 
 class StrictTurnModelSession(Protocol):
@@ -598,18 +788,18 @@ class StrictTurnModelSession(Protocol):
 
     def next_action(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         finalize_only: bool,
         repair_origin_error_code: SchemaRetryOriginCode | None = None,
     ) -> ModelStepResultV1: ...
 
     def estimate_next_request_tokens(
-        self, model_input: TurnModelInputV3, *, finalize_only: bool
+        self, model_input: StrictModelInputV1, *, finalize_only: bool
     ) -> int: ...
     def estimate_begin_answer_candidate_tokens(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         candidate_ordinal: int,
         candidate_kind: Literal["normal", "limit_final"],
@@ -618,7 +808,7 @@ class StrictTurnModelSession(Protocol):
 
     def begin_answer_candidate(
         self,
-        model_input: TurnModelInputV3,
+        model_input: StrictModelInputV1,
         *,
         candidate_ordinal: int,
         candidate_kind: Literal["normal", "limit_final"],
@@ -655,7 +845,7 @@ class StrictTurnModelSession(Protocol):
 
 
 class StrictTurnModel(Protocol):
-    def open_session(self, model_input: TurnModelInputV3) -> StrictTurnModelSession: ...
+    def open_session(self, model_input: StrictModelInputV1) -> StrictTurnModelSession: ...
 
 
 class TurnExecutionOrchestrator(Protocol):
@@ -667,11 +857,22 @@ class TurnExecutionOrchestrator(Protocol):
 __all__ = [
     "AnswerSegmentProposalV1",
     "FinalizeAnswerV1",
+    "FinalizeResearchV1",
+    "ResearchFindingProposalV1",
+    "ResearchLimitProposalV1",
+    "ResearchModelInputV1",
+    "ResearchModelBehaviorContractV1",
+    "StrictModelInputV1",
+    "PacketAnswerFindingV1",
+    "PacketAnswerEvidenceV1",
+    "PacketAnswerModelInputV1",
+    "PacketAnswerComposer",
     "DeepReasoningEvaluationResultV1",
     "DeepReasoningContractError",
     "DeepReasoningModel",
     "DeepReasoningPlanResultV1",
     "FinalizeActionEnvelopeV1",
+    "FinalizeResearchActionEnvelopeV1",
     "ModelActionResultV1",
     "ModelContractViolationV1",
     "ModelStepResultV1",
@@ -701,5 +902,6 @@ __all__ = [
     "SkillSelectionResultV1",
     "SkillSelectorModel",
     "finalize_answer_schema",
+    "finalize_research_schema",
     "turn_action_schema",
 ]

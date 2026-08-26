@@ -207,6 +207,8 @@ class PostgresAuditV1Store:
                 governed_answer_digest=command.governed_answer_digest,
                 citation_binding_draft_ref=command.citation_binding_draft_ref,
                 citation_binding_digest=command.citation_binding_digest,
+                research_packet_ref=command.research_packet_ref,
+                research_packet_digest=command.research_packet_digest,
                 retrieval_status=command.retrieval_status,
                 evidence_review_status=command.evidence_review_status,
                 terminal_status=command.terminal_status,

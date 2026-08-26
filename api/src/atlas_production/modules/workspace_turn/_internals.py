@@ -19,9 +19,7 @@ from atlas_production.modules.context_engineering.public import (
 from atlas_production.modules.conversation.public import ConversationTurnMemberV1
 from atlas_production.modules.turn_runtime.public import (
     ExecutionState,
-    RoutePolicyV1,
-    TurnRouteSnapshotV2,
-    VisionRouteSnapshotV1,
+    turn_route_snapshots as route_snapshots,
 )
 
 
@@ -77,51 +75,6 @@ def acceptance_identity(
     )
 
 
-def route_snapshots(route: Any, vision_route: Any | None) -> tuple[TurnRouteSnapshotV2, RoutePolicyV1]:
-    policy = route.runtime_policy
-    vision_snapshot = None
-    if vision_route is not None:
-        vision_policy = vision_route.runtime_policy
-        vision_snapshot = VisionRouteSnapshotV1(
-            route_id=vision_route.route_id,
-            route_revision=vision_route.revision,
-            runtime_policy_revision=vision_policy.revision,
-            tokenizer_profile=vision_policy.tokenizer_profile,
-            context_window_tokens=vision_policy.context_window_tokens,
-            max_input_tokens_per_invocation=vision_policy.max_input_tokens_per_invocation,
-            max_output_tokens_per_invocation=vision_policy.max_output_tokens_per_invocation,
-            max_tool_result_tokens_per_execution=vision_policy.max_tool_result_tokens_per_execution,
-            max_total_tokens_per_conversation=vision_policy.max_total_tokens_per_conversation,
-        )
-    return (
-        TurnRouteSnapshotV2(
-            route_id=route.route_id,
-            route_revision=route.revision,
-            runtime_policy_revision=policy.revision,
-            tokenizer_profile=policy.tokenizer_profile,
-            context_window_tokens=policy.context_window_tokens,
-            max_input_tokens_per_invocation=policy.max_input_tokens_per_invocation,
-            max_output_tokens_per_invocation=policy.max_output_tokens_per_invocation,
-            max_tool_result_tokens_per_execution=policy.max_tool_result_tokens_per_execution,
-            max_total_tokens_per_conversation=policy.max_total_tokens_per_conversation,
-            vision_route=vision_snapshot,
-        ),
-        RoutePolicyV1(
-            max_tool_invocations=policy.max_tool_executions,
-            max_provider_invocations=policy.max_provider_invocations,
-            max_reasoning_revision_cycles=policy.max_reasoning_revision_cycles,
-            max_schema_retries_per_turn=policy.max_schema_retries_per_turn,
-            max_catalog_pages=policy.max_catalog_pages,
-            max_search_rounds=policy.max_search_rounds,
-            max_model_visible_items_per_turn=policy.max_model_visible_items_per_turn,
-            max_retrieval_repairs=policy.max_retrieval_repairs,
-            max_selected_anchor_pages_per_round=policy.max_selected_anchor_pages_per_round,
-            context_token_budget=policy.max_input_tokens_per_invocation,
-            tool_token_budget=policy.max_tool_result_tokens_per_execution,
-            tool_execution_timeout_seconds=policy.tool_execution_timeout_seconds,
-            deadline_seconds=policy.turn_timeout_seconds,
-        ),
-    )
 
 
 def acceptance_failure_code(error: Exception) -> str:
