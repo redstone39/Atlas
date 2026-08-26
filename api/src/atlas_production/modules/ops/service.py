@@ -12,13 +12,10 @@ class OpsReadinessService:
         repository: OpsReadinessRepository,
         artifact_storage=None,
         notes_collaboration=None,
-        *,
-        mcp_transport_mode: str | None = None,
     ) -> None:
         self.repository = repository
         self.artifact_storage = artifact_storage
         self.notes_collaboration = notes_collaboration
-        self.mcp_transport_mode = mcp_transport_mode
 
     def readiness(self) -> ReadinessState:
         self.repository.refresh()
@@ -46,10 +43,6 @@ class OpsReadinessService:
             health="ok" if ready else "degraded",
             setup_blockers=blockers,
             evidence_ready_projects=evidence_ready_projects,
-            message_params=(
-                {}
-                if self.mcp_transport_mode is None
-                else {"mcp_transport_mode": self.mcp_transport_mode}
-            ),
+            message_params={},
             message_code='workspace.is_ready' if ready else 'common.setup_is_incomplete',
         )

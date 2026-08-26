@@ -822,7 +822,6 @@ def build_api_composition(
         ),
         _ArtifactReadinessProbe(selected),
         notes_notifier,
-        mcp_transport_mode=mcp_config.mode,
     )
     return ApiComposition(
         current_principal=current_principal,
