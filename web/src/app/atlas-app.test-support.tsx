@@ -5,6 +5,7 @@ import AuthenticatedLayout from "./(authenticated)/layout";
 import UnavailableRoute from "./(authenticated)/[...unavailable]/page";
 import { AgentsScreen } from "./(authenticated)/admin/agents/screen";
 import { AuditScreen } from "./(authenticated)/admin/audit/screen";
+import { AgentResearchAuditScreen } from "./(authenticated)/admin/audit/agent-research/screen";
 import { AuditConversationsScreen } from "./(authenticated)/admin/audit/conversations/screen";
 import { AuditRuntimeScreen } from "./(authenticated)/admin/audit/conversations/[conversationId]/runtime/[turnId]/screen";
 import { AuditTranscriptScreen } from "./(authenticated)/admin/audit/conversations/[conversationId]/transcript/screen";
@@ -224,6 +225,9 @@ function authenticatedScreen(pathname: string): ReactNode {
   }
   if (/^\/admin\/projects\/[^/]+\/(profile|access)$/.test(pathname)) {
     return <AdminProjectsScreen route={route} />;
+  }
+  if (/^\/admin\/audit\/agent-research(?:\/[^/]+(?:\/runtime)?)?$/.test(pathname)) {
+    return <AgentResearchAuditScreen route={route} />;
   }
   if (/^\/admin\/audit\/conversations\/[^/]+\/transcript$/.test(pathname)) {
     return <AuditTranscriptScreen route={route} />;

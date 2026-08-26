@@ -45,6 +45,9 @@ export type AppRoute =
   | "/admin/audit/events"
   | `/admin/audit/conversations/${string}/transcript`
   | `/admin/audit/conversations/${string}/runtime/${string}`
+  | "/admin/audit/agent-research"
+  | `/admin/audit/agent-research/${string}`
+  | `/admin/audit/agent-research/${string}/runtime`
   | `/admin/users/${string}`
   | `/admin/teams/${string}/profile`
   | `/admin/teams/${string}/members`
@@ -97,6 +100,12 @@ export type AppRouteMatch =
       conversationId: string;
       section: "transcript" | "runtime";
       turnId?: string;
+    }
+  | {
+      kind: "admin-audit-agent-research";
+      route: AppRoute;
+      section: "list" | "detail" | "runtime";
+      researchId?: string;
     };
 
 const STATIC_ROUTES = new Set<StaticAppRoute>([
@@ -190,6 +199,20 @@ export function adminAuditSectionRoute(
   section: "conversations" | "events",
 ): AppRoute {
   return `/admin/audit/${section}`;
+}
+
+export function adminAgentResearchAuditRoute(): AppRoute;
+export function adminAgentResearchAuditRoute(
+  researchId: string,
+  section?: "detail" | "runtime",
+): AppRoute;
+export function adminAgentResearchAuditRoute(
+  researchId?: string,
+  section: "detail" | "runtime" = "detail",
+): AppRoute {
+  if (!researchId) return "/admin/audit/agent-research";
+  const base = `/admin/audit/agent-research/${encodeURIComponent(researchId)}`;
+  return (section === "runtime" ? `${base}/runtime` : base) as AppRoute;
 }
 
 export function adminAuditConversationRoute(
@@ -292,6 +315,21 @@ export function matchAppRoute(route: AppRoute): AppRouteMatch {
     };
   }
   if (segments[1] === "audit") {
+    if (segments[2] === "agent-research") {
+      if (segments.length === 3) {
+        return {
+          kind: "admin-audit-agent-research",
+          route,
+          section: "list",
+        };
+      }
+      return {
+        kind: "admin-audit-agent-research",
+        route,
+        researchId: decodeURIComponent(segments[3]),
+        section: segments[4] === "runtime" ? "runtime" : "detail",
+      };
+    }
     if (segments.length === 3) {
       return {
         kind: "admin-audit-section",
@@ -352,7 +390,8 @@ export function managementRouteFamily(route: AppRoute): StaticAppRoute | null {
   if (match.kind === "admin-project-detail") return "/admin/projects";
   if (
     match.kind === "admin-audit-section" ||
-    match.kind === "admin-audit-conversation"
+    match.kind === "admin-audit-conversation" ||
+    match.kind === "admin-audit-agent-research"
   ) return "/admin/audit";
   if (match.kind === "static" && match.route.startsWith("/admin/")) {
     return match.route;

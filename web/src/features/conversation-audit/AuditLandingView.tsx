@@ -1,11 +1,15 @@
-import { History, MessageSquareText } from "lucide-react";
+import { History, MessageSquareText, SearchCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../../components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "../../components/ui/card";
 import { PageHeader } from "../../shared/product-ui";
-import { adminAuditSectionRoute, type AppRoute } from "../../shared/routes";
+import {
+  adminAgentResearchAuditRoute,
+  adminAuditSectionRoute,
+  type AppRoute,
+} from "../../shared/routes";
 
 export function AuditLandingView({
   onNavigate,
@@ -16,7 +20,7 @@ export function AuditLandingView({
   return (
     <section className="flex flex-col gap-5">
       <PageHeader title={t("audit.title")} />
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardHeader>
             <MessageSquareText aria-hidden="true" />
@@ -44,6 +48,21 @@ export function AuditLandingView({
               onClick={() => onNavigate(adminAuditSectionRoute("events"))}
             >
               {t("audit.openOperationDirectory")}
+            </Button>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <SearchCheck aria-hidden="true" />
+            <CardTitle>{t("agentResearchAudit.title")}</CardTitle>
+            <CardDescription>{t("agentResearchAudit.landingDescription")}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              type="button"
+              onClick={() => onNavigate(adminAgentResearchAuditRoute())}
+            >
+              {t("agentResearchAudit.openDirectory")}
             </Button>
           </CardContent>
         </Card>
