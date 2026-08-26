@@ -44,6 +44,10 @@ DENIED_COMPONENTS = {
     "target",
     "venv",
 }
+EXECUTION_TICKET_COMPONENTS = {"execution-ticket", "execution-tickets"}
+PLAN_TICKET_BASENAME = re.compile(
+    r"(?:plan|.+-plan|tickets?|.+-tickets?)\.(?:md|ya?ml|json)"
+)
 BASELINE_PUBLIC_FIXTURES = {
     "api/tests/fixtures/__init__.py",
     "api/tests/fixtures/local_pilot.py",
@@ -142,7 +146,11 @@ def _denied_path(path: str) -> str | None:
         or ("fixtures" in components and normalized not in BASELINE_PUBLIC_FIXTURES)
     ):
         return "denied private, fixture, cache, or build path"
+    if components.intersection(EXECUTION_TICKET_COMPONENTS):
+        return "denied plan or execution-ticket artifact path"
     basename = normalized.rsplit("/", 1)[-1]
+    if PLAN_TICKET_BASENAME.fullmatch(basename):
+        return "denied plan or execution-ticket artifact path"
     if basename.startswith(".env") and basename != ".env.example":
         return "denied environment path"
     if DIRECT_PAYLOAD_PATH.search(normalized):
@@ -288,6 +296,30 @@ def _self_test() -> None:
     cases = (
         ("plans/private-plan.yaml", b"safe", set(), "denied publication path"),
         (
+            "plan.md",
+            b"safe",
+            set(),
+            "denied plan or execution-ticket artifact path",
+        ),
+        (
+            "config/release-plan.yaml",
+            b"safe",
+            set(),
+            "denied plan or execution-ticket artifact path",
+        ),
+        (
+            "tickets.json",
+            b"safe",
+            set(),
+            "denied plan or execution-ticket artifact path",
+        ),
+        (
+            "ops/execution-tickets/PUBAPP-001.yaml",
+            b"safe",
+            set(),
+            "denied plan or execution-ticket artifact path",
+        ),
+        (
             "web/.next/server/app.js",
             b"generated",
             set(),
@@ -426,6 +458,9 @@ def _self_test() -> None:
 
     safe_cases = (
         ("api/src/public.py", b"public-safe"),
+        ("api/src/planner.py", b"public-safe"),
+        ("docs/planetary-design.md", b"public-safe"),
+        ("config/explanation.json", b'{"example":"public-safe"}'),
         (
             "api/tests/test_public_behavior.py",
             b'transcript = "public-synthetic example transcript"',
