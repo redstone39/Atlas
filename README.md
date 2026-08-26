@@ -4,8 +4,7 @@ Atlas is a self-hosted knowledge platform for people and agents.
 
 People use Atlas to organize governed documents, collaborate in Notes, and ask
 questions with inspectable evidence. Agents use Atlas through MCP to research
-currently authorized Project knowledge and read the evidence behind their
-results.
+governed Project knowledge and read the evidence behind their results.
 
 **Atlas is more than a document-chat or RAG interface: it brings human and
 agent access, authorization, and evidence inspection into the same knowledge
@@ -23,48 +22,43 @@ workflow.**
 
 ![A fresh Atlas workspace after leaving the guided setup](docs/assets/atlas-fresh-workspace.png)
 
-*A fresh local evaluation workspace after completing or skipping the guided
-setup. Provider credentials and sample documents are not included in this
-public snapshot.*
+*The Atlas Web workspace after guided setup—the human entry point for governed
+Projects, Teams, documents, Notes, conversations, and administration. Provider
+credentials and sample knowledge are not included in this public snapshot.*
+
+## Why Atlas
+
+- **One governed knowledge platform:** People work through the Web UI while
+  Agents research governed Project knowledge through MCP. Documents, Notes,
+  identity, model routing, administration, and Agent access run in one
+  self-hosted deployment.
+- **Authorization stays current:** Atlas evaluates access when knowledge is used
+  and rechecks protected evidence reads before returning content.
+- **Results stay inspectable:** Human answers and Agent research expose evidence
+  and auditable execution state instead of acting like opaque model output.
 
 ## For people and agents
 
 | | People | Agents |
 |---|---|---|
-| **Entry point** | Web workspace | MCP at exact `/mcp` |
-| **Knowledge access** | Current Project- and Team-scoped access | Currently authorized Project scopes |
-| **Primary work** | Documents, collaborative Notes, and General or In-depth conversations | Scope discovery, one-round research, terminal polling, and protected evidence reads |
-| **Inspectable result** | Answer, execution state, and protected evidence | Immutable research packet, optional packet-bound answer, and protected evidence |
+| **Entry point** | Web workspace | MCP |
+| **Knowledge access** | Project and Team knowledge | Project knowledge |
+| **Primary work** | Manage documents and Notes; ask through General or In-depth | Discover scopes, run one-round research, retrieve results, and inspect evidence |
+| **Result** | Answer, execution state, and inspectable evidence | Research packet, optional grounded answer, and inspectable evidence |
 
 Agent access is intentionally narrower than the human workspace in this public
 snapshot. Agents do not upload documents or edit Notes through MCP.
-
-## Why Atlas
-
-- **One knowledge platform:** People work through the Web UI while Agents use
-  governed Project knowledge through MCP.
-- **Current authorization:** Human knowledge routes and Agent research use
-  current access rules. Protected reads recheck authorization before returning
-  content.
-- **Inspectable results:** Human answers and Agent research expose evidence and
-  auditable execution state instead of acting like opaque model output.
-- **Self-hosted workspace:** Document processing, conversations, collaborative
-  Notes, identity, administration, model routing, and Agent research run in one
-  deployment.
 
 ## How Atlas works
 
 ```text
 People ──→ Web workspace ──→ Project / Team knowledge ──→ Answers + evidence
-Agents ──→ MCP research ───→ Authorized Project knowledge ──→ Packets + evidence
-                                                └──→ Audit
+Agents ──→ MCP research ───→ Project knowledge ──→ Packets + evidence
 ```
 
-The Web UI and FastAPI application coordinate PostgreSQL-owned business state,
-Redis-carried background work, Qdrant semantic candidates, governed artifact
-storage, processing plugins, an isolated Office renderer, and the Notes
-collaboration carrier. PostgreSQL remains authoritative for access, audit,
-conversations, routing, processing, and durable Notes content.
+Human conversations can use Project or Team knowledge, while MCP Agents are
+limited to Project scopes granted to their identity. Both paths expose
+inspectable evidence and auditable results through the same Atlas deployment.
 
 See [Architecture and trust boundaries](docs/architecture.md) for exact
 authority, access, evidence, failure, and lifecycle behavior.
@@ -91,27 +85,23 @@ resumable guided setup:
 **Administrator → Model → Project → Document → Review**
 
 Model, Project, and Document may be skipped, but a first governed answer needs a
-tested default model route, authorized Project knowledge, and searchable
-evidence. Provider credentials are required for model answers and are not
-included.
+tested default model route, accessible Project knowledge, and searchable
+evidence.
 
-For initializer observation, health and readiness checks, restart, recovery,
-replacement, and destructive reset behavior, read
-[Local Docker Compose deployment](docs/deployment/local.md). The documented
-`down -v` path permanently deletes the Compose project's local application
-data. [Configuration](docs/configuration.md) owns the exact first-admin, secret,
-Provider, MCP, and runtime input rules.
+For health checks, recovery, replacement, and lifecycle details, see
+[Local Docker Compose deployment](docs/deployment/local.md). Its documented
+`down -v` reset permanently deletes local Atlas application data. For secrets,
+Providers, MCP, and runtime inputs, see
+[Configuration](docs/configuration.md).
 
 ## What you can evaluate
 
 ### Human knowledge work
 
-- Upload authorized documents into a Project or Team and wait until they are
-  **Searchable**.
-- Organize scope-bound collaborative Notes.
-- Ask a question through a General or In-depth conversation.
-- Inspect the answer, execution state, and available protected evidence under
-  current access.
+1. Add documents to a Project or Team and wait until they are **Searchable**.
+2. Create or collaborate in scope-bound Notes.
+3. Ask a question through a General or In-depth conversation.
+4. Inspect the answer, execution state, and available evidence.
 
 Evidence review helps inspect what Atlas used; it is not a truth or formal
 citation guarantee. Model answers are not deterministic.
@@ -119,40 +109,43 @@ citation guarantee. Model answers are not deterministic.
 ### Agent knowledge access
 
 A System Admin can create an Agent identity, issue its opaque bearer token, and
-grant it Project access. An MCP 2025-06-18 client connects to exact `/mcp` and
-can:
+grant it Project access.
 
-1. discover currently authorized Project scopes;
-2. submit one bounded, single-round research request;
-3. poll until the immutable research packet is available;
-4. read selected protected evidence.
+1. Discover available Project scopes.
+2. Submit one bounded, single-round research request.
+3. Retrieve the research packet.
+4. Inspect selected evidence.
 
-The research packet is the primary result. An optional governed answer remains
-bound to that packet. Fresh requests and protected evidence reads recheck
-current authorization.
-
-No sample knowledge, private test documents, Provider keys, or expected model
-answers are included in the public snapshot.
+An MCP 2025-06-18 client connects to exact `/mcp`. The research packet is the
+primary result, and an optional governed answer remains bound to it. Fresh
+requests and protected evidence reads re-evaluate access.
 
 ## Current public boundary
 
-- Atlas is self-hosted rather than a hosted or turnkey service.
-- The supported general-developer path is a fresh, loopback-only technical
-  evaluation. Keep the default Compose ports bound to loopback.
-- Public Internet deployment, in-place application-data migration, high
-  availability, automatic failover, and shared-state multi-deployment are not
-  supported.
-- Managed TLS, backup, monitoring, capacity management, abuse protection, and
-  an operations SLA are not provided.
-- The default MCP transport accepts localhost Host and Origin values only.
-  Configuring an operator-managed proxy or public URL does not make this
-  snapshot Internet Ready.
-- LDAP and Active Directory ship unconfigured. Portainer with SMB guides and
-  audits exist, but real-environment operation is not verified here.
+### Supported for evaluation
 
-Replacing a snapshot requires a fresh application data set. Identities,
-conversations, routing configuration, processing state, and other application
-data are not migrated.
+- Fresh local Docker Compose deployment with loopback Web and MCP access.
+- Governed documents, collaborative Notes, scoped conversations, and
+  inspectable evidence.
+- Local Provider and model configuration.
+- One-round MCP Agent research over Project knowledge.
+
+### Current limits
+
+- No direct public Internet deployment.
+- No in-place application-data migration; replacing a snapshot requires a fresh
+  application data set.
+- No high availability, automatic failover, or shared-state multi-deployment.
+- No managed TLS, backup, monitoring, capacity management, abuse protection, or
+  operations SLA.
+
+Keep the default Compose ports bound to loopback. The default MCP transport
+accepts localhost Host and Origin values only; configuring an operator-managed
+proxy or public URL does not make this snapshot Internet Ready.
+
+LDAP and Active Directory ship unconfigured. Portainer with SMB paths are
+documented and audited, but real-environment operation is not verified in this
+public snapshot.
 
 These boundaries are open to discussion. If Atlas is missing something
 important for your use case, share the scenario, expected outcome, and relevant
@@ -164,11 +157,9 @@ environment details through
 
 ![Atlas System Admin settings in a fresh local evaluation deployment](docs/assets/atlas-admin-settings.png)
 
-*System Admin exposes identity, Projects and Teams, the document library,
-Models, Skill slots, conversation-learning admission, processing plugins,
-agents, conversation and operation audits, Agent Research Audit, system status,
-language, theme, Notes settings, and guided-setup re-entry. The pictured account
-is local evaluation data.*
+*System Admin manages identity, Projects and Teams, documents, models,
+processing, agents, audits, system status, language, theme, Notes settings, and
+guided setup. The pictured account is local evaluation data.*
 
 ## Documentation
 
@@ -182,12 +173,11 @@ is local evaluation data.*
 
 ## Engineering methodology
 
-Atlas is also the reference workload for a harness-engineered development
-methodology. Product intent, requirements, architecture, risk, and final
-acceptance remain human-owned; bounded coding agents work against repository
-contracts, tests, audits, and reproducible operator journeys. Read
-[Development methodology](docs/development-methodology.md) for the exact public
-boundary and evidence exposed by this snapshot.
+Atlas is also a reference workload for a harness-engineered development
+methodology: humans retain ownership of product intent, architecture, risk, and
+acceptance, while bounded coding agents work against explicit repository
+contracts and verification. See
+[Development methodology](docs/development-methodology.md) for details.
 
 ## Community and license
 
