@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ValidationError
 
 from atlas_production.app import create_app
 from atlas_production.infrastructure.composition import ApiComposition
 from atlas_production.infrastructure.mcp_config import McpTransportConfig
-from atlas_production.infrastructure.mcp_research import build_mcp_transport
+from atlas_production.infrastructure.mcp_research import (
+    AtlasMcpResearchApplication,
+    build_mcp_transport,
+)
 from atlas_production.modules.agent_runtime.public import (
     AcceptedResearchSnapshotV1,
     AcceptedScopeSnapshotV1,
@@ -96,6 +101,17 @@ def _accepted_record(payload: StartAgentResearchV1) -> AgentResearchRecordV1:
         packet_digest=None,
         accepted_at=PUBLIC_NOW,
         completed_at=None,
+    )
+
+def _completed_record() -> AgentResearchRecordV1:
+    packet = ResearchPacketV1.materialize(**synthetic_research_packet_payload())
+    return replace(
+        _accepted_record(_payload()),
+        status="completed",
+        packet=packet,
+        packet_ref=PUBLIC_RESEARCH_PACKET_REF,
+        packet_digest=packet.packet_digest,
+        completed_at=PUBLIC_NOW,
     )
 
 
@@ -336,6 +352,47 @@ def test_exact_mcp_path_requires_bearer_and_lists_exactly_four_tools() -> None:
             "atlas.get_research",
             "atlas.read_evidence",
         }
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        None,
+        TerminalOutcomeV1(
+            execution_id=PUBLIC_RESEARCH_EXECUTION_ID,
+            scan_sequence=1,
+            outcome="failed",
+            result_kind="agent_research",
+            failure_code="public_synthetic_failure",
+            committed_at=PUBLIC_NOW,
+        ),
+    ],
+)
+def test_mcp_get_research_fails_closed_for_one_sided_completed_record(
+    terminal: TerminalOutcomeV1 | None,
+) -> None:
+    application = AtlasMcpResearchApplication(
+        access=SimpleNamespace(
+            current_identity=lambda _token: SimpleNamespace(
+                actor_id="public-synthetic-agent-1",
+                status="allowed",
+            )
+        ),
+        research=object(),
+        researches=SimpleNamespace(find=lambda _research_id: _completed_record()),
+        runtime=SimpleNamespace(terminal_outcome=lambda _execution_id: terminal),
+        results=object(),
+        citations=object(),
+        evidence=object(),
+        audit_writer=_AuditWriter(),
+        carrier=object(),
+    )
+
+    with pytest.raises(ToolError, match="research_not_available"):
+        application.get(
+            raw_token="public-synthetic-token",
+            research_id=PUBLIC_RESEARCH_ID,
+        )
 
 
 def test_openapi_removes_legacy_query_and_exposes_only_admin_research_reads() -> None:

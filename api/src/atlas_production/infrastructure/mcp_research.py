@@ -724,13 +724,28 @@ class AtlasMcpResearchApplication:
             if record is None or record.actor_id != actor_id:
                 raise McpBusinessError("research_not_available")
             terminal = self.runtime.terminal_outcome(record.execution_id)
+            accepted_without_packet = (
+                record.status == "accepted"
+                and record.packet is None
+                and record.packet_ref is None
+                and record.packet_digest is None
+                and record.completed_at is None
+            )
             if terminal is None:
+                if not accepted_without_packet:
+                    raise McpBusinessError("research_not_available")
                 result = ResearchStatusV1(
                     research_id=research_id,
                     execution_id=record.execution_id,
                     status="processing",
                 )
             elif terminal.outcome == "failed":
+                if (
+                    not accepted_without_packet
+                    or terminal.execution_id != record.execution_id
+                    or terminal.result_kind != "agent_research"
+                ):
+                    raise McpBusinessError("research_not_available")
                 result = ResearchStatusV1(
                     research_id=research_id,
                     execution_id=record.execution_id,
