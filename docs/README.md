@@ -41,6 +41,8 @@ include Provider credentials or deterministic expected answers.
 | Which Provider inputs and defaults can an operator configure? | [Configuration: Provider connections](configuration.md#provider-connections) |
 | What do General and In-depth execute? | [Architecture: reasoning execution](architecture.md#reasoning-execution) |
 | Which execution limits can an operator configure? | [Configuration: reasoning route policy](configuration.md#reasoning-route-policy) |
+| How does one-round Agent research preserve authorization, replay, packet, and Conversation boundaries? | [Architecture: user journey](architecture.md#user-journey) and [authority](architecture.md#authority) |
+| How is exact `/mcp` configured for localhost or an operator-managed proxy? | [Configuration: MCP Agent research transport](configuration.md#mcp-agent-research-transport) |
 | Which member and administrator surfaces expose these capabilities? | [Architecture: product surfaces](architecture.md#product-surfaces) |
 | What is retained, reset, or unsupported between snapshots? | [Architecture: data lifecycle](architecture.md#data-lifecycle) |
 
@@ -52,8 +54,8 @@ precise Prompt Skills ownership and lifecycle terms.
 ## Operate
 
 - [Configuration](configuration.md): first-admin setup, Notes secrets, credential
-  encryption, Provider and directory connections, reasoning policy, and
-  runtime inputs
+  encryption, Provider and directory connections, reasoning policy, exact
+  `/mcp`, and runtime inputs
 - [Local Docker Compose deployment](deployment/local.md): fresh evaluation,
   readiness, restart, recovery, replacement, and reset
 - [Portainer with SMB](deployment/portainer-smb.md): audited deployment shape;
@@ -65,7 +67,8 @@ precise Prompt Skills ownership and lifecycle terms.
 
 - [Processing plugin development](plugin-development.md)
 - [Verification](verification.md): repository checks, publication-boundary
-  audits, and conversation-evolution smoke
+  audits, public Agent research contracts and MCP initialization smoke, and
+  conversation-evolution smoke
 - [Development methodology](development-methodology.md): human authority,
   bounded agent work, and the public evidence boundary
 

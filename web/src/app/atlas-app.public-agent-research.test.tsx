@@ -226,6 +226,15 @@ describe("Atlas public Web: Agent Research Audit", () => {
     );
     expect(await screen.findByText("Research runtime")).toBeInTheDocument();
     expect(screen.getByText("research_packet_committed")).toBeInTheDocument();
+    const researchCalls = vi.mocked(global.fetch).mock.calls.map(([input]) =>
+      new URL(String(input), "http://localhost"));
+    expect(researchCalls.some((url) =>
+      url.pathname === `${basePath}/research-public-001/evidence/evidence-public-001` &&
+      url.searchParams.get("representation") === "text",
+    )).toBe(true);
+    expect(researchCalls.some((url) =>
+      url.pathname === `${basePath}/research-public-001/runtime`,
+    )).toBe(true);
   });
 
   it("ignores a stale detail response after navigation", async () => {
@@ -254,6 +263,73 @@ describe("Atlas public Web: Agent Research Audit", () => {
     });
     expect(screen.queryByText("Stale public result")).not.toBeInTheDocument();
     expect(screen.getByText("Which second public control is verified?")).toBeInTheDocument();
+  });
+
+  it("appends a cursor page without replacing accepted and denied rows", async () => {
+    window.history.pushState({}, "", "/admin/audit/agent-research");
+    mockApi(adminSession, readyReadiness);
+    installResearchApi((url) => {
+      if (url.searchParams.get("cursor") === "cursor-public-2") {
+        return jsonResponse({ items: listPayload.items.slice(1), next_cursor: null });
+      }
+      return jsonResponse({ items: listPayload.items.slice(0, 1), next_cursor: "cursor-public-2" });
+    });
+    render(<App />);
+
+    expect((await screen.findAllByText("agent-public-001")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Load more research" }));
+    expect((await screen.findAllByText("agent-public-002")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Requested project is unavailable.")).toHaveLength(2);
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        new URL(String(input), "http://localhost").searchParams.get("cursor") ===
+          "cursor-public-2",
+      ),
+    ).toBe(true);
+  });
+
+  it("exposes loading, empty, error, and retry states without stale data", async () => {
+    window.history.pushState({}, "", "/admin/audit/agent-research");
+    mockApi(adminSession, readyReadiness);
+    let resolveList!: (response: Response) => void;
+    let attempt = 0;
+    const pending = new Promise<Response>((resolve) => { resolveList = resolve; });
+    installResearchApi(() => {
+      attempt += 1;
+      if (attempt === 1) return pending;
+      if (attempt === 2) {
+        return jsonResponse({ message_code: "system.unavailable" }, 503);
+      }
+      return jsonResponse({ items: [], next_cursor: null });
+    });
+    render(<App />);
+
+    expect(await screen.findByText("Loading Agent research audit")).toBeInTheDocument();
+    await act(async () => {
+      resolveList(jsonResponse({ message_code: "system.unavailable" }, 503));
+      await pending;
+    });
+    expect(await screen.findByText("Agent research audit unavailable")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Agent research audit unavailable")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No Agent research records")).toBeInTheDocument();
+  });
+
+  it("keeps Conversation Audit reads separate from Agent research state", async () => {
+    window.history.pushState({}, "", "/admin/audit/conversations");
+    mockApi(adminSession, readyReadiness);
+    installResearchApi(() => jsonResponse(listPayload));
+    render(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: /Example conversation/ }),
+    ).toBeInTheDocument();
+    expect(
+      vi.mocked(global.fetch).mock.calls.some(([input]) =>
+        new URL(String(input), "http://localhost").pathname.startsWith(basePath),
+      ),
+    ).toBe(false);
   });
 
   it("fails closed before protected research fetches for a non-admin", async () => {

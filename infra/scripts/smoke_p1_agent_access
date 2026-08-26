@@ -7,6 +7,7 @@ project_name="${ATLAS_PRODUCTION_COMPOSE_PROJECT:-atlas-production-p1-smoke}"
 api_url="http://127.0.0.1:${ATLAS_PRODUCTION_API_PORT:-8012}"
 web_url="http://127.0.0.1:${ATLAS_PRODUCTION_WEB_PORT:-5184}"
 cookie_file="$(mktemp)"
+mcp_header_file="$(mktemp)"
 suffix="$(date +%s)"
 admin_email="smoke-admin-${suffix}@example.test"
 admin_password="SmokeBootstrap-${suffix}!"
@@ -23,7 +24,7 @@ compose() {
 }
 
 cleanup() {
-  rm -f "$cookie_file"
+  rm -f "$cookie_file" "$mcp_header_file"
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -48,6 +49,70 @@ value=data
 for key in path:
     value=value[int(key)] if key.isdigit() else value[key]
 print(value)' "$1"
+}
+
+sse_json_field() {
+  python3 -c 'import json,sys
+path=sys.argv[1].split(".")
+line=next(line[6:] for line in sys.stdin.read().splitlines() if line.startswith("data: "))
+value=json.JSONDecoder().raw_decode(line)[0]
+for key in path:
+    value=value[int(key)] if key.isdigit() else value[key]
+print(value)' "$1"
+}
+
+mcp_initialize_json() {
+  python3 -c 'import json; print(json.dumps({
+"jsonrpc": "2.0",
+"id": 1,
+"method": "initialize",
+"params": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {},
+    "clientInfo": {"name": "atlas-public-smoke", "version": "1.0"},
+},
+}))'
+}
+
+mcp_tools_list_json() {
+  python3 -c 'import json; print(json.dumps({
+"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+}))'
+}
+
+mcp_scope_list_json() {
+  python3 -c 'import json; print(json.dumps({
+"jsonrpc": "2.0",
+"id": 3,
+"method": "tools/call",
+"params": {"name": "atlas.list_knowledge_scopes", "arguments": {"limit": 50}},
+}))'
+}
+
+mcp_research_json() {
+  python3 -c 'import json,sys; print(json.dumps({
+"jsonrpc": "2.0",
+"id": 4,
+"method": "tools/call",
+"params": {
+    "name": "atlas.research",
+    "arguments": {
+        "question": "Verify the selected public smoke scope",
+        "idempotency_key": "smoke-agent-research-after-revoke",
+        "scope": {"mode": "selected", "refs": [{"kind": "project", "id": sys.argv[1]}]},
+        "output_mode": "evidence_packet",
+    },
+},
+}))' "$project_id"
+}
+
+mcp_session_id() {
+  python3 -c 'import sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    name, separator, value = line.partition(":")
+    if separator and name.lower() == "mcp-session-id":
+        print(value.strip())
+        break' "$mcp_header_file"
 }
 
 admin_login_json() {
@@ -223,37 +288,102 @@ if printf '%s' "$agents" | grep -Fq "token_digest"; then
   exit 1
 fi
 
-agent_response="$(
+legacy_response="$(
   curl -sS -H "Authorization: Bearer ${raw_token}" \
     -H "Content-Type: application/json" \
     -X POST \
     --data "{\"project_id\":\"${project_id}\",\"query_text\":\"P1 smoke\",\"purpose\":\"local smoke\",\"idempotency_key\":\"smoke-agent-query\"}" \
     "${api_url}/api/v1/agent/queries" \
-    -w '\n%{http_code}'
+    -w $'\n%{http_code}'
 )"
-if [[ "${agent_response##*$'\n'}" != "501" ]]; then
-  echo "Authorized agent token did not reach deferred boundary" >&2
-  echo "$agent_response" >&2
+if [[ "${legacy_response##*$'\n'}" != "404" ]]; then
+  echo "Legacy Agent query route did not return 404" >&2
+  exit 1
+fi
+
+initialize_payload="$(mcp_initialize_json)"
+missing_bearer_response="$(
+  curl -sS \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$initialize_payload" \
+    "${api_url}/mcp" \
+    -w $'\n%{http_code}'
+)"
+if [[ "${missing_bearer_response##*$'\n'}" != "401" ]]; then
+  echo "MCP initialize without a bearer did not return 401" >&2
+  exit 1
+fi
+
+initialize_response="$(
+  curl -sS -D "$mcp_header_file" \
+    -H "Authorization: Bearer ${raw_token}" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$initialize_payload" \
+    "${api_url}/mcp"
+)"
+session_id="$(mcp_session_id)"
+if [[ -z "$session_id" || "$(printf '%s' "$initialize_response" | sse_json_field result.protocolVersion)" != "2025-06-18" ]]; then
+  echo "Valid opaque Agent bearer did not initialize exact /mcp" >&2
+  exit 1
+fi
+
+tools_response="$(
+  curl -fsS \
+    -H "Authorization: Bearer ${raw_token}" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Content-Type: application/json" \
+    -H "MCP-Session-Id: ${session_id}" \
+    -H "MCP-Protocol-Version: 2025-06-18" \
+    -X POST \
+    --data "$(mcp_tools_list_json)" \
+    "${api_url}/mcp"
+)"
+tool_names="$(
+  printf '%s' "$tools_response" | python3 -c 'import json,sys
+line=next(line[6:] for line in sys.stdin.read().splitlines() if line.startswith("data: "))
+payload=json.JSONDecoder().raw_decode(line)[0]
+print("|".join(sorted(tool["name"] for tool in payload["result"]["tools"])))'
+)"
+if [[ "$tool_names" != "atlas.get_research|atlas.list_knowledge_scopes|atlas.read_evidence|atlas.research" ]]; then
+  echo "MCP did not expose the exact four public Agent research tools" >&2
   exit 1
 fi
 
 api_delete "/api/v1/admin/projects/${project_id}/members/${grant_id}" >/dev/null
 
-revoked_grant_response="$(
-  curl -sS -H "Authorization: Bearer ${raw_token}" \
+scope_response="$(
+  curl -fsS \
+    -H "Authorization: Bearer ${raw_token}" \
+    -H "Accept: application/json, text/event-stream" \
     -H "Content-Type: application/json" \
+    -H "MCP-Session-Id: ${session_id}" \
+    -H "MCP-Protocol-Version: 2025-06-18" \
     -X POST \
-    --data "{\"project_id\":\"${project_id}\",\"query_text\":\"P1 smoke after revoke\",\"purpose\":\"local smoke\",\"idempotency_key\":\"smoke-agent-query-after-revoke\"}" \
-    "${api_url}/api/v1/agent/queries" \
-    -w '\n%{http_code}'
+    --data "$(mcp_scope_list_json)" \
+    "${api_url}/mcp"
 )"
-if [[ "${revoked_grant_response##*$'\n'}" != "403" ]]; then
-  echo "Revoked agent permission did not block Agent API" >&2
-  echo "$revoked_grant_response" >&2
+if printf '%s' "$scope_response" | grep -Fq "$project_id"; then
+  echo "Revoked Project grant remained visible in current MCP scope discovery" >&2
   exit 1
 fi
-if ! printf '%s' "$revoked_grant_response" | grep -Fq "agent_project_access_denied"; then
-  echo "Revoked agent permission returned the wrong denial reason" >&2
-  echo "$revoked_grant_response" >&2
+
+research_response="$(
+  curl -fsS \
+    -H "Authorization: Bearer ${raw_token}" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Content-Type: application/json" \
+    -H "MCP-Session-Id: ${session_id}" \
+    -H "MCP-Protocol-Version: 2025-06-18" \
+    -X POST \
+    --data "$(mcp_research_json)" \
+    "${api_url}/mcp"
+)"
+if [[ "$(printf '%s' "$research_response" | sse_json_field result.isError)" != "True" ]] || \
+  ! printf '%s' "$research_response" | grep -Fq "agent_research_scope_denied"; then
+  echo "Revoked Project grant did not fail closed for MCP research" >&2
   exit 1
 fi

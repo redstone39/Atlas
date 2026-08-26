@@ -39,8 +39,10 @@ Atlas is designed for people who want to:
 - run a complete knowledge workspace locally with Docker Compose;
 - separate document and Note access by Project or Team;
 - compare a normal General answer flow with a bounded In-depth review flow;
+- let an opaque Agent token run one-round, packet-first research over currently
+  authorized Project knowledge through exact `/mcp`;
 - inspect protected evidence and auditable execution state instead of treating
-  a model response as an opaque chat result;
+  a model or Agent result as opaque;
 - study a source-visible implementation of governed retrieval, collaborative
   Notes, identity integration, processing plugins, and agentic engineering.
 
@@ -71,10 +73,13 @@ Documents and Notes
 Governed processing and scoped access
         ↓
 Project / Team knowledge
-        ↓
-General (standard) or In-depth (deep) conversation
-        ↓
-Answer, protected evidence, and auditable execution state
+        ├─→ General or In-depth conversation
+        │       ↓
+        │   Answer, protected evidence, and auditable execution state
+        └─→ one-round Agent research over exact /mcp
+                ↓
+            immutable research packet, optional governed answer,
+            protected evidence, and separate Admin audit
 ```
 
 ## Local quick start
@@ -157,6 +162,26 @@ that document can be inspected under your current access.
 No sample knowledge, private test documents, Provider keys, or expected model
 answers are included in the public snapshot.
 
+### Milestone 4 — Evaluate one-round MCP Agent research
+
+A System Admin can create an Agent identity, issue its opaque bearer token, and
+grant it Project access. An MCP 2025-06-18 client connects to exact `/mcp` and
+sees exactly four tools: `atlas.list_knowledge_scopes`, `atlas.research`,
+`atlas.get_research`, and `atlas.read_evidence`.
+
+The client first discovers current scopes, submits one research request, polls
+the returned research identifier until an immutable research packet is
+available, then reads selected protected evidence. A governed answer is
+optional and remains bound to that packet; it never replaces the packet as the
+primary result. Replay with the same Agent and idempotency key returns the same
+accepted result only when the request fingerprint matches. Fresh requests and
+all evidence reads recheck current authorization.
+
+This is a local technical-evaluation interface. The default transport accepts
+localhost Host/Origin values only. See [Configuration](docs/configuration.md)
+before placing an operator-managed reverse proxy in front of `/mcp`; setting a
+public URL does not make this snapshot Internet Ready.
+
 ## Status and supported use
 
 | Evaluation path | Current status |
@@ -165,6 +190,8 @@ answers are included in the public snapshot.
 | Guided first-run setup | Browser claim for the first System Admin, then resumable Model, Project, Document, and Review steps |
 | Local identity, governed document processing, scoped conversations, and Notes | Supported in the resettable evaluation lifecycle |
 | Provider connections and model routes | Configurable by System Admin; credentials are not included |
+| One-round MCP Agent research | Supported for loopback technical evaluation through exact `/mcp`; packet-first result, optional governed answer |
+| System Admin Agent Research Audit | Separate list, detail, runtime, and protected-evidence views |
 | LDAP / Active Directory | Shipped unconfigured; live interoperability is not verified here |
 | Portainer with SMB | Guides and audits exist; real-environment operation is not verified |
 | Public Internet deployment | Not supported |
@@ -195,8 +222,9 @@ reasoning, configuration, deployment, and lifecycle contracts.
 
 *System Admin exposes identity, Projects and Teams, the document library,
 Models, Skill slots, conversation-learning admission, processing plugins,
-agents, audit, system status, language, theme, Notes checkpoint settings, and a
-way to reopen guided setup. The pictured account is local evaluation data.*
+agents, separate conversation/operation/Agent-research audit journeys, system
+status, language, theme, Notes checkpoint settings, and a way to reopen guided
+setup. The pictured account is local evaluation data.*
 
 ## How Atlas is built
 

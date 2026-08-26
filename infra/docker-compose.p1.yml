@@ -138,6 +138,7 @@ services:
       ATLAS_CREDENTIAL_MASTER_KEY_ID: ${ATLAS_CREDENTIAL_MASTER_KEY_ID:-}
       ATLAS_CREDENTIAL_MASTER_KEY_FILE: /run/atlas/secrets/credentials/active_key
       ATLAS_CREDENTIAL_MASTER_KEY_ID_FILE: /run/atlas/secrets/credentials/key_id
+      ATLAS_MCP_PUBLIC_URL: ${ATLAS_MCP_PUBLIC_URL:-}
       ATLAS_PLUGIN_RUNNER_URL: http://plugin-runner:8013
       ATLAS_OFFICE_RENDERER_URL: http://office-renderer:8014
       ATLAS_REDIS_URL: redis://redis:6379/0

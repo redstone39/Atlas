@@ -131,3 +131,17 @@ For a browser on another host, `ATLAS_NOTES_COLLABORATION_PUBLIC_URL` must name
 the separately secured browser-reachable `ws://` or `wss://` endpoint. Changing
 the host bind or adding TLS/reverse proxy exposure is outside this local
 loopback-only path.
+
+The MCP Agent research carrier is mounted on the existing API service at exact
+`/mcp`; the Compose stack adds no MCP service or port. With
+`ATLAS_MCP_PUBLIC_URL` empty, only localhost/`127.0.0.1` Host and Origin values
+are accepted. Keep this default for the supported local path.
+
+If an operator separately places a secured reverse proxy in front of MCP, set
+`ATLAS_MCP_PUBLIC_URL` to its HTTP(S) origin or exact `/mcp` URL. The proxy must
+preserve the original `Host` and `Origin`, forward `Authorization`,
+`MCP-Session-Id`, and `MCP-Protocol-Version`, and pass Streamable HTTP responses
+without buffering or rewriting. The operator owns TLS, authentication, rate and
+size limits, timeouts, logging controls, firewalling, and abuse protection.
+Invalid public-URL syntax fails API startup. This input does not make the
+snapshot Internet Ready or authorize changing the loopback port bindings.

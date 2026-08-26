@@ -53,7 +53,22 @@ initializer.
     an eligible completed, nonblank assistant answer. The Workspace shows the
     server-confirmed current value; System Admin sees that value and its
     last-modified time through the read-only audit transcript.
-11. Every later protected read recomputes current authorization and checks exact
+11. An opaque Agent bearer initializes exact `/mcp`, discovers currently
+    authorized Project scopes, and submits one bounded, single-round research
+    request. The accepted record freezes the exact request fingerprint,
+    authority/resource snapshot, and route/budget identity before execution.
+12. Agent Runtime owns accepted research, exact idempotent replay, and the
+    immutable `ResearchPacketV1`. Turn Runtime owns shared execution state and
+    the discriminated research terminal ref/digest; one owner-local PostgreSQL
+    transaction publishes both sides or neither.
+13. The packet is the primary result. A governed Answer is optional and must
+    reference the same packet. MCP is transport only; it owns no research,
+    authorization, evidence, or lifecycle state.
+14. System Admin reviews accepted and denied Agent research through a separate
+    Agent Research Audit list/detail/runtime/evidence journey. Retrieval remains
+    authoritative for protected evidence and rechecks current access and exact
+    lineage before returning content.
+15. Every later protected read recomputes current authorization and checks exact
     artifact lineage.
 
 ## Authority
@@ -100,6 +115,18 @@ initializer.
   authority.
 - `turn_execution` coordinates work; `turn_runtime` owns execution state,
   leases, budgets, events, and terminal transitions.
+- Agent Runtime owns accepted research, its request fingerprint and immutable
+  authorization/resource snapshot, exact replay identity, the packet-first
+  terminal result, and optional packet-bound governed Answer.
+- Turn Runtime owns execution state and the `conversation_answer|research_packet`
+  terminal result union. A stateless single-caller transaction coordinator
+  atomically publishes matching Agent packet and Turn terminal references; it
+  is not an owner or recovery service.
+- The official MCP Streamable HTTP application is a transport mounted at exact
+  `/mcp`. It exposes exactly four research tools and has no durable authority.
+- Agent Research Audit is a stateless System Admin projection over Agent
+  Runtime, Turn Runtime, generic audit events, and protected Retrieval reads.
+  It does not share Conversation Audit state.
 - The embedding contract owns its model name, revision, allowlist, and content
   digest. `embedding-model-init` verifies and initializes the shared offline
   cache; its image and volume are carriers, not a second model authority.
@@ -116,6 +143,18 @@ Architecture ownership and dependency direction are executable in
 - A conversation's optional Team/Project selection is immutable. Fresh and
   retry execution intersects it with current ACLs; an empty result remains empty
   rather than reverting to default-all.
+- Agent research acceptance uses current identity and Project ACLs before
+  allocating durable research/execution identifiers. The accepted scope and
+  resource snapshot are immutable for that execution, so an accepted execution
+  can finish after later revocation.
+- Exact replay by the same Agent and idempotency key returns the accepted
+  identity only when the complete request fingerprint matches. A fresh
+  idempotency key reauthorizes; scope discovery and protected evidence reads
+  always use current access.
+- A research terminal result is valid only when Agent Runtime and Turn Runtime
+  contain the same packet reference and digest. Missing, mismatched, or
+  one-sided state fails closed; a research packet is never projected as a
+  Conversation Answer.
 - Direct Team Admin or exact-scope Project Admin authority may bypass a
   document's member-download flag only for that document's exact owner scope,
   and the same capability is rechecked at terminal byte I/O.
@@ -273,13 +312,15 @@ slots**; the runtime and ownership terms below remain the precise contract.
   Provider/model routes with independent text/vision defaults, explicit
   LDAP/Active Directory transport and scoped imports, conversation-learning
   admission, Notes settings, guided-setup re-entry, plugins, agents/tokens,
-  safe audit events, ordered completed-turn safe actions, and latest-only
-  read-only feedback in conversation inspection. Candidate
-  mutations require matching request identity and draft revision; stale
-  preconditions fail closed. Turn Experience and pre-candidate pipeline recovery
-  have no Admin or Web surface.
-- Agent query management exists, but `POST /api/v1/agent/queries` currently
-  returns `501 feature_deferred`.
+  safe operation events, Conversation Audit, and a separate Agent Research
+  Audit directory with packet-first detail, bounded runtime, and protected
+  evidence. Candidate mutations require matching request identity and draft
+  revision; stale preconditions fail closed. Turn Experience and pre-candidate
+  pipeline recovery have no Admin or Web surface.
+- Agent: exact `/mcp` provides current scope discovery, one-round research,
+  terminal polling, and protected evidence reads. Agent Runtime owns immutable
+  accepted research and packets; optional governed Answers remain packet-bound.
+  The legacy REST carrier has no alias and is absent from OpenAPI.
 
 ## Data lifecycle
 

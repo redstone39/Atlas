@@ -176,6 +176,32 @@ Route changes affect only newly accepted executions. Admin diagnostics use the
 policy snapshot stored with the execution and do not reinterpret historical
 usage with the current route.
 
+## MCP Agent research transport
+
+The API mounts the official MCP v2 Streamable HTTP transport at exact `/mcp`.
+It uses Agent opaque bearer tokens issued by System Admin and exposes exactly
+four tools: scope discovery, one-round research, terminal polling, and protected
+evidence reads.
+
+`ATLAS_MCP_PUBLIC_URL` is optional. When empty, DNS-rebinding protection accepts
+only localhost/`127.0.0.1` Host and Origin values. A non-empty value must be an
+HTTP(S) origin or that origin plus exact `/mcp`, for example
+`https://atlas.example` or `https://atlas.example/mcp`. Credentials, query
+strings, fragments, and any other path are invalid. The API fails startup with
+`ATLAS_MCP_PUBLIC_URL must be an http(s) origin or exact /mcp URL` rather than
+weakening the policy. The normalized runtime endpoint always ends in `/mcp`.
+
+For an operator-managed reverse proxy, preserve the original `Host` and
+`Origin`, forward `Authorization`, `MCP-Session-Id`, and
+`MCP-Protocol-Version`, and support long-lived Streamable HTTP responses without
+buffering or response rewriting. Terminate TLS and provide authentication,
+rate limits, request-size/time limits, logging controls, and abuse protection
+outside this repository.
+
+Setting `ATLAS_MCP_PUBLIC_URL` only configures the transport's exact external
+origin. It does not open a new service or port, configure TLS or a proxy, or
+make this public snapshot Internet Ready.
+
 ## Runtime inputs
 
 - PostgreSQL: `ATLAS_PRODUCTION_DATABASE_URL`
@@ -192,6 +218,8 @@ usage with the current route.
   `ATLAS_NOTES_COLLABORATION_INTERNAL_SECRET`,
   `ATLAS_NOTES_COLLABORATION_TICKET_SECRET`,
   `ATLAS_NOTES_COLLABORATION_PUBLIC_URL`
+- MCP Agent research transport: `ATLAS_MCP_PUBLIC_URL` (optional; localhost-only
+  Host/Origin policy when empty)
 - Offline caches: `ATLAS_FASTEMBED_CACHE`, `TIKTOKEN_CACHE_DIR`,
   `ATLAS_EMBEDDING_OFFLINE`. Compose initializes the pinned embedding cache from
   the separate model image before API and processing/indexing consumers start;

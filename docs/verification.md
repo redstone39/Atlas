@@ -24,6 +24,44 @@ infra/scripts/audit_provider_key_cutover
 infra/scripts/audit_third_party_notices
 ```
 
+## Agent research contracts
+
+Run the public synthetic API/MCP/Admin checks without bytecode or pytest cache
+artifacts:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=api/src \
+  uv run --project api pytest -p no:cacheprovider -q \
+  api/tests/test_public_agent_research.py \
+  api/tests/test_openapi_schema_app.py \
+  api/tests/test_t060_schema_audits.py
+```
+
+For durable acceptance, immutable replay, revocation, and atomic publication,
+use only a dedicated disposable PostgreSQL database whose name starts with
+`atlas_baseline_test_`:
+
+```sh
+ATLAS_TEST_POSTGRES_URL='postgresql+psycopg://atlas:atlas@127.0.0.1:5432/atlas_baseline_test_public_agent_research' \
+  api/scripts/check-postgres
+```
+
+The database check resets that database's public schema. Never point it at a
+shared or retained database.
+
+Verify the feature-local System Admin consumer and production routes:
+
+```sh
+npm --prefix web test -- src/app/atlas-app.public-agent-research.test.tsx
+npm --prefix web run typecheck
+npm --prefix web run build
+```
+
+These checks cover exact `/mcp`, its four tools, authorization/replay/atomic
+contracts, and Web list/detail/runtime/evidence states. They do not exercise a
+browser, live Provider, real documents, target reverse proxy/TLS, or production
+operation.
+
 ## Public snapshot boundary
 
 The publication-boundary audit checks either the staged index or the committed
@@ -82,20 +120,29 @@ This targeted cleanup differs from `api/scripts/check-postgres`, which resets
 the database's public schema. PostgreSQL integration tests enforce the same
 dedicated-test-database naming boundary.
 
-## P1 agent-access smoke
+## P1 Agent MCP initialization smoke
 
 Prerequisites: Docker with Compose, `curl`, Python 3, and OpenSSL. Assign a unique
-disposable Compose project; the script starts the P1 stack, claims a generated
-first administrator, exercises agent-token grant and revocation, and removes
-only that named project's volumes on exit:
+disposable Compose project. The script starts the P1 stack, claims a generated
+first administrator, creates an Agent/token/Project grant, and verifies:
+
+- the removed legacy Agent query route returns `404`;
+- MCP initialize without a bearer returns `401`;
+- the opaque Agent bearer initializes exact `/mcp` and lists exactly four tools;
+- PostgreSQL retains the Agent and token fingerprint without exposing the raw
+  token; and
+- revoking the Project grant removes it from current scope discovery and makes
+  a fresh research call fail closed.
 
 ```sh
-ATLAS_PRODUCTION_COMPOSE_PROJECT="atlas-p1-owner-smoke-$(date +%s)" \
+ATLAS_PRODUCTION_COMPOSE_PROJECT="atlas-public-mcp-smoke-$(date +%s)" \
   infra/scripts/smoke_p1_agent_access
 ```
 
-Exit status `0` is the success evidence. This is an API/HTTP smoke and provides
-no browser evidence.
+Exit status `0` is HTTP/MCP initialization and authorization evidence. The
+script removes only its named project's volumes on exit. It does not run a live
+Provider research answer and provides no browser, visual, real-data,
+reverse-proxy/TLS, or production evidence.
 
 ## P2 RBAC smoke
 
